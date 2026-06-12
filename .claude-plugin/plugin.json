@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "forge",
+  "version": "0.1.0",
+  "description": "AI-assisted engineering framework: a two-gate design loop (grill -> implement -> review -> compound) for solo greenfield product builds. Provides /forge:start, /forge:grill, and /forge:compound.",
+  "author": {
+    "name": "dazing"
+  },
+  "repository": "https://github.com/dazing/forge",
+  "license": "MIT",
+  "keywords": ["workflow", "process", "design-loop", "dotnet", "react"]
+}
