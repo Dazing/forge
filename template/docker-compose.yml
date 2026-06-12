@@ -1,0 +1,41 @@
+# Local full-stack run: api + web + postgres.
+# One clone, one compose, one deployable unit per product (forge ADR 0009).
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: forge
+      POSTGRES_PASSWORD: forge
+      POSTGRES_DB: forge
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./api
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Default: Host=db;Port=5432;Database=forge;Username=forge;Password=forge
+    ports:
+      - "5283:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./web
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+volumes:
+  db-data:
