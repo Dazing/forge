@@ -1,0 +1,27 @@
+{
+  // Dev container for a forge product: .NET 10 + Node LTS, nothing else.
+  //
+  // SANDBOX RULE (forge ADR 0013): NO cloud tooling. This container deliberately
+  // ships no az / terraform / kubectl / cloud-credential features. The agent gets
+  // the repo and the local toolchain only. Infrastructure changes happen as code in
+  // PRs that CI/ArgoCD apply after a human merge — the agent proposes infra,
+  // pipelines apply it. Do not add cloud CLIs or mount kubeconfigs here.
+  "name": "forge-product",
+  "image": "mcr.microsoft.com/devcontainers/dotnet:1-10.0",
+  "features": {
+    // Node LTS for the web/ app. No cloud features (see SANDBOX RULE above).
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    }
+  },
+  "forwardPorts": [5283, 5173, 5432],
+  "postCreateCommand": "cd web && npm install",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-dotnettools.csdevkit",
+        "dbaeumer.vscode-eslint"
+      ]
+    }
+  }
+}
