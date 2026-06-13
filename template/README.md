@@ -49,3 +49,11 @@ sizing scheme, and the implementation rules. In short, each unit of work is:
 
 `/forge:start` → `/forge:grill` (gate 1: approve the brief) → implement → review
 (gate 2: merge the PR) → `/forge:compound`.
+
+## Sandbox
+
+This repo requires sessions to run inside a **credential-free sandbox**
+(`.forge.json` → `"sandbox": "required"`; forge ADR 0013/0016). Start every session
+inside an approved boundary — Docker Sandboxes or the hardened fallback devcontainer.
+See [`SANDBOX.md`](./SANDBOX.md) for the per-host-class setup, the egress allowlist,
+and the scoped-PAT guide. The forge plugin warns loudly if you start on the bare host.

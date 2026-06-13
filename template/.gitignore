@@ -31,3 +31,7 @@ yarn-error.log*
 .env
 .env.*
 !.env.example
+# Boundary secrets (e.g. the scoped GitHub PAT for the fallback devcontainer).
+# Never commit these — see SANDBOX.md.
+.devcontainer/*.env
+.devcontainer/secrets.env
