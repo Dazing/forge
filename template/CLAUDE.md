@@ -33,6 +33,22 @@ Every unit of work runs the two-gate loop. The plugin commands drive it:
 The only mandatory human acts are **brief approval** and **PR merge**. Everything between
 is the AI's lane.
 
+## Sandbox (these bind every session)
+
+This repo declares `.forge.json` → `"sandbox": "required"` (forge ADR 0013/0016).
+Sessions run inside a **credential-free boundary** (Docker Sandboxes or the hardened
+fallback devcontainer), which exports `FORGE_SANDBOX`. The forge plugin's `SessionStart`
+guard hook warns loudly if a session starts on the bare host.
+
+- **Never** add cloud tooling, mount cloud config (`~/.azure`, `~/.aws`, `~/.kube`,
+  `~/.config/gcloud`), or pass cloud env vars into the boundary. Infra is code in PRs
+  that pipelines apply after a human merge — the agent proposes infra, never applies it.
+- The boundary's only credential is a **per-repo scoped GitHub PAT** (`GH_TOKEN`).
+- Setup, egress allowlist, and PAT guide live in [`SANDBOX.md`](./SANDBOX.md).
+- If the guard hook fires (you're on the bare host), **stop** and tell the user to
+  restart inside the boundary. The only sanctioned bypass is `FORGE_SANDBOX_OVERRIDE=1`
+  (loud, discouraged).
+
 ## Stack
 
 - `api/` — ASP.NET Core minimal API (.NET 10) + xUnit tests. Solution: `api/Forge.slnx`.

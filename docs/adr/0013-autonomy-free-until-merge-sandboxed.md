@@ -1,6 +1,7 @@
 # 0013 — Autonomy: free until merge, sandboxed
 
-**Status:** Accepted
+**Status:** Accepted · enforced by **[ADR 0016](0016-sandbox-boundary-docker-sandboxes.md)**
+(sandbox boundary: Docker Sandboxes + guard hook)
 
 ## Context
 
