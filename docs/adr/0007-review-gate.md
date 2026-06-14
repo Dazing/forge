@@ -1,6 +1,7 @@
 # 0007 — Review gate: AI pre-review, then guided walkthrough
 
-**Status:** Accepted
+**Status:** Accepted · **Amended by:** ADR 0017 (the pre-review gains a test-meaningfulness
+dimension: each acceptance criterion maps to a test asserting on observable behavior).
 
 ## Context
 

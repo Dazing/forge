@@ -26,9 +26,15 @@ Every unit of work runs the two-gate loop. The plugin commands drive it:
 1. **Brief-bound scope** — implement only what the approved brief says. If reality
    contradicts the brief, **stop and surface it**; a deviation is a design conversation,
    never an improvisation.
-2. **Acceptance criteria become tests** — M/L work does not hand off without them.
+2. **Red-green-refactor by default (M/L)** — acceptance criteria become tests written
+   *before* the implementation, derived from requirements, not reverse-engineered from
+   code. The default is red → green → refactor for any work with behavior worth
+   specifying. A brief may mark a unit or specific parts `no-TDD: <reason>` (glue, UI
+   wiring, config) — the skip is explicit, never silent. S chores are exempt.
 3. **Verified handoff** — build + tests + lint run and the behavior is demonstrated
-   (endpoint exercised, UI checked) before review is requested. Report results honestly.
+   (endpoint exercised, UI checked) before review is requested. For M/L, handoff includes
+   the **red transcript** (tests failing against a missing/stub implementation) alongside
+   the green run — green alone does not prove a test can fail. Report results honestly.
 
 The only mandatory human acts are **brief approval** and **PR merge**. Everything between
 is the AI's lane.

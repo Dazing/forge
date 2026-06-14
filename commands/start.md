@@ -42,13 +42,17 @@ Pick the single most sensible next unit (honor the user's steer if given, else
 SESSION.md "Next", else the most valuable open thread). Classify its size and say why:
 
 - **S — Chore** (rename, dep bump, copy change, config tweak): no grill. You will just
-  implement it with a light human glance at the end.
+  implement it with a light human glance at the end. Exempt from TDD (ADR 0017).
 - **M — Task** (a new endpoint or feature *within existing patterns*): a **mini-grill**,
   3–6 targeted questions. Brief is a short bullet list.
 - **L — Decision** (introduces a new pattern, dependency, data shape, or external
   service): a **full grill** → brief + an ADR if a decision surfaced. The trigger
   question that pushes something to L is: **"does this constrain future code?"** If yes,
   it is L.
+
+M/L implementation runs **red-green-refactor by default** (ADR 0017): tests are written
+red-first from the requirements, with a named `no-TDD: <reason>` opt-out for parts with no
+behavior worth specifying. S chores are exempt.
 
 State the size, the one-line reason, and what the next step will be (`/forge:grill` for
 M/L; direct implementation for S).
