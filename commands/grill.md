@@ -54,8 +54,13 @@ When you have enough to write their design down — not before — assemble it i
   - **Problem** — from their answers.
   - **Approach** — the shape they chose.
   - **Out of scope** — the boundaries they drew.
-  - **Acceptance criteria** — the done-checklist (becomes tests for M/L).
+  - **Acceptance criteria** — the done-checklist. For M/L these become tests written
+    red-first (red-green-refactor is default-on; ADR 0017).
 - Keep it sized: a tight bullet list for M, fuller prose for L.
+- **Opt-out convention:** if a unit or part of it has no behavior worth specifying (glue,
+  UI wiring, config), mark it `no-TDD: <one-line reason>` in the Approach or Acceptance
+  section. The skip is explicit and reasoned, never silent. S chores are exempt and need
+  no note.
 
 ## Output: an ADR, only if a decision surfaced
 
@@ -80,9 +85,15 @@ bind the implementation (these are non-negotiable and define the AI's lane until
 1. **Brief-bound scope** — implement only what the approved brief says. If reality
    contradicts the brief, **STOP and surface it** as a design conversation; never
    improvise around it, never silently expand scope.
-2. **Acceptance criteria become tests** — for M/L, the work does not hand off without
-   tests covering the acceptance criteria, written with the code.
+2. **Red-green-refactor by default (M/L)** — acceptance criteria become tests written
+   *before* the implementation, derived from the requirements, and run red (failing
+   against a missing/stub implementation) before code turns them green; then refactor with
+   tests staying green. The default is on for any M/L work with behavior worth specifying.
+   A unit or specific parts may be marked `no-TDD: <reason>` in the brief (glue, UI wiring,
+   config) — the skip is explicit, never silent. S chores are exempt (ADR 0017).
 3. **Verified handoff** — before review you will run build + tests + lint and demonstrate
-   the behavior (exercise the endpoint, check the UI), reporting results honestly.
+   the behavior (exercise the endpoint, check the UI), reporting results honestly. For M/L,
+   the handoff includes the **red transcript** (tests failing before the implementation
+   existed) alongside the green run — green alone does not prove a test can fail.
 
 Then stop. Implementation is the next step, not part of the grill.

@@ -1,6 +1,7 @@
 # 0006 — Implementation rules: brief-bound + verified handoff
 
-**Status:** Accepted
+**Status:** Accepted · **Amended by:** ADR 0017 (rule 2's "strict TDD is opt-in" is
+superseded by red-green-refactor default-on for M/L; rule 3 gains the red transcript).
 
 ## Context
 
