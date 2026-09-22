@@ -1,4 +1,0 @@
-<Solution>
-  <Project Path="Forge.Api.Tests/Forge.Api.Tests.csproj" />
-  <Project Path="Forge.Api/Forge.Api.csproj" />
-</Solution>
