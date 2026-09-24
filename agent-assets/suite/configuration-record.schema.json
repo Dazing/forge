@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "factory benchmark configuration record",
+  "type": "object",
+  "properties": {
+    "schema_version": { "const": 1 },
+    "model_endpoint_revision": { "type": "string", "minLength": 1 },
+    "inference_runtime": { "type": "string", "minLength": 1 },
+    "context_limit": { "type": "integer", "minimum": 1 },
+    "tool_parser": { "type": "string", "minLength": 1 },
+    "reasoning_parser": { "type": "string", "minLength": 1 },
+    "temperature": { "type": "number", "minimum": 0 },
+    "sampling": { "type": "object", "properties": { "top_p": { "type": "number" }, "max_tokens": { "type": "integer" } }, "additionalProperties": false },
+    "harness": { "type": "string", "minLength": 1 },
+    "asset_commit": { "type": "string", "minLength": 1 },
+    "asset_digest": { "type": "string", "minLength": 1 },
+    "repository_sha": { "type": "string", "minLength": 1 },
+    "limits": {
+      "type": "object",
+      "required": ["max_steps", "wall_clock_seconds"],
+      "properties": {
+        "max_steps": { "type": "integer", "minimum": 1 },
+        "wall_clock_seconds": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "concurrent_sessions": { "type": "integer", "minimum": 1 }
+  },
+  "required": ["schema_version", "model_endpoint_revision", "inference_runtime", "context_limit", "tool_parser", "reasoning_parser", "harness", "asset_commit", "asset_digest", "repository_sha", "limits", "concurrent_sessions"],
+  "additionalProperties": false
+}

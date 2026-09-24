@@ -1,0 +1,24 @@
+# Case: dashboard. Add a dashboard page spanning UI, API consumption, tests,
+# and routing.
+id: dashboard
+clean_checkout: true
+requirements:
+  - Add a dashboard page at /dashboard that reads from the existing API.
+  - Render the dashboard data with the repository's UI framework.
+  - Cover the page with unit tests and a routing test.
+acceptance_criteria:
+  - "A GET /dashboard request returns a 200 page that renders the API data."
+  - "The routing test asserts the page is reachable at /dashboard."
+  - "All unit tests for the dashboard component pass."
+technical_constraints:
+  - Use the existing UI framework and routing conventions; do not add a new
+    framework.
+  - The dashboard must consume the existing API endpoint; do not add a new
+    endpoint.
+expected_evidence:
+  - A new dashboard page file under the repository's pages/views convention.
+  - A routing entry that maps /dashboard to the new page.
+  - A passing unit test and routing test for the dashboard.
+risk_assertions: []
+gate_assertions:
+  - no manual gate is raised for this low-risk feature.

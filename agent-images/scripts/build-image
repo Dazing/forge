@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+#
+# agent-images/scripts/build-image
+#
+# Build and push the combined agent/runtime image from locked inputs, then
+# resolve the pushed registry manifest digest and write a pending-scan
+# approval record. It never exposes the human-readable commit tag as the
+# approved value — only the resolved image@sha256 is written to the record.
+#
+# Inputs (environment):
+#   IMAGE    — the registry reference WITHOUT a tag, e.g. registry.example.com/software-factory/agent-node-dotnet
+#   REGISTRY — optional, defaults to the host of $IMAGE
+#   LOCK     — optional, defaults to agent-images/images.lock
+#
+# Requires: docker (buildx), git, a writable registry.
+
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+
+LOCK="${LOCK:-agent-images/images.lock}"
+IMAGE="${IMAGE:?set IMAGE to the registry reference (no tag)}"
+REGISTRY="${REGISTRY:-$(python3 -c 'import urllib.parse,os;print(urllib.parse.urlparse(os.environ["IMAGE"]).netloc)')}"
+
+here="$(cd "$(dirname "$0")" && pwd)"
+PY="$(command -v python3)"
+
+# 1. Verify the lock before anything else; reject missing/mismatched inputs.
+"$here/verify-lock" --lock "$LOCK"
+
+# 2. Resolve exact locked values (never re-parse JSON by hand).
+platform="$( "$here/lock-get" --lock "$LOCK" platform reference_or_url )"
+base_ref="$( "$here/lock-get" --lock "$LOCK" playwright_dotnet_base reference_or_url )"
+node_sha="$( "$here/lock-get" --lock "$LOCK" node_archive sha256 )"
+node_url="$( "$here/lock-get" --lock "$LOCK" node_archive reference_or_url )"
+trivy_ref="$( "$here/lock-get" --lock "$LOCK" trivy reference_or_url )"
+trivy_digest="$( "$here/lock-get" --lock "$LOCK" trivy sha256 )"
+trivy_version="${trivy_ref##*:}"
+scanner_image="docker.io/aquasec/trivy@${trivy_digest}"
+
+# 3. Provenance: source commit + lock-file hash (this is the input_lock_sha256).
+source_commit="$(git rev-parse HEAD)"
+input_lock_sha256="$(sha256sum "$LOCK" | cut -d' ' -f1)"
+
+# 4. Temporary human-readable commit tag for the push. The digest, not this
+#    tag, is what gets recorded and published.
+short="${source_commit:0:12}"
+temp_tag="${IMAGE}:commit-${short}"
+
+echo "[build-image] building ${temp_tag} from ${base_ref} platform=${platform}"
+# --push (not --load): the digest is resolved from the registry in step 5, so
+# the image need not be loaded into a local store. --push and --load are
+# mutually exclusive in buildx; we only need the pushed manifest.
+docker buildx build \
+  --platform "$platform" \
+  --build-arg "NODE_SHA256=${node_sha}" \
+  --build-arg "NODE_URL=${node_url}" \
+  --build-arg "BASE_DIGEST=${base_ref#*@}" \
+  --build-arg "SOURCE_REVISION=${source_commit}" \
+  -t "$temp_tag" \
+  --push \
+  .
+
+# 5. Resolve the registry manifest digest for the pushed tag, per platform.
+digest="$(docker buildx imagetools inspect --platform "$platform" "$temp_tag" \
+  | sed -n 's/.*DIGEST \(sha256:[0-9a-f]\{64\}\).*/\1/p' | head -n1)"
+if [ -z "${digest:-}" ]; then
+  echo "[build-image] ERROR: could not resolve the pushed manifest digest" >&2
+  exit 1
+fi
+approved_image="${IMAGE}@${digest}"
+
+# 6. Write the pending-scan approval record. The scanner fields are known at
+#    build time (digest-pinned Trivy); only status flips to approved/blocked
+#    when scripts/scan-image finalizes the record.
+mkdir -p artifacts
+record="artifacts/agent-image-approval.json"
+report="artifacts/trivy-report.json"
+"$PY" - "$record" \
+  -- "${source_commit}" "${platform}" "${input_lock_sha256}" \
+  "${approved_image}" "${scanner_image}" "${trivy_version}" "${report}" "pending_scan" <<'PYEOF'
+import json, sys, pathlib
+(out, commit, platform, lock_sha, image, scanner, version, report, status) = sys.argv[1:]
+doc = {
+  "schema": "agent-images/schemas/agent-image-approval.schema.json",
+  "source_commit": commit,
+  "platform": platform,
+  "input_lock_sha256": lock_sha,
+  "image": image,
+  "scanner_image": scanner,
+  "scanner_version": version,
+  "report": report,
+  "status": status,
+}
+pathlib.Path(out).write_text(json.dumps(doc, indent=2) + "\n")
+print(f"[build-image] wrote {out}: {image} (status={status})")
+PYEOF
+
+echo "[build-image] approved image reference: ${approved_image}"
+# Emit only the digest reference; the tag is intentionally not the approved value.
+echo "${approved_image}"

@@ -1,0 +1,17 @@
+# Planner role policy. Exactly one command, a bounded skill set, a bounded
+# tool set, one output schema, one model alias, and a resource policy. The
+# bundle validator confirms every referenced asset exists under agent-assets/
+# and that the allowlists stay inside the bundle.
+role: planner
+command: commands/plan.md
+skills:
+  - skills/repo-conventions/SKILL.md
+tools:
+  - read-only-filesystem
+  - model-sidecar
+output_schema: schemas/plan.schema.json
+model_alias: factory-primary
+resource_policy:
+  max_steps: 60
+  wall_clock_seconds: 1800
+  network: model-sidecar-only

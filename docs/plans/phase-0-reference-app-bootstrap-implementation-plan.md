@@ -1,0 +1,94 @@
+# Implementation Plan: Phase 0 reference-app bootstrap
+
+## Outcome
+A TypeScript reference application conforms to the factory repository contract and exposes deterministic health, API, browser, image, and trusted deployment integration for all fixed-suite task shapes.
+
+## Acceptance criteria
+- `reference-app/` supplies executable `scripts/bootstrap`, `scripts/check`, `scripts/build`, and `scripts/browser-test`, with a digest-only `.factory.yaml` prepared to receive the approved agent image digest.
+- The app has a routed dashboard page that consumes an API endpoint, a deterministic health endpoint, and a small persisted domain boundary that makes localized bug, cross-cutting change, assumption, database-risk, authentication-risk, adversarial-review, and concurrency scenarios expressible.
+- Browser tests run against a disposable local server with fixed locale, timezone, viewport, and test data; trusted staging/production projects contain no application-checkout execution step.
+
+## Required skills
+- `saas-ui` — use before building the dashboard route so the reference UI has a purposeful, testable SaaS layout rather than a data-model dump.
+- `tdd` — use for API, state-transition, routing, and browser-observable contracts before implementation.
+- `vertical-slice-architecture` — governs the reference app's capability organization: dashboard and health are colocated slices with traceable route/handler/store/UI/test boundaries; shared code is stateless plumbing only; composition roots own routing and deployment wiring.
+
+## Repository findings
+- `docs/roadmap.md: Phase 0` — requires a small reference application exercising repository contract, health/deployment integration, and every fixed-suite task shape; deployment projects contain trusted pipeline code only.
+- `docs/technical-design.md: §6.1–§6.3` — fixes the repository scripts, manifest behavior, immutable image output, and digest-only deployment contract.
+- `docs/agentic-software-factory-plan.md: Representative workload` — fixes the eight task shapes the reference app must make testable.
+
+## Assumptions
+- Use TypeScript, React, Vite, and Express in a single `reference-app/` npm workspace; this implements the user-selected TypeScript application portion while keeping a simple local dev/test boundary.
+- Use SQLite for the app's disposable local state and provide a migration fixture solely to express database-risk tickets; it is not a production persistence design.
+
+
+## Vertical-slice architecture
+- The reference app is a TypeScript API/web host organized by user capabilities, not server/client/data technical layers.
+- The dashboard capability should be a colocated slice: route binding, request/response contract, handler/use-case logic, feature-owned store access, UI composition, and behavioral tests stay traceable together. Health is a separate operational slice with its own contract and test.
+- Feature-owned state stays with its feature. Shared code is limited to stateless HTTP/database plumbing and pure presentation utilities; shared code must not own dashboard state or business rules.
+- `app.ts`, route mounting, and trusted deployment projects are composition roots. Slices may depend on shared infrastructure but must not import another slice's internals; cross-feature access uses the owning feature's public surface.
+- The fixed-suite task shapes are behavioral scenarios over these capabilities, not permission to create one technical layer or one slice per test case.
+
+## Boundaries
+### In scope
+- Reference app TypeScript workspace, API, dashboard route, deterministic fixtures, contract scripts, browser checks, container build, `.factory.yaml`, and trusted deployment-project skeletons.
+
+### Out of scope
+- A production application, real staging/production credentials, CI runner provisioning, human authentication integrations, non-deterministic exploratory testing, or complete release workflow.
+
+### Must preserve
+- The app never stores deployment credentials; deployment runners later execute only trusted code from `deploy-staging/` or `deploy-production/`.
+- Contract scripts remain repository-relative executable files and do not accept arbitrary shell fragments.
+
+## Contracts and behavior
+- `GET /healthz` returns `{ "status": "ok" }` only after the local state store is ready; otherwise returns `503`.
+- `GET /api/dashboard` returns a stable JSON dashboard summary sourced from the domain store. `DashboardPage` renders loading, loaded, and API-error states and is registered at `/dashboard`.
+- `scripts/bootstrap` performs deterministic dependency/install setup; `scripts/check` runs unit/API checks; `scripts/build` emits the deployable artifact; `scripts/browser-test` starts the app using fixed `TZ=UTC`, `LANG=en_US.UTF-8`, a 1280x720 viewport, and seeded test data, then runs Playwright Chromium.
+- `.factory.yaml` declares only approved contract fields. The image value is a digest reference supplied through a checked-in `agent-image.digest` file generated by the image-pipeline plan; do not introduce a tag fallback.
+
+## Implementation steps
+1. **Create the TypeScript app workspace and factory contract scripts**
+   - Files: `reference-app/package.json`, `reference-app/package-lock.json`, `reference-app/tsconfig.json`, `reference-app/vite.config.ts`, `reference-app/.factory.yaml`, `reference-app/agent-image.digest`, `reference-app/scripts/{bootstrap,check,build,browser-test}`
+   - Symbols: npm scripts `test`, `test:browser`, `build`; executable contract scripts.
+   - Change: Pin package dependencies, create the four executable script entry points, set the manifest service/egress declarations, and make the agent image value read from the committed digest file.
+   - Preserve: Do not use a mutable image tag or add deployment credentials to the app.
+   - Depends on: None.
+2. **Implement deterministic health, dashboard API, and routed UI**
+   - Files: `reference-app/src/server/{app.ts,store.ts,health.ts,dashboard.ts}`, `reference-app/src/client/{main.tsx,App.tsx,routes/DashboardPage.tsx}`, `reference-app/src/shared/dashboard.ts`, `reference-app/src/**/*.test.ts(x)`
+   - Symbols: `createApp(store: DashboardStore): Express`, `DashboardStore`, `GET /healthz`, `GET /api/dashboard`, `DashboardPage`.
+   - Change: Implement a seeded SQLite-backed store, readiness-aware health route, dashboard summary API, and a dashboard UI route with observable loading/success/error behavior.
+   - Preserve: No real-user authentication or external service dependency; deterministic fixtures remain injectable for tests.
+   - Depends on: 1.
+3. **Make every benchmark task shape reproducible**
+   - Files: `reference-app/docs/task-shapes.md`, `reference-app/test/fixtures/seed.ts`, `reference-app/tests/dashboard.spec.ts`, `reference-app/migrations/001_initial.sql`
+   - Symbols: named task-shape entries `dashboard`, `localized-bug`, `cross-cutting-refactor`, `ambiguous-low-risk`, `database-risk`, `authentication-risk`, `adversarial-review`, `concurrency`.
+   - Change: Map each fixed-suite case to exact files, seeded fixture state, expected observable evidence, and an intentionally seeded reviewer-only defect fixture that ordinary checks omit by design.
+   - Preserve: The adversarial defect is isolated in test fixture/branch material, never enabled in the default app build.
+   - Depends on: 2.
+4. **Create trusted deployment project skeletons**
+   - Files: `deploy-staging/.gitlab-ci.yml`, `deploy-staging/README.md`, `deploy-production/.gitlab-ci.yml`, `deploy-production/README.md`
+   - Symbols: staging job input `release-manifest.json`; production manual job input immutable image digest.
+   - Change: Define pipeline skeletons that accept an existing release manifest/digest, record a health-check target contract, and explicitly prohibit cloning/executing application repository scripts.
+   - Preserve: No deployment credentials, application checkout, image rebuild, or automatic production job.
+   - Depends on: 1.
+
+## Caller and dependency updates
+- `ci-templates/templates/application-v1.yml` — validates this app manifest and invokes its four scripts.
+- `agent-images/` — writes the approved immutable agent-image reference consumed by `reference-app/agent-image.digest`.
+- `agent-assets/suite/cases/*` — references the task-shape mapping and deterministic fixture IDs.
+
+## Verification
+- Command: `npm --prefix reference-app run test:browser`
+- Proves: the app starts through its repository contract, `/healthz` and `/api/dashboard` are usable, and Chromium observes the dashboard route with seeded data.
+- Success evidence: exit status 0 with Playwright reporting the dashboard scenario passed.
+- Not covered: real staging/production deployment and all eight agent benchmark runs.
+
+## Executor constraints
+- Treat this file as the complete implementation specification; do not reopen the original request.
+- Read the named target files before editing, but do not repeat the planner's discovery searches.
+- Follow the named files, symbols, contracts, steps, boundaries, and verification command exactly.
+- Do not add work not listed under **In scope**.
+- If the repository no longer matches a stated finding, stop expanding the search, report the exact discrepancy, and make only the smallest inspection needed to resolve it.
+- Load every skill under **Required skills** before editing. Load an additional skill only when new repository evidence makes it applicable; do not use skill loading to restart research.
+- After the focused verification passes, stop. Do not run broader checks or continue polishing.

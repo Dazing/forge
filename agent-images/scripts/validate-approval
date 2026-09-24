@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Validate an agent-image-approval.json record against its JSON schema.
+
+The schema (agent-images/schemas/agent-image-approval.schema.json) is a
+draft-2020-12 document. This validator uses only the Python standard library
+so it runs in CI without an extra dependency; it implements the subset of
+JSON-Schema used by the approval record: required, type, const, enum,
+pattern, minLength, and additionalProperties.
+
+Usage:
+  validate-approval --record <approval.json> --schema <schema.json>
+Exit 0 when the record is valid; non-zero otherwise, with the first failure.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+
+
+def type_ok(value: object, t: object) -> bool:
+    if t == "string":
+        return isinstance(value, str)
+    if t == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if t == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if t == "boolean":
+        return isinstance(value, bool)
+    if t == "array":
+        return isinstance(value, list)
+    if t == "object":
+        return isinstance(value, dict)
+    if t == "null":
+        return value is None
+    return True
+
+
+def validate(record: dict, schema: dict, path: str = "") -> list[str]:
+    errors: list[str] = []
+    where = path or "<record>"
+
+    for req in schema.get("required", []):
+        if req not in record:
+            errors.append(f"{where}: missing required field {req!r}")
+
+    t = schema.get("type")
+    if t and not type_ok(record, t):
+        errors.append(f"{where}: expected type {t!r}, got {type(record).__name__}")
+        return errors
+
+    if "const" in schema and record.get("schema") != schema.get("const"):
+        # const only applies to the top-level `schema` key in this document.
+        pass
+
+    props = schema.get("properties", {})
+    if isinstance(record, dict):
+        for key, subschema in props.items():
+            if key not in record:
+                continue
+            val = record[key]
+            sub_where = f"{where}.{key}"
+            st = subschema.get("type")
+            if st and not type_ok(val, st):
+                errors.append(f"{sub_where}: expected type {st!r}, got {type(val).__name__}")
+                continue
+            if "const" in subschema and val != subschema["const"]:
+                errors.append(f"{sub_where}: expected const {subschema['const']!r}, got {val!r}")
+            if "enum" in subschema and val not in subschema["enum"]:
+                errors.append(f"{sub_where}: value {val!r} not in enum {subschema['enum']}")
+            if "pattern" in subschema and isinstance(val, str) and not re.search(subschema["pattern"], val):
+                errors.append(f"{sub_where}: value {val!r} does not match pattern {subschema['pattern']!r}")
+            if "minLength" in subschema and isinstance(val, str) and len(val) < subschema["minLength"]:
+                errors.append(f"{sub_where}: shorter than minLength {subschema['minLength']}")
+
+        if schema.get("additionalProperties") is False:
+            for key in record:
+                if key not in props:
+                    errors.append(f"{where}: unexpected additional property {key!r}")
+
+    return errors
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--record", required=True)
+    ap.add_argument("--schema", required=True)
+    args = ap.parse_args()
+
+    record = json.loads(open(args.record, encoding="utf-8").read())
+    schema = json.loads(open(args.schema, encoding="utf-8").read())
+
+    errors = validate(record, schema)
+    if errors:
+        for e in errors:
+            print(f"validate-approval: FAIL: {e}", file=sys.stderr)
+        return 1
+
+    status = record.get("status")
+    print(f"validate-approval: OK — record validates ({args.record}) status={status}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

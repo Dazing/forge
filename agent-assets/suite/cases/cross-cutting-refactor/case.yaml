@@ -1,0 +1,21 @@
+# Case: cross-cutting-refactor. Change behavior across several files without
+# changing the public contract.
+id: cross-cutting-refactor
+clean_checkout: true
+requirements:
+  - Apply a behavior change that spans at least three files.
+  - Keep the public contract (exported names, signatures, and observable
+    behavior outside the change) unchanged.
+acceptance_criteria:
+  - "The behavior change is present in every affected file."
+  - "All existing public-contract tests still pass unchanged."
+technical_constraints:
+  - No public contract changes.
+  - No drive-by refactors beyond the behavior change.
+expected_evidence:
+  - A diff touching at least three files with the behavior change.
+  - A passing check run that includes the unchanged public-contract tests.
+risk_assertions: []
+gate_assertions:
+  - no manual gate is raised; the change is a low-risk cross-cutting
+    refactor.

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "factory review result",
+  "type": "object",
+  "properties": {
+    "schema_version": { "const": 1 },
+    "project_id": { "type": "integer" },
+    "merge_request_iid": { "type": "integer" },
+    "reviewed_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "verdict": { "enum": ["approve", "changes_required", "human_review", "blocked"] },
+    "criteria": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["criterion", "status", "evidence"],
+        "properties": {
+          "criterion": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["passed", "failed"] },
+          "evidence": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "severity", "category", "title", "evidence", "required_change"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "severity": { "enum": ["blocking", "major", "minor"] },
+          "category": { "type": "string", "minLength": 1 },
+          "path": { "type": "string" },
+          "line": { "type": "integer", "minimum": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "evidence": { "type": "string", "minLength": 1 },
+          "required_change": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "risks": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "summary": { "type": "string", "minLength": 1 }
+  },
+  "required": ["schema_version", "project_id", "merge_request_iid", "reviewed_sha", "verdict", "criteria", "findings", "summary"],
+  "additionalProperties": false
+}

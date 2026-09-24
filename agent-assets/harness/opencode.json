@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "harness": "opencode",
+  "agent": {
+    "model": "factory-primary",
+    "system_prompt_source": "agent-assets",
+    "skills_source": "agent-assets",
+    "max_tokens": 16384
+  },
+  "io": {
+    "input_file": "task.json",
+    "events": "run/events.jsonl",
+    "output_dir": "run/"
+  },
+  "result": {
+    "schema_source": "role-manifest"
+  },
+  "limits": {
+    "wall_clock_seconds": 3600,
+    "max_steps": 200
+  }
+}

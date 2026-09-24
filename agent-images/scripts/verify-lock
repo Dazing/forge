@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Validate agent-images/images.lock.
+
+This is the single source of truth for what a well-formed lock contains.
+The Dockerfile and every build/scan script read the lock through this
+validator and fail fast on missing or mismatched inputs.
+
+A lock entry is:  { name, reference_or_url, sha256, platform }
+
+Guarantees enforced here:
+  * all four required entries are present (playwright_dotnet_base,
+    node_archive, trivy, platform)
+  * no placeholders, no `latest`, no empty values, no mutable tag-only
+    image input
+  * the .NET/Playwright base image reference is digest-pinned
+  * the Node archive URL is checksum-pinned to a 64-hex SHA-256
+  * the Trivy scanner is pinned to a SHA-256 image digest
+  * the target platform is one of the allowed values
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+REQUIRED = ["playwright_dotnet_base", "node_archive", "trivy", "platform"]
+ALLOWED_PLATFORMS = {"linux/amd64", "linux/arm64"}
+
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+URL_RE = re.compile(r"^https?://\S+$")
+PLACEHOLDERS = ("PLACEHOLDER", "TODO", "FIXME", "<", ">", "latest", "null", "undefined")
+
+
+class LockError(Exception):
+    pass
+
+
+def fail(msg: str) -> None:
+    raise LockError(msg)
+
+
+def _clean(value: str, field: str, entry: str) -> str:
+    v = (value or "").strip()
+    upper = v.upper()
+    for bad in PLACEHOLDERS:
+        if bad in upper:
+            fail(f"{entry}: {field} contains a placeholder/mutable value: {v!r}")
+    return v
+
+
+def validate(lock: dict) -> dict:
+    """Validate the whole lock; return the name-indexed entry map."""
+    entries = lock.get("entries")
+    if not isinstance(entries, list):
+        fail("lock has no 'entries' array")
+    by_name = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            fail(f"lock entry is not an object: {entry!r}")
+        nm = _clean(str(entry.get("name", "")), "name", str(entry.get("name", "<entry>")))
+        if not nm:
+            fail("lock entry missing 'name'")
+        if nm in by_name:
+            fail(f"duplicate lock entry: {nm}")
+        by_name[nm] = entry
+
+    missing = [n for n in REQUIRED if n not in by_name]
+    if missing:
+        fail(f"lock is missing required entries: {', '.join(missing)}")
+
+    # platform entry: records the target platform; its sha256 is intentionally empty.
+    plat = _clean(
+        str(by_name["platform"].get("reference_or_url", "")),
+        "reference_or_url",
+        "platform",
+    )
+    if plat not in ALLOWED_PLATFORMS:
+        fail(f"platform entry must be one of {sorted(ALLOWED_PLATFORMS)}, got {plat!r}")
+    for e in by_name.values():
+        e_platform = _clean(str(e.get("platform", "")), "platform", str(e.get("name")))
+        if e_platform and e_platform not in ALLOWED_PLATFORMS:
+            fail(f"{e.get('name')}: unsupported platform {e_platform!r}")
+
+    base = by_name["playwright_dotnet_base"]
+    ref = _clean(str(base.get("reference_or_url", "")), "reference_or_url", "base")
+    if "@sha256:" not in ref:
+        fail(
+            f"playwright_dotnet_base reference_or_url must be digest-pinned "
+            f"(image@sha256:...), got {ref!r}"
+        )
+    base_sha = _clean(str(base.get("sha256", "")), "sha256", "base")
+    if not DIGEST_RE.match(base_sha):
+        fail(f"playwright_dotnet_base.sha256 must be an image digest, got {base_sha!r}")
+    if ref.split("@", 1)[1] != base_sha:
+        fail(
+            "playwright_dotnet_base reference_or_url digest does not match its sha256 "
+            f"({ref!r} vs {base_sha!r})"
+        )
+
+    node = by_name["node_archive"]
+    nurl = _clean(str(node.get("reference_or_url", "")), "reference_or_url", "node")
+    if not URL_RE.match(nurl):
+        fail(f"node_archive.reference_or_url must be an http(s) URL, got {nurl!r}")
+    nsha = _clean(str(node.get("sha256", "")), "sha256", "node")
+    if not HEX64_RE.match(nsha):
+        fail(f"node_archive.sha256 must be a 64-hex SHA-256, got {nsha!r}")
+
+    trivy = by_name["trivy"]
+    tref = _clean(str(trivy.get("reference_or_url", "")), "reference_or_url", "trivy")
+    if not tref:
+        fail("trivy.reference_or_url must record the scanner version tag")
+    tsha = _clean(str(trivy.get("sha256", "")), "sha256", "trivy")
+    if not DIGEST_RE.match(tsha):
+        fail(
+            f"trivy.sha256 must be a SHA-256 image digest so CI pulls the scanner "
+            f"by digest, got {tsha!r}"
+        )
+
+    return by_name
+
+
+def load(path: str) -> dict:
+    p = Path(path)
+    if not p.is_file():
+        fail(f"lock file not found: {path}")
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        fail(f"lock file is not valid JSON ({path}): {exc}")
+
+
+def main(argv: list[str]) -> int:
+    lock_path = "agent-images/images.lock"
+    if "--lock" in argv:
+        i = argv.index("--lock")
+        lock_path = argv[i + 1]
+    try:
+        lock = load(lock_path)
+        by_name = validate(lock)
+    except LockError as exc:
+        print(f"verify-lock: FAIL: {exc}", file=sys.stderr)
+        return 1
+    print(f"verify-lock: OK — {len(by_name)} entries valid from {lock_path}")
+    for name in REQUIRED:
+        e = by_name[name]
+        print(
+            f"  {name}: reference_or_url={e.get('reference_or_url')} "
+            f"sha256={e.get('sha256') or '(n/a)'} platform={e.get('platform')}"
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

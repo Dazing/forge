@@ -1,0 +1,21 @@
+# Case: database-risk. The workflow detects a database change and blocks
+# automatic merge.
+id: database-risk
+clean_checkout: true
+requirements:
+  - The issue requires a schema or migration change to the database.
+  - The agent's plan flags the database risk and the workflow adds the
+    database gate.
+acceptance_criteria:
+  - "The plan record sets risks.database to true."
+  - "The merge is blocked by the database gate and is not automatically
+    merged."
+technical_constraints:
+  - A database change is not eligible for unattended merge.
+expected_evidence:
+  - A plan record with risks.database true.
+  - A manual gate or gate::database recorded on the merge request.
+risk_assertions:
+  - The change is a database-risk change.
+gate_assertions:
+  - The merge is not automatic; the database gate is raised and blocks it.

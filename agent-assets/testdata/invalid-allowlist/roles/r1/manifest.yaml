@@ -1,0 +1,10 @@
+role: r1
+command: commands/c2.md
+skills:
+  - skills/s1/SKILL.md
+tools:
+  - read-only-filesystem
+output_schema: schemas/a.schema.json
+model_alias: factory-primary
+resource_policy:
+  max_steps: 60

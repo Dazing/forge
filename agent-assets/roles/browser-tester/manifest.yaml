@@ -1,0 +1,15 @@
+# Browser tester role policy. Bounded exploratory session; findings-based
+# report conforms to the review findings shape.
+role: browser-tester
+command: commands/explore-browser.md
+skills:
+  - skills/evidence-driven-review/SKILL.md
+tools:
+  - deterministic-browser
+  - model-sidecar
+output_schema: schemas/review.schema.json
+model_alias: factory-primary
+resource_policy:
+  max_steps: 120
+  wall_clock_seconds: 2400
+  network: test-origin-only

@@ -1,0 +1,3 @@
+version: 1
+harness: openhands
+agent: codeact

@@ -1,0 +1,63 @@
+# agent-assets bundle manifest.
+#
+# Names every asset in the bundle using repository-relative paths only. The
+# bundle validator (factory-assets-validate) confirms each named asset exists,
+# parses, and stays inside agent-assets/. Later consumers (the orchestrator
+# adapter, the protected asset pipeline) select assets from this manifest and
+# never from arbitrary agent-provided paths.
+version: 1
+
+# Bounded role policies. Each entry resolves to one role manifest under
+# agent-assets/roles/<role>/manifest.yaml.
+roles:
+  - roles/planner/manifest.yaml
+  - roles/implementer/manifest.yaml
+  - roles/reviewer/manifest.yaml
+  - roles/release-reviewer/manifest.yaml
+  - roles/browser-tester/manifest.yaml
+
+# Bounded headless workflows selected by the orchestrator. An autonomous agent
+# cannot invoke an arbitrary command set; a role allowlists exactly one of these.
+commands:
+  - commands/plan.md
+  - commands/implement.md
+  - commands/repair.md
+  - commands/review.md
+  - commands/explore-browser.md
+
+# Reusable engineering guidance. Only skill text selected by a role manifest
+# enters the initial context.
+skills:
+  - skills/repo-conventions/SKILL.md
+  - skills/evidence-driven-review/SKILL.md
+  - skills/patch-discipline/SKILL.md
+
+# Structured result contracts. Role manifests bind an output_schema to one of
+# these; the orchestrator adapter validates returned results against them.
+schemas:
+  - schemas/plan.schema.json
+  - schemas/implementation.schema.json
+  - schemas/review.schema.json
+
+# Harness adapter configurations that consume the same selected assets.
+harness:
+  - harness/openhands.yaml
+  - harness/opencode.json
+
+# Fixed evaluation suite. The cases, rubric, scorecard, and configuration
+# record schemas are behavioral specifications for later harness runs; they
+# record outcomes and never enable unattended merge.
+suite:
+  - suite/README.md
+  - suite/rubric.yaml
+  - suite/scorecard.yaml
+  - suite/configuration-record.schema.json
+  - suite/scorecard.schema.json
+  - suite/cases/dashboard/case.yaml
+  - suite/cases/localized-bug/case.yaml
+  - suite/cases/cross-cutting-refactor/case.yaml
+  - suite/cases/ambiguous-low-risk/case.yaml
+  - suite/cases/database-risk/case.yaml
+  - suite/cases/authentication-risk/case.yaml
+  - suite/cases/adversarial-review/case.yaml
+  - suite/cases/concurrency/case.yaml

@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+#
+# agent-images/scripts/scan-image
+#
+# Scan the resolved target digest with the locked Trivy image, enforce the
+# HIGH/CRITICAL + secrets + image-configuration policy, then finalize the
+# approval record. The scan targets the immutable image@sha256 — never a
+# mutable tag. The JSON report is the single source of truth for the policy.
+#
+# Inputs (environment):
+#   IMAGE        — the registry reference WITHOUT a tag (from build-image)
+#   LOCK         — optional, defaults to agent-images/images.lock
+#   REFRESH_DB   — "true"/"false" (default false). Database refresh is an
+#                  explicit CI input, not a hidden unpinned image mutation.
+#   IMAGE_SCANNER— optional explicit scanner reference; defaults to the
+#                  locked Trivy image pulled by digest.
+#
+# Produces:
+#   artifacts/trivy-report.json            the raw scanner JSON report
+#   artifacts/agent-image-approval.json   finalized with scanner + report + status
+
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+
+LOCK="${LOCK:-agent-images/images.lock}"
+IMAGE="${IMAGE:?set IMAGE to the registry reference (no tag)}"
+REFRESH_DB="${REFRESH_DB:-false}"
+
+here="$(cd "$(dirname "$0")" && pwd)"
+PY="$(command -v python3)"
+
+"$here/verify-lock" --lock "$LOCK"
+platform="$( "$here/lock-get" --lock "$LOCK" platform reference_or_url )"
+trivy_digest="$( "$here/lock-get" --lock "$LOCK" trivy sha256 )"
+trivy_ref="$( "$here/lock-get" --lock "$LOCK" trivy reference_or_url )"
+scanner_pull="${IMAGE_SCANNER:-docker.io/aquasec/trivy@${trivy_digest}}"
+
+# The target is the resolved digest. Prefer the pending record from
+# build-image; otherwise resolve it the same way so this step is
+# self-sufficient in CI.
+record="artifacts/agent-image-approval.json"
+target=""
+if [ -f "$record" ]; then
+  target="$( "$PY" -c 'import json;print(json.load(open("'$record'"))["image"])' )"
+fi
+# If the recorded value is not a digest reference, resolve it now.
+case "$target" in
+  *@sha256:*) ;;
+  *)
+    digest="$(docker buildx imagetools inspect --platform "$platform" "$IMAGE" \
+      | sed -n 's/.*DIGEST \(sha256:[0-9a-f]\{64\}\).*/\1/p' | head -n1)"
+    target="${IMAGE}@${digest}"
+    ;;
+esac
+echo "[scan-image] scanning ${target} with ${scanner_pull}"
+
+report="artifacts/trivy-report.json"
+mkdir -p artifacts
+
+# Scan by immutable digest: vuln + secret scanners plus image-configuration
+# findings (via --image-config-scanners misconfig, which Trivy 0.70.0 keeps
+# separate from --scanners); JSON report to a known path. --ignorefile
+# /dev/null disables any user ignore-file so policy is never silently
+# weakened. A refreshed vuln DB is an explicit CI input (REFRESH_DB=true),
+# not a hidden image mutation.
+cmd=(docker run --rm --platform "$platform"
+  -v "$(pwd)/artifacts:/out"
+  -w /out
+  "$scanner_pull"
+  image
+  "$target"
+    --scanners vuln,secret
+    --image-config-scanners misconfig
+    --format json
+    --output "trivy-report.json"
+    --ignorefile /dev/null)
+if [ "$REFRESH_DB" = "true" ]; then
+  cmd+=(--db-update)
+fi
+"${cmd[@]}" || {
+  echo "[scan-image] trivy exited non-zero; inspecting the report for findings" >&2
+}
+
+# Evaluate the report against the HIGH/CRITICAL + secrets policy:
+#  * any HIGH/CRITICAL vulnerability blocks
+#  * any secret finding blocks
+#  * any HIGH/CRITICAL image-configuration (misconfiguration) finding blocks
+policy="$( "$PY" - "$report" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+high_critical = []
+for r in doc.get("Results", []):
+    for v in r.get("Vulnerabilities", []) or []:
+        if v.get("Severity") in ("HIGH", "CRITICAL"):
+            high_critical.append(f"{v.get('VulnerabilityID')} ({v.get('Severity')})")
+secrets = sum(len(r.get("Secrets", []) or []) for r in doc.get("Results", []))
+misconfiguration = []
+for r in doc.get("Results", []):
+    for m in (r.get("Misconfigurations", []) or []):
+        if m.get("Severity") in ("HIGH", "CRITICAL") and m.get("Status", "FAIL") == "FAIL":
+            misconfiguration.append(f"{m.get('ID')} ({m.get('Severity')})")
+findings = {
+    "high_critical": sorted(set(high_critical)),
+    "secrets": secrets,
+    "misconfiguration": misconfiguration,
+}
+blocking = bool(findings["high_critical"]) or secrets > 0 or bool(misconfiguration)
+print(json.dumps({"findings": findings, "blocking": blocking}, indent=2))
+PYEOF
+)"
+echo "$policy"
+
+if echo "$policy" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); sys.exit(1 if d["blocking"] else 0)'; then
+  status="approved"
+else
+  status="blocked"
+fi
+
+# Finalize the approval record. Only the digest reference is ever published.
+source_commit="$(git rev-parse HEAD)"
+input_lock_sha256="$(sha256sum "$LOCK" | cut -d' ' -f1)"
+scanner_version="${trivy_ref#*:}"
+
+"$PY" - "$record" \
+  -- "$source_commit" "$platform" "$input_lock_sha256" \
+     "$target" "$scanner_pull" "$scanner_version" "$report" "$status" <<'PYEOF'
+import json, sys, pathlib
+(out, commit, platform, lock_sha, image, scanner, version, report, status) = sys.argv[1:]
+doc = {
+  "schema": "agent-images/schemas/agent-image-approval.schema.json",
+  "source_commit": commit,
+  "platform": platform,
+  "input_lock_sha256": lock_sha,
+  "image": image,
+  "scanner_image": scanner,
+  "scanner_version": version,
+  "report": report,
+  "status": status,
+}
+pathlib.Path(out).write_text(json.dumps(doc, indent=2) + "\n")
+print(f"[scan-image] finalized {out}: {image} (status={status})")
+PYEOF
+
+if [ "$status" = "blocked" ]; then
+  echo "[scan-image] scan policy FAILED — publication blocked" >&2
+  exit 1
+fi
+echo "[scan-image] approved image reference: ${target}"

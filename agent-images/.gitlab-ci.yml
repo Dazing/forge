@@ -1,0 +1,113 @@
+# agent-images/.gitlab-ci.yml
+#
+# Pinned, scanned agent-image pipeline. Builds the combined
+# node-dotnet-playwright execution image from locked immutable inputs,
+# resolves the pushed registry digest, scans that digest with the locked
+# Trivy scanner, and publishes ONLY the resolved image@sha256 reference.
+#
+# No mutable tag is ever exposed as an execution input. No registry or
+# scanner credentials are copied into the runtime image. Database refresh is
+# an explicit input, not a hidden unpinned image mutation.
+#
+# Runner requirement: build/scan run on a privileged runner (dind service)
+# or a docker-capable runner that exposes the socket.
+
+# The combined execution image is pushed to the project registry.
+variables:
+  IMAGE: registry.gitlab.example.com/software-factory/platform/agent-images/node-dotnet-playwright
+  LOCK: agent-images/images.lock
+
+stages:
+  - verify
+  - build
+  - scan
+  - publish
+
+# Pure-python: prove the lock is complete and every input is immutable.
+verify-lock:
+  stage: verify
+  image: python:3.12
+  script:
+    - agent-images/scripts/verify-lock --lock "$LOCK"
+  rules:
+    - changes:
+        - agent-images/**/*
+      when: on_success
+
+# Docker-CLI image + dind so buildx can build and push. Installs git and
+# python3 for the pipeline scripts.
+build-image:
+  stage: build
+  image: docker:28
+  services:
+    - docker:28-dind
+  before_script:
+    - apk add --no-cache git python3 coreutils >/dev/null
+    - export DOCKER_HOST=tcp://docker:2375
+  script:
+    - agent-images/scripts/build-image
+  rules:
+    - changes:
+        - agent-images/**/*
+      when: on_success
+  artifacts:
+    paths:
+      - artifacts/agent-image-approval.json
+    expire_in: 1 week
+  needs:
+    - verify-lock
+
+# Scan the resolved digest with the locked Trivy image. Same toolchain as
+# build-image; it re-resolves the digest from the pending record.
+scan-image:
+  stage: scan
+  image: docker:28
+  services:
+    - docker:28-dind
+  before_script:
+    - apk add --no-cache git python3 coreutils >/dev/null
+    - export DOCKER_HOST=tcp://docker:2375
+  script:
+    - agent-images/scripts/scan-image
+  variables:
+    REFRESH_DB: "false"   # explicit CI input; set true to refresh the vuln DB
+  rules:
+    - changes:
+        - agent-images/**/*
+      when: on_success
+  artifacts:
+    paths:
+      - artifacts/trivy-report.json
+      - artifacts/agent-image-approval.json
+    expire_in: 1 week
+  needs:
+    - build-image
+
+# Validate the finalized approval record against its schema, then publish the
+# digest-only reference as the downstream execution input. The digest is the
+# ONLY value exposed to consumers; tags are never published.
+publish:
+  stage: publish
+  image: python:3.12
+  script:
+    - agent-images/scripts/validate-approval \
+        --record artifacts/agent-image-approval.json \
+        --schema agent-images/schemas/agent-image-approval.schema.json
+    - digest_ref="$(python3 -c 'import json;print(json.load(open("artifacts/agent-image-approval.json"))["image"])')"
+    - |
+      echo "Approved execution input (digest only, no tag): ${digest_ref}"
+      echo "${digest_ref}" > artifacts/agent-image.digest
+    # Downstream consumers (reference-app/agent-image.digest,
+    # ci-templates manifest validation, launcher/internal/runspec) read this
+    # digest-only reference; they are wired in when those components land.
+  rules:
+    - changes:
+        - agent-images/**/*
+      when: on_success
+  artifacts:
+    paths:
+      - artifacts/agent-image.digest
+      - artifacts/agent-image-approval.json
+    expire_in: 1 week
+  needs:
+    - scan-image

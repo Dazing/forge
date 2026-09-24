@@ -1,0 +1,22 @@
+# Case: localized-bug. Reproduce and repair a defect with an observable
+# regression check.
+id: localized-bug
+clean_checkout: true
+requirements:
+  - The reported defect reproduces with the provided steps.
+  - Repair the defect with the minimal change.
+  - Add or update a regression test that fails on the defect and passes
+    after the repair.
+acceptance_criteria:
+  - "The regression test fails against the pre-fix code and passes after the repair."
+  - "The repository check suite is green after the repair."
+technical_constraints:
+  - The repair must not change the public contract of the function under
+    test.
+  - Do not add a new module or refactor unrelated code.
+expected_evidence:
+  - A new or updated test that encodes the defect's reproduction.
+  - A passing check run that includes the regression test.
+risk_assertions: []
+gate_assertions:
+  - no manual gate is raised.

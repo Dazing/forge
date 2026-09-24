@@ -1,0 +1,7 @@
+schema_version: 1
+configuration_record: cfg-001
+cases:
+  - case_id: x
+gates:
+  repair_limit_works: true
+go_no_go: go

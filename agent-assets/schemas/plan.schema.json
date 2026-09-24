@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "factory plan result",
+  "type": "object",
+  "properties": {
+    "schema_version": { "const": 1 },
+    "issue": {
+      "type": "object",
+      "required": ["project_id", "iid"],
+      "properties": {
+        "project_id": { "type": "integer" },
+        "iid": { "type": "integer" }
+      },
+      "additionalProperties": false
+    },
+    "base_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "summary": { "type": "string", "minLength": 1 },
+    "approach": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["step", "change", "paths"],
+        "properties": {
+          "step": { "type": "integer", "minimum": 1 },
+          "change": { "type": "string", "minLength": 1 },
+          "paths": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "acceptance_checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["criterion", "evidence"],
+        "properties": {
+          "criterion": { "type": "string", "minLength": 1 },
+          "evidence": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "expected_paths": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "conflict_keys": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "reason"],
+        "properties": {
+          "key": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "risks": {
+      "type": "object",
+      "required": ["database", "authentication", "ci_contract", "deployment"],
+      "properties": {
+        "database": { "type": "boolean" },
+        "authentication": { "type": "boolean" },
+        "ci_contract": { "type": "boolean" },
+        "deployment": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "ambiguities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["question", "impact", "safe_assumption"],
+        "properties": {
+          "question": { "type": "string", "minLength": 1 },
+          "impact": { "type": "string", "minLength": 1 },
+          "safe_assumption": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "decision": { "enum": ["proceed", "blocked"] }
+  },
+  "required": ["schema_version", "issue", "base_sha", "summary", "approach", "acceptance_checks", "risks", "decision"],
+  "additionalProperties": false
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Factory release-manifest",
+  "description": "Immutable release manifest emitted by the factory:image job on main and consumed by release-qualification, staging, and production. The image reference must be a digest reference; human-friendly tags are never deployment inputs.",
+  "type": "object",
+  "required": ["schema_version", "project_id", "commit_sha", "pipeline_id", "image", "built_at", "ci_template_sha"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Manifest schema version. Only 1 is accepted."
+    },
+    "project_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "GitLab project ID of the enrolled application."
+    },
+    "commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "40-character lowercase commit SHA of the built application."
+    },
+    "pipeline_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "GitLab pipeline ID that produced this release manifest."
+    },
+    "image": {
+      "type": "string",
+      "pattern": "^@sha256:[0-9a-f]{64}$|^[^@]+@sha256:[0-9a-f]{64}$",
+      "description": "OCI image reference with a @sha256: digest. All consumers require a digest reference; tags are never deployment inputs."
+    },
+    "built_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC RFC 3339 timestamp when the image was built."
+    },
+    "ci_template_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "40-character commit SHA of the ci-templates project used to build this image. This is the immutable template ref from the application's .gitlab-ci.yml include."
+    }
+  }
+}

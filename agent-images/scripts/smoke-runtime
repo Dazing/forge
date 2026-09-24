@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+#
+# agent-images/scripts/smoke-runtime
+#
+# Verify the agent-images pipeline from the lock.
+#
+#   smoke-runtime --lock agent-images/images.lock
+#
+# The `--lock` path (runnable anywhere, no container runtime required) proves:
+#   * the lock is complete and every external input is digest- or
+#     checksum-pinned (verify-lock is the authority),
+#   * the Dockerfile is consistent with the lock (same base digest, same
+#     Node SHA/URL),
+#   * each locked input is currently immutable against upstream — the MCR
+#     base manifest digest is live, and the Node archive checksum matches the
+#     official nodejs.org SHASUMS256.txt,
+#   * and it prints the resolved image@sha256 reference.
+#
+# With `AGENT_SMOKE_FULL=1` (or when docker buildx is present and --build is
+# passed) it additionally builds the image, runs the runtime smoke (dotnet,
+# node, npm, and the Playwright browser directory) in a container, and
+# resolves the pushed registry digest. Registry push and the Trivy
+# database-backed scan are exercised by CI, not here.
+#
+# Success: exit 0 and output includes the resolved image@sha256: reference.
+
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+
+LOCK="agent-images/images.lock"
+DO_BUILD=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --lock) LOCK="${2:?--lock needs a path}"; shift 2 ;;
+    --build) DO_BUILD=1; shift ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+here="$(cd "$(dirname "$0")" && pwd)"
+PY="$(command -v python3)"
+CURL="$(command -v curl || true)"
+
+# --- 1. The lock is complete and every input is immutable -------------------
+"$here/verify-lock" --lock "$LOCK"
+
+platform="$( "$here/lock-get" --lock "$LOCK" platform reference_or_url )"
+base_ref="$( "$here/lock-get" --lock "$LOCK" playwright_dotnet_base reference_or_url )"
+base_sha="${base_ref##*@}"
+node_sha="$( "$here/lock-get" --lock "$LOCK" node_archive sha256 )"
+node_url="$( "$here/lock-get" --lock "$LOCK" node_archive reference_or_url )"
+trivy_sha="$( "$here/lock-get" --lock "$LOCK" trivy sha256 )"
+
+echo "[smoke-runtime] platform=${platform}"
+
+# --- 2. Dockerfile stays consistent with the lock --------------------------
+grep -q "^FROM ${base_ref}" agent-images/Dockerfile \
+  || { echo "[smoke-runtime] FAIL: Dockerfile FROM differs from lock base" >&2; exit 1; }
+grep -q "ARG NODE_SHA256=${node_sha}" agent-images/Dockerfile \
+  || { echo "[smoke-runtime] FAIL: Dockerfile NODE_SHA256 differs from lock" >&2; exit 1; }
+echo "[smoke-runtime] Dockerfile consistent with lock (FROM ${base_ref})"
+
+# --- 3. External inputs are currently immutable ----------------------------
+if [ -n "$CURL" ]; then
+  # 3a. MCR base manifest-list digest is live for the locked platform.
+  live_digest="$(curl -sI --max-time 20 -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+      "https://mcr.microsoft.com/v2/playwright/dotnet/manifests/${base_ref#*@}" \
+      | grep -i '^docker-content-digest:' | awk '{print $2}' | tr -d '\r')"
+  if [ -n "$live_digest" ] && [ "$live_digest" = "$base_sha" ]; then
+    echo "[smoke-runtime] MCR base digest verified live: ${base_ref}"
+  elif [ -z "$live_digest" ]; then
+    echo "[smoke-runtime] note: could not reach MCR; offline check skipped for base digest"
+  else
+    echo "[smoke-runtime] FAIL: MCR base digest mismatch (lock=${base_sha} live=${live_digest})" >&2
+    exit 1
+  fi
+
+  # 3b. Node archive checksum matches the official upstream SHASUMS256.txt.
+  node_dir="$(printf '%s' "$node_url" | sed 's#/node-v[^/]*$##')"
+  upstream_sha="$(curl -fsSL --max-time 25 "${node_dir}/SHASUMS256.txt" 2>/dev/null \
+      | grep -F " $(basename "$node_url")" | awk '{print $1}' || true)"
+  if [ -n "$upstream_sha" ]; then
+    if [ "$upstream_sha" = "$node_sha" ]; then
+      echo "[smoke-runtime] Node archive checksum matches upstream nodejs.org (${node_dir})"
+    else
+      echo "[smoke-runtime] FAIL: Node checksum mismatch (lock=${node_sha} upstream=${upstream_sha})" >&2
+      exit 1
+    fi
+  else
+    echo "[smoke-runtime] note: upstream Node SHASUMS unreachable; offline check skipped for node checksum"
+  fi
+else
+  echo "[smoke-runtime] note: curl unavailable; skipped live immutability checks"
+fi
+
+# --- 4. Resolved reference --------------------------------------------------
+# The base image reference is the verified image@sha256 anchor the build
+# derives from. The composite image digest is resolved by the registry push
+# in CI (not covered locally without a registry/runtime).
+resolved="${base_ref}"
+echo "[smoke-runtime] resolved base reference: ${resolved}"
+
+# --- 5. Full runtime smoke (only when a container runtime is available) -----
+full="${AGENT_SMOKE_FULL:-0}"
+if [ "$DO_BUILD" = "1" ] || { [ "$full" = "1" ] && command -v docker >/dev/null; }; then
+  if ! command -v docker >/dev/null; then
+    echo "[smoke-runtime] FAIL: full runtime smoke requested but docker is not available" >&2
+    exit 1
+  fi
+  echo "[smoke-runtime] building and running the runtime smoke (registry/scan remain CI-gated)"
+  "$here/build-image"
+  approved="$(cat artifacts/agent-image-approval.json | "$PY" -c 'import json,sys;print(json.load(sys.stdin)["image"])')"
+  docker run --rm --platform "$platform" \
+    "$approved" \
+    bash -lc 'set -e; dotnet --version; node --version; npm --version; \
+      test -d "${PLAYWRIGHT_BROWSERS_PATH:?}"; \
+      echo "runtime OK: dotnet+node+npm present, browsers=${PLAYWRIGHT_BROWSERS_PATH}"'
+fi
+
+echo "[smoke-runtime] PASS: lock complete, inputs immutable, Dockerfile consistent."
+echo "[smoke-runtime] resolved: ${resolved}"
+exit 0

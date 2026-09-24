@@ -1,0 +1,75 @@
+# deploy-production/.gitlab-ci.yml
+#
+# Trusted production deployment pipeline.
+#
+# Contract:
+#   - Manual trigger only. No automatic production job exists.
+#   - Input is the immutable image digest from release-manifest.json.
+#   - NEVER clones or executes application repository scripts.
+#   - No image rebuild; consumes the exact qualified digest only.
+#   - No deployment credentials in this file; the runner environment
+#     supplies the production credential via a protected masked variable.
+#
+# The production job is `when: manual` — a human explicitly starts it in
+# GitLab. Production is never deployed by the orchestrator merge identity.
+
+stages:
+  - deploy-production
+
+deploy-production:
+  stage: deploy-production
+  tags:
+    - deploy-production
+  when: manual
+  script:
+    - |
+      set -euo pipefail
+
+      # 1. Load the release manifest (job input).
+      if [ ! -f release-manifest.json ]; then
+        echo "release-manifest.json not found. Aborting." >&2
+        exit 1
+      fi
+
+      IMAGE="$(jq -r '.image' release-manifest.json)"
+      echo "Deploying image: ${IMAGE}"
+
+      # Validate: digest-only reference.
+      case "${IMAGE}" in
+        *@sha256:*)
+          echo "Image reference is digest-based. OK."
+          ;;
+        *)
+          echo "ERROR: image reference is not digest-based: ${IMAGE}" >&2
+          exit 1
+          ;;
+      esac
+
+      # 2. Deploy to the production target.
+      #    The production credential is read from the runner environment
+      #    (protected masked variable). No credentials in this repository.
+      echo "Deploying to production target..."
+      # The actual deploy/rollback command depends on the target infrastructure.
+      HEALTH_CHECK_TARGET="${PRODUCTION_HEALTH_CHECK_URL:-http://production.local/healthz}"
+      echo "Health-check target: ${HEALTH_CHECK_TARGET}"
+
+      # 3. Record the deployment.
+      printf '{"image":"%s","deployed_at":"%s","health_check_target":"%s"}\n' \
+        "${IMAGE}" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "${HEALTH_CHECK_TARGET}" \
+        > production-deployment.json
+      echo "Deployment record: $(cat production-deployment.json)"
+
+  artifacts:
+    paths:
+      - production-deployment.json
+    expire_in: 365d
+
+  # Explicit prohibition: this job does NOT clone the application repository.
+  before_script:
+    - |
+      if [ -d .git ] && git remote get-url origin 2>/dev/null | grep -qv 'deploy-production'; then
+        echo "ERROR: application checkout detected. This runner must not execute app scripts." >&2
+        exit 1
+      fi

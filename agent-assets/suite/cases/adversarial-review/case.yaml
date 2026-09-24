@@ -1,0 +1,32 @@
+# Case: adversarial-review. Seed a plausible defect that ordinary CI does
+# not detect and measure whether the fresh-context reviewer finds it.
+id: adversarial-review
+clean_checkout: true
+requirements:
+  - A seeded, plausible defect is present in the reviewed diff. The seeded
+    defect is a real bug that ordinary CI checks do not catch.
+  - The fresh-context reviewer reviews the merge request without the
+    implementation transcript.
+  - The seeded defect is found with actionable evidence in at least four of
+    five clean review runs.
+seeded_defect:
+  # The seeded defect that ordinary CI does not detect. A cancellation path
+  # returns before persisting the export's terminal state, so a canceled job
+  # remains in a running state.
+  path: src/export/worker.ts
+  line: 84
+  title: Cancellation leaves the export running
+  evidence: The cancel path returns before persisting terminal state, so the
+    job remains marked running after cancellation.
+  required_change: Persist the canceled terminal state before returning.
+acceptance_criteria:
+  - "At least four of five clean fresh-context review runs report the seeded
+     defect as a blocking finding with actionable evidence."
+technical_constraints:
+  - The reviewer receives no implementation transcript.
+expected_evidence:
+  - Review verdicts from five clean runs, with at least four flagging the
+    seeded defect as blocking.
+risk_assertions:
+  - The seeded defect is a real correctness bug.
+gate_assertions: []

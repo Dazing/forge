@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agent-images/schemas/agent-image-approval.schema.json",
+  "title": "Agent image approval record",
+  "description": "Machine-readable evidence that a digest-pinned agent image was built from locked immutable inputs and scanned. Only the final image@sha256 reference is the approved execution input; tags are never exposed as approved values.",
+  "type": "object",
+  "required": [
+    "source_commit",
+    "platform",
+    "input_lock_sha256",
+    "image",
+    "scanner_image",
+    "scanner_version",
+    "report",
+    "status"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "agent-images/schemas/agent-image-approval.schema.json"
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Full git commit SHA the pipeline inputs were taken from."
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["linux/amd64", "linux/arm64"]
+    },
+    "input_lock_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 of agent-images/images.lock at build time."
+    },
+    "image": {
+      "type": "string",
+      "pattern": "^[a-z0-9._-]+(:[0-9]+)?(/[a-z0-9._-]+)*@(sha256:)?[0-9a-f]{64}$",
+      "description": "The approved reference MUST be the resolved image@sha256 digest, never a tag. The pattern rejects any reference that does not end in @<64-hex-digest> (optionally with the sha256: algorithm prefix)."
+    },
+    "scanner_image": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scanner_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "report": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to the Trivy JSON report."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pending_scan", "approved", "blocked"],
+      "description": "pending_scan: build complete, scan not yet run. approved: scan passed and the digest is publishable. blocked: the scan policy failed; publication is blocked."
+    }
+  }
+}

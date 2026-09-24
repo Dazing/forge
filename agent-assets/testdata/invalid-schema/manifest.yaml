@@ -1,0 +1,18 @@
+version: 1
+roles:
+  - roles/r1/manifest.yaml
+commands:
+  - commands/c1.md
+  - commands/c2.md
+skills:
+  - skills/s1/SKILL.md
+schemas:
+  - schemas/a.schema.json
+  - schemas/b.schema.json
+harness:
+  - harness/openhands.yaml
+  - harness/opencode.json
+suite:
+  - suite/rubric.yaml
+  - suite/scorecard.yaml
+  - suite/cases/x/case.yaml

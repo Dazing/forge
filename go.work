@@ -1,0 +1,6 @@
+go 1.22
+
+use ./ci-templates
+use ./orchestrator
+use ./launcher
+use ./agent-assets

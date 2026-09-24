@@ -1,0 +1,178 @@
+# application-v1.yml
+# Immutable application CI template for the factory pipeline.
+#
+# Include at a pinned commit SHA (never main or a tag):
+#   include:
+#     - project: software-factory/platform/ci-templates
+#       ref: <40-char-sha>
+#       file: /templates/application-v1.yml
+#
+# The template owns all factory:* job contracts. Application .gitlab-ci.yml
+# contains only the pinned include and project-specific variables. No
+# deployment credentials or deployment jobs are defined here. Application
+# pipelines receive only normal CI_JOB_TOKEN access.
+#
+# Runner prerequisites: sh, yq, docker, jq, curl.
+
+stages:
+  - factory-contract
+  - factory-check
+  - factory-build
+  - factory-image
+  - factory-browser
+  - factory-qualification
+
+# Parse .factory.yaml into shell variables shared by all jobs.
+.factory:parse:
+  before_script:
+    - |
+      set -euo pipefail
+      M=.factory.yaml
+      export FACTORY_BOOTSTRAP="$(yq '.commands.bootstrap' "$M")"
+      export FACTORY_CHECK="$(yq '.commands.check' "$M")"
+      export FACTORY_BUILD="$(yq '.commands.build' "$M")"
+      export FACTORY_BROWSER_TEST="$(yq '.commands.browser_test // ""' "$M")"
+      export FACTORY_AGENT_IMAGE="$(yq '.agent.image' "$M")"
+      export FACTORY_IMAGE_DEST="$(yq '.artifacts.image' "$M")"
+
+# 1. Validate .factory.yaml and contract scripts.
+#    Must precede every other factory:* job.
+factory:contract:
+  extends: .factory:parse
+  stage: factory-contract
+  script:
+    - |
+      set -euo pipefail
+      echo "Validating .factory.yaml..."
+      factory-config-validate \
+        -worktree . \
+        -manifest .factory.yaml \
+        -registry-prefix "$FACTORY_IMAGE_DEST"
+      echo "Contract valid."
+  artifacts:
+    paths: [".factory.yaml"]
+    expire_in: 30d
+
+# 2. Run bootstrap, then check.
+factory:check:
+  extends: .factory:parse
+  stage: factory-check
+  script:
+    - |
+      set -euo pipefail
+      echo "Running bootstrap..."
+      "$FACTORY_BOOTSTRAP"
+      echo "Running check..."
+      "$FACTORY_CHECK"
+  needs: [factory:contract]
+  artifacts:
+    paths: ["check-report.json"]
+    expire_in: 30d
+
+# 3. Run build and emit provenance.
+factory:build:
+  extends: .factory:parse
+  stage: factory-build
+  script:
+    - |
+      set -euo pipefail
+      echo "Running build..."
+      "$FACTORY_BUILD"
+      printf '{"commit_sha":"%s","pipeline_id":%s,"built_at":"%s","agent_image":"%s"}\n' \
+        "$CI_COMMIT_SHA" "$CI_PIPELINE_ID" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$FACTORY_AGENT_IMAGE" \
+        > build-provenance.json
+      echo "Build provenance: $(cat build-provenance.json)"
+  needs: [factory:check]
+  artifacts:
+    paths: ["build-provenance.json"]
+    expire_in: 30d
+
+# 4. Build image, push to registry, resolve digest, emit release-manifest.json.
+#    Runs only on main. CI_REGISTRY_USER/PASSWORD are standard GitLab CI
+#    registry credentials, not deployment credentials.
+factory:image:
+  extends: .factory:parse
+  stage: factory-image
+  script:
+    - |
+      set -euo pipefail
+      TAG="sha-${CI_COMMIT_SHA}"
+      IMAGE="${FACTORY_IMAGE_DEST}:${TAG}"
+      echo "Building ${IMAGE}..."
+      docker build -t "$IMAGE" .
+      docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+      docker push "$IMAGE"
+      DIGEST="$(docker inspect --format='{{.Id}}' "$IMAGE")"
+      printf '{"schema_version":1,"project_id":%s,"commit_sha":"%s","pipeline_id":%s,"image":"%s@%s","built_at":"%s","ci_template_sha":"%s"}\n' \
+        "$CI_PROJECT_ID" "$CI_COMMIT_SHA" "$CI_PIPELINE_ID" \
+        "$FACTORY_IMAGE_DEST" "$DIGEST" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "${CI_TEMPLATE_SHA:-unknown}" \
+        > release-manifest.json
+      echo "Release manifest: $(cat release-manifest.json)"
+  needs: [factory:build]
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  artifacts:
+    paths: ["release-manifest.json"]
+    expire_in: 365d
+
+# 5. Run browser tests only when the manifest declares a browser command and
+#    the pipeline policy requires it. Evidence is retained only on failure.
+factory:browser:
+  extends: .factory:parse
+  stage: factory-browser
+  script:
+    - |
+      set -euo pipefail
+      if [ -z "$FACTORY_BROWSER_TEST" ]; then
+        echo "No browser_test declared in .factory.yaml; skipping."
+        exit 0
+      fi
+      echo "Running browser tests..."
+      "$FACTORY_BROWSER_TEST"
+  needs: [factory:check]
+  rules:
+    - if: $FACTORY_BROWSER_POLICY == "enabled"
+  artifacts:
+    paths: ["browser-evidence/"]
+    when: on_failure
+    expire_in: 60d
+
+# 6. Release qualification: consume the existing successful main digest;
+#    never rebuild. Runs only on release/* branches.
+factory:release-qualification:
+  stage: factory-qualification
+  script:
+    - |
+      set -euo pipefail
+      echo "Consuming release manifest from main pipeline..."
+      MAIN_PIPELINE_ID="$(curl -sf \
+        --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/pipelines?ref=main&status=success&per_page=1" \
+        | jq -r '.[0].id // empty')"
+      if [ -z "${MAIN_PIPELINE_ID}" ]; then
+        echo "No successful main pipeline found; cannot qualify." >&2
+        exit 1
+      fi
+      IMAGE_JOB_ID="$(curl -sf \
+        --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/pipelines/${MAIN_PIPELINE_ID}/jobs" \
+        | jq -r '[.[] | select(.name == "factory:image")][0].id // empty')"
+      if [ -z "${IMAGE_JOB_ID}" ]; then
+        echo "No factory:image job found in main pipeline ${MAIN_PIPELINE_ID}." >&2
+        exit 1
+      fi
+      curl -sf \
+        --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/jobs/${IMAGE_JOB_ID}/artifacts/release-manifest.json" \
+        -o release-manifest.json
+      DIGEST="$(jq -r '.image' release-manifest.json)"
+      echo "Consuming existing digest: ${DIGEST}"
+      echo "Release qualification: consuming existing digest, not rebuilding."
+  rules:
+    - if: $CI_COMMIT_REF_NAME =~ /^release\//
+  artifacts:
+    paths: ["release-manifest.json"]
+    expire_in: 365d

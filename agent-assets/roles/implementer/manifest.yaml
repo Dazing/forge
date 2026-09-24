@@ -1,0 +1,18 @@
+# Implementer role policy. One command, bounded skills/tools, one output
+# schema, one model alias, and a resource policy.
+role: implementer
+command: commands/implement.md
+skills:
+  - skills/repo-conventions/SKILL.md
+  - skills/patch-discipline/SKILL.md
+tools:
+  - read-only-filesystem
+  - write-workspace
+  - run-repo-checks
+  - model-sidecar
+output_schema: schemas/implementation.schema.json
+model_alias: factory-primary
+resource_policy:
+  max_steps: 200
+  wall_clock_seconds: 3600
+  network: repo-egress-allowlist

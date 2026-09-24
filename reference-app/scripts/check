@@ -1,0 +1,8 @@
+#!/bin/sh
+# Check: run unit/API tests via vitest.
+# Executable, repository-relative, no shell fragments.
+set -eu
+
+cd "$(dirname "$0")/.."
+
+npm test

@@ -1,0 +1,38 @@
+# Case: concurrency. Two non-conflicting implementation tickets run while a
+# third session reviews an existing merge request.
+id: concurrency
+clean_checkout: true
+requirements:
+  - Two non-conflicting implementation tickets are dispatched and run
+    concurrently.
+  - A third session reviews an existing merge request at the same time.
+  - All three sessions remain usable without indefinite starvation.
+concurrency_schedule:
+  sessions:
+    - role: implementer
+      ticket: ticket-a
+    - role: implementer
+      ticket: ticket-b
+    - role: reviewer
+      merge_request_iid: 77
+  notes:
+    - ticket-a and ticket-b must not touch the same migration chain,
+      authentication boundary, central bootstrap/route, or incompatible
+      public contract; otherwise they are serialized.
+    - The reviewer session uses a reserved slot and does not consume
+      implementation capacity.
+acceptance_criteria:
+  - "All three sessions complete or reach a terminal state without indefinite
+     starvation."
+  - "Per-session latency and aggregate throughput are recorded at 1, 2, and
+     3 concurrent sessions."
+technical_constraints:
+  - Implementation capacity is two sessions plus one reserved review slot.
+expected_evidence:
+  - Per-session latency and aggregate throughput for 1, 2, and 3 sessions.
+  - Both implementation tickets reach a terminal state; the review verdict
+    is recorded.
+risk_assertions: []
+gate_assertions:
+  - No session is starved indefinitely; the reserved review slot is not
+    consumed by an implementation ticket.

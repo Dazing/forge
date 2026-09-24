@@ -1,0 +1,16 @@
+# Task-Shape Mapping
+
+Each fixed-suite case maps to concrete reference-app files, fixture state, and observable evidence.
+The adversarial-review defect is isolated in `test/fixtures/adversarial-defect.ts` and is never
+enabled in the default app build.
+
+| Case ID | Files | Fixture / Seed | Observable Evidence |
+|---|---|---|---|
+| `dashboard` | `src/server/dashboard.ts`, `src/client/routes/DashboardPage.tsx`, `tests/dashboard.spec.ts` | `test/fixtures/seed.ts` → 3 items (orders=128, revenue=4250, users=97) | Playwright Chromium sees all 3 items on `/dashboard` with correct values; `GET /api/dashboard` returns 200 + summary JSON |
+| `localized-bug` | `src/client/routes/DashboardPage.tsx` (value display), `src/server/__tests__/dashboard.test.ts` | `test/fixtures/seed.ts` → same 3 items | Unit test asserts exact item values; RTL test asserts `value-revenue` shows "4250"; a localized bug (e.g. value off-by-one or wrong key) is caught by these assertions |
+| `cross-cutting-refactor` | `src/shared/dashboard.ts` (`DashboardItem` interface), all import sites in `src/server/`, `src/client/`, `tests/`, `test/fixtures/` | `test/fixtures/seed.ts` + `migrations/001_initial.sql` | Renaming `DashboardItem.id` → `DashboardItem.key` requires touching the interface, the store, the API handler, the React component, all tests, and the migration — all must compile and pass together |
+| `ambiguous-low-risk` | `src/shared/dashboard.ts` (`totalValue` helper), `src/client/routes/DashboardPage.tsx` (optional display) | `test/fixtures/seed.ts` | Adding a "Total" display to the dashboard: spec does not say whether to include all items or a subset; the low-risk change adds a computed total via the existing `totalValue` pure helper. Evidence: RTL test asserts the total renders correctly |
+| `database-risk` | `migrations/001_initial.sql`, `src/server/sqlite-store.ts`, `src/server/main.ts` | `migrations/001_initial.sql` (CREATE TABLE + INSERT) | Modifying the schema (adding a column, changing type) without updating the store and the migration breaks the SQLite-backed path. Evidence: `SqliteDashboardStore` loads items; a schema change without migration fails `isReady()` → 503 |
+| `authentication-risk` | `src/server/app.ts` (`createApp`), `src/server/dashboard.ts` | `test/fixtures/seed.ts` | Adding a bearer-token middleware to `createApp` that guards `/api/dashboard` but not `/healthz`. Evidence: `GET /api/dashboard` without token → 401; with valid token → 200. No real-user credentials are used |
+| `adversarial-review` | `test/fixtures/adversarial-defect.ts` (reviewer-only), `docs/task-shapes.md` | `test/fixtures/adversarial-defect.ts` — simulates `src/export/worker.ts` line 84: cancellation path returns before persisting terminal state | Five fresh-context review runs of a diff that includes the simulated defect; at least four flag the defect as blocking. The defect is isolated in the fixture and omitted from the default build |
+| `concurrency` | `src/server/sqlite-store.ts` (`isReady`/`getSummary`), `src/server/__tests__/health.test.ts` | `test/fixtures/seed.ts` | Calling `isReady()` and `getSummary()` concurrently on a cold store: the store must not return a summary before readiness is confirmed. Evidence: test asserts `getSummary()` on a not-ready store triggers `isReady()` first; concurrent calls are serialized |

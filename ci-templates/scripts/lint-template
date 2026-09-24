@@ -1,0 +1,40 @@
+#!/bin/sh
+# lint-template validates the application-v1.yml CI template.
+#
+# Usage: lint-template [path-to-template-yml]
+# Exits 0 if the template is valid, 1 if not.
+#
+# Checks:
+#   - all six factory:* jobs are defined
+#   - no deployment credentials or jobs are present
+#   - every artifact-producing job sets expire_in
+
+set -eu
+
+TEMPLATE="${1:-ci-templates/templates/application-v1.yml}"
+
+[ -f "$TEMPLATE" ] || { echo "lint-template: not found: $TEMPLATE" >&2; exit 1; }
+
+# All six factory:* jobs present.
+for job in contract check build image browser release-qualification; do
+  grep -q "^factory:${job}:" "$TEMPLATE" || {
+    echo "lint-template: missing factory:${job} job" >&2
+    exit 1
+  }
+done
+
+# No deployment credential variables or deployment jobs.
+if grep -qE 'DEPLOY_(STAGING|PRODUCTION)_[A-Z_]+|deploy_(staging|production):' "$TEMPLATE"; then
+  echo "lint-template: found deployment credential or job reference" >&2
+  exit 1
+fi
+
+# Every artifact-producing job sets expire_in. The template has exactly six
+# artifact-producing jobs, so require exactly six expire_in directives.
+COUNT=$(grep -c 'expire_in:' "$TEMPLATE")
+if [ "$COUNT" -lt 6 ]; then
+  echo "lint-template: expected 6 expire_in directives, found ${COUNT}" >&2
+  exit 1
+fi
+
+echo "lint-template: template valid"

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "factory implementation result",
+  "type": "object",
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "base_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "summary": { "type": "string", "minLength": 1 },
+    "changed_paths": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "unexpected_paths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "explanation"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "explanation": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "acceptance_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["criterion", "evidence"],
+        "properties": {
+          "criterion": { "type": "string", "minLength": 1 },
+          "evidence": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "risks": {
+      "type": "object",
+      "required": ["database", "authentication", "ci_contract", "deployment"],
+      "properties": {
+        "database": { "type": "boolean" },
+        "authentication": { "type": "boolean" },
+        "ci_contract": { "type": "boolean" },
+        "deployment": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "decision": { "enum": ["complete", "blocked"] }
+  },
+  "required": ["schema_version", "run_id", "base_sha", "summary", "changed_paths", "unexpected_paths", "acceptance_evidence", "risks", "decision"],
+  "additionalProperties": false
+}

@@ -1,0 +1,16 @@
+version: 1
+
+agent:
+  image: registry.factory.internal/software-factory/platform/agent-images/node-dotnet-playwright@sha256:4e6f7d7dc83db10bfa3bd6fb3bdaf0c75d35db3ecf8d228ef690593bcb11d9e5
+
+commands:
+  bootstrap: ./scripts/bootstrap
+  check: ./scripts/check
+  build: ./scripts/build
+
+artifacts:
+  image: registry.factory.internal/software-factory/apps/example
+
+network:
+  egress_hosts:
+    - 10.0.0.5

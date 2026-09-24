@@ -1,0 +1,35 @@
+# OpenHands headless configuration. The adapter translates the same selected
+# assets from this bundle into OpenHands' native layout; this file pins how
+# the harness consumes them and how results are collected.
+#
+# Both harnesses consume the same selected assets; the adapter composes the
+# selected skill text into the system/task messages rather than teaching the
+# orchestrator harness-specific prompt semantics.
+version: 1
+harness: openhands
+agent: codeact
+agent_config:
+  # The selected role prompt and selected skills are composed into the
+  # system message by the adapter.
+  system_prompt_source: agent-assets
+  skills_source: agent-assets
+  max_iterations: 200
+  action_llm:
+    # Logical alias; the model sidecar resolves it to the pinned Jarvis
+    # deployment.
+    model: factory-primary
+    max_budget: 500
+io:
+  input_file: task.json
+  output_dir: run/
+  # Bounded JSONL event stream. The adapter validates the structured result
+  # against the role's output_schema before exit.
+  events: run/events.jsonl
+result:
+  # The adapter returns the structured result that the orchestrator validates
+  # against the role's output_schema.
+  schema_source: role-manifest
+exit_classification:
+  success: 0
+  failure: 1
+  blocked: 3

@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "factory benchmark scorecard",
+  "type": "object",
+  "properties": {
+    "schema_version": { "const": 1 },
+    "configuration_record": { "type": "string", "minLength": 1 },
+    "cases": {
+      "type": "array",
+      "minItems": 8,
+      "items": {
+        "type": "object",
+        "required": ["case_id", "clean_checkout", "completion", "correctness", "autonomy", "safety"],
+        "properties": {
+          "case_id": { "type": "string", "minLength": 1 },
+          "clean_checkout": { "type": "boolean" },
+          "completion": { "type": "boolean" },
+          "correctness": { "type": "boolean" },
+          "patch_quality": { "type": "string", "minLength": 1 },
+          "autonomy": { "type": "boolean" },
+          "recovery": { "type": "string" },
+          "review_quality": { "type": "string" },
+          "safety": { "type": "boolean" },
+          "efficiency": {
+            "type": "object",
+            "properties": {
+              "wall_clock_seconds": { "type": "number" },
+              "model_calls": { "type": "integer" },
+              "input_tokens": { "type": "integer" },
+              "output_tokens": { "type": "integer" },
+              "retry_count": { "type": "integer" }
+            },
+            "additionalProperties": false
+          },
+          "concurrency": {
+            "type": "object",
+            "properties": {
+              "sessions": { "type": "integer" },
+              "per_session_latency_seconds": { "type": "number" },
+              "aggregate_throughput": { "type": "number" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "gates": {
+      "type": "object",
+      "required": [
+        "implementation_autonomy_pct",
+        "seeded_defect_found_runs",
+        "seeded_defect_runs",
+        "risk_case_automatically_merged",
+        "low_risk_assumptions_routed",
+        "concurrency_starved",
+        "repair_limit_works"
+      ],
+      "properties": {
+        "implementation_autonomy_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "seeded_defect_found_runs": { "type": "integer", "minimum": 0 },
+        "seeded_defect_runs": { "type": "integer", "minimum": 1 },
+        "risk_case_automatically_merged": { "type": "boolean" },
+        "low_risk_assumptions_routed": { "type": "boolean" },
+        "concurrency_starved": { "type": "boolean" },
+        "repair_limit_works": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "go_no_go": { "enum": ["go", "no-go"] },
+    "decision_note": { "type": "string" }
+  },
+  "required": ["schema_version", "configuration_record", "cases", "gates", "go_no_go"],
+  "additionalProperties": false
+}

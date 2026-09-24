@@ -1,0 +1,12 @@
+version: 1
+
+agent:
+  image: registry.factory.internal/software-factory/platform/agent-images/node-dotnet-playwright:latest
+
+commands:
+  bootstrap: ./scripts/bootstrap
+  check: ./scripts/check
+  build: ./scripts/build
+
+artifacts:
+  image: registry.factory.internal/software-factory/apps/example

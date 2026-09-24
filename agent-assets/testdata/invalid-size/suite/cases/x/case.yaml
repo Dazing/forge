@@ -1,0 +1,13 @@
+id: x
+clean_checkout: true
+requirements:
+  - do a thing
+acceptance_criteria:
+  - it works
+technical_constraints:
+  - keep it minimal
+expected_evidence:
+  - a passing check
+risk_assertions: []
+gate_assertions:
+  - no manual gate

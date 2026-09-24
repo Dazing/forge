@@ -1,0 +1,82 @@
+# deploy-staging/.gitlab-ci.yml
+#
+# Trusted staging deployment pipeline.
+#
+# Contract:
+#   - Accepts release-manifest.json as job input (immutable image digest).
+#   - Records a health-check target for post-deploy verification.
+#   - NEVER clones or executes application repository scripts.
+#   - No image rebuild; consumes the digest from the manifest only.
+#   - No deployment credentials in this file; the runner environment
+#     supplies the staging credential via a protected masked variable.
+#
+# Triggered by:
+#   - Automatic: `main` pipeline success (orchestrator creates pipeline).
+#   - Manual: developer triggers via GitLab UI.
+#
+# The runner tag `deploy-staging` is restricted to this project only.
+
+stages:
+  - deploy-staging
+
+deploy-staging:
+  stage: deploy-staging
+  tags:
+    - deploy-staging
+  script:
+    - |
+      set -euo pipefail
+
+      # 1. Load the release manifest (job input).
+      #    The manifest is provided as a job artifact from the app pipeline
+      #    or passed as a file input. It contains an immutable image digest.
+      if [ ! -f release-manifest.json ]; then
+        echo "release-manifest.json not found. Aborting." >&2
+        exit 1
+      fi
+
+      IMAGE="$(jq -r '.image' release-manifest.json)"
+      echo "Deploying image: ${IMAGE}"
+
+      # Validate: the image reference must be a digest, not a tag.
+      case "${IMAGE}" in
+        *@sha256:*)
+          echo "Image reference is digest-based. OK."
+          ;;
+        *)
+          echo "ERROR: image reference is not digest-based: ${IMAGE}" >&2
+          exit 1
+          ;;
+      esac
+
+      # 2. Deploy the image to the staging target.
+      #    The deploy script reads the staging credential from the runner
+      #    environment (protected masked variable). No credentials are
+      #    stored in this repository.
+      echo "Deploying to staging target..."
+      # The actual deploy command depends on the target infrastructure.
+      # This skeleton records the target contract:
+      HEALTH_CHECK_TARGET="${STAGING_HEALTH_CHECK_URL:-http://staging.local/healthz}"
+      echo "Health-check target: ${HEALTH_CHECK_TARGET}"
+
+      # 3. Record the deployment.
+      printf '{"image":"%s","deployed_at":"%s","health_check_target":"%s"}\n' \
+        "${IMAGE}" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "${HEALTH_CHECK_TARGET}" \
+        > staging-deployment.json
+      echo "Deployment record: $(cat staging-deployment.json)"
+
+  artifacts:
+    paths:
+      - staging-deployment.json
+    expire_in: 365d
+
+  # Explicit prohibition: this job does NOT clone the application repository.
+  # The runner executes only code from this trusted project.
+  before_script:
+    - |
+      if [ -d .git ] && git remote get-url origin 2>/dev/null | grep -qv 'deploy-staging'; then
+        echo "ERROR: application checkout detected. This runner must not execute app scripts." >&2
+        exit 1
+      fi

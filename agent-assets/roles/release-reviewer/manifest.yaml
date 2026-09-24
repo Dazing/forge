@@ -1,0 +1,15 @@
+# Release reviewer role policy. Fresh-context review of a release candidate;
+# one output schema and bounded skills.
+role: release-reviewer
+command: commands/review.md
+skills:
+  - skills/evidence-driven-review/SKILL.md
+tools:
+  - read-only-filesystem
+  - model-sidecar
+output_schema: schemas/review.schema.json
+model_alias: factory-release-review
+resource_policy:
+  max_steps: 80
+  wall_clock_seconds: 1800
+  network: model-sidecar-only

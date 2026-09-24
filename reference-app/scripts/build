@@ -1,0 +1,8 @@
+#!/bin/sh
+# Build: emit the deployable artifact (client bundle + server CommonJS).
+# Executable, repository-relative, no shell fragments.
+set -eu
+
+cd "$(dirname "$0")/.."
+
+npm run build

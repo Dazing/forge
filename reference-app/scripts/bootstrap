@@ -1,0 +1,9 @@
+#!/bin/sh
+# Deterministic bootstrap: install dependencies and Playwright Chromium.
+# Executable, repository-relative, no shell fragments.
+set -eu
+
+cd "$(dirname "$0")/.."
+
+npm ci --omit=optional 2>/dev/null || npm install
+npx playwright install chromium
