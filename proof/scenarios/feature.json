@@ -1,0 +1,9 @@
+{
+  "id": "inventory-feature",
+  "fixture": "samples/feature",
+  "ticket": "samples/tickets/feature.md",
+  "standards": ["standards/inventory-api-skill.md"],
+  "evaluator": "proof/evaluators/feature.sh",
+  "expectedSolution": "proof/expected/feature",
+  "faults": []
+}

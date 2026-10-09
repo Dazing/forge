@@ -1,0 +1,13 @@
+{
+  "name": "@factory/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@factory/core": "0.1.0",
+    "@factory/execution-backend": "0.1.0",
+    "@factory/git-workspace": "0.1.0",
+    "@factory/run-artifacts": "0.1.0",
+    "@factory/verification": "0.1.0"
+  }
+}

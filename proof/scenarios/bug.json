@@ -1,0 +1,9 @@
+{
+  "id": "inventory-double-restock-bug",
+  "fixture": "samples/bug",
+  "ticket": "samples/tickets/bug.md",
+  "standards": ["standards/inventory-api-skill.md"],
+  "evaluator": "proof/evaluators/bug.sh",
+  "expectedSolution": "proof/expected/bug",
+  "faults": []
+}

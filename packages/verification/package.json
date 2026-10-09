@@ -1,0 +1,13 @@
+{
+  "name": "@factory/verification",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@factory/core": "0.1.0",
+    "zod": "4.6.5"
+  }
+}

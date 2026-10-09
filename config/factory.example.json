@@ -1,0 +1,17 @@
+{
+  "sourceRepository": "../samples/inventory-reservations",
+  "baseRef": "main",
+  "repositoryProfile": "./sample-repository.json",
+  "runRoot": "../.runs",
+  "trustedRoot": "../.factory-trusted",
+  "sandboxImage": "software-factory-agent:0.1.0",
+  "vllm": {
+    "endpointEnvironmentVariable": "VLLM_BASE_URL",
+    "modelId": "REPLACE_WITH_ACTUAL_SERVED_MODEL_ID"
+  },
+  "attemptTimeoutSeconds": 900,
+  "standards": [
+    "../standards/inventory-api-skill.md",
+    "../standards/acceptance-test-design.md"
+  ]
+}
