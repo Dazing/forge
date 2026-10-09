@@ -294,6 +294,8 @@ Exit scenarios:
 Deliver:
 
 - Feature, bug, refactor, recovery-success, and recovery-exhaustion scenario results from clean fixed baselines.
+- One additive `vsa-feature` architecture scenario from its own fixed five-slice baseline; the original five-case commitment remains unchanged.
+- One additive `vsa-allocation-feature` scenario from its own fixed six-slice, location-aware baseline; it exercises pure allocation, an external routing boundary, optimistic concurrency, rollback, and conservation without changing the first six scenarios.
 - Independent evaluators kept outside agent-visible/writable inputs. For refactoring, combine behavioral checks with explicit structural review criteria rather than source-text snapshots.
 - Documented CLI usage, required tools, model configuration, check commands, evidence locations, timeouts, and failure interpretation.
 - Actual runtime and repository conventions reflected in the README without presenting the broader factory as implemented.
@@ -307,6 +309,8 @@ Exit: inspect each successful output branch, independently exercise its behavior
 | Scenario | Baseline arrangement | Independent outcome check |
 |---|---|---|
 | Medium feature | Stock API without reservation capability | Create, confirm, cancel, invalid transitions, and no over-reservation |
+| VSA architecture feature | Working five-slice inventory/reservation API with explicit feature ownership and shared persistence-only state | Adjust pending quantity by delta; preserve rollback, terminal-state, case-normalization, atomicity, and concurrent stock conservation |
+| VSA allocation feature | Working six-slice, location-aware inventory/reservation API with safety stock and no reallocation endpoint | Reallocate by fulfillment-route priority; preserve mapping boundaries, rollback, timeout/upstream translation, optimistic concurrency, and stock conservation |
 | Bug | Reservation fixture containing reproducible double-restock defect | Repeated cancellation cannot increase available stock beyond the correct amount |
 | Refactor | Working reservation fixture with genuinely duplicated transition policy | Existing behavior preserved; agreed duplication removed without bypassing standards |
 | Recovery success | Feature fixture plus injected first-attempt execution failure after changes | Fresh attempt identity, preserved changes, passing final behavior |
@@ -339,4 +343,6 @@ Build fixtures in temporary Git repositories from committed source plus explicit
 - [ ] Final checks correspond to the published commit content.
 - [ ] Success publishes only a new solution branch; the base branch is unchanged.
 - [ ] Feature, bug, refactor, recovery-success, and recovery-exhaustion proof cases are exercised.
+- [ ] The additive `vsa-feature` architecture proof case is exercised independently.
+- [ ] The additive `vsa-allocation-feature` location-allocation scenario is exercised independently.
 - [ ] Operation and replacement boundaries are documented without claiming unimplemented broader-factory capabilities.

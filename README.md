@@ -65,6 +65,7 @@ The implemented backend is Sandcastle 0.12.0 with OpenCode and one configured vL
 - [Product brief](docs/software-factory-poc-brief.md): agreed outcome, workflow, constraints, and proof cases.
 - [Implementation plan](docs/software-factory-poc-implementation-plan.md): module boundaries, repository layout, contracts, delivery phases, and verification criteria.
 - [VSA API proof scenario plan](docs/vsa-api-proof-scenario-implementation-plan.md): additive six-slice inventory scenario, trusted acceptance design, evaluator coverage, delivery phases, and verification matrix.
+- [VSA allocation API proof scenario plan](docs/vsa-allocation-api-proof-scenario-implementation-plan.md): location-aware six-slice baseline, external routing boundary, optimistic allocation commit, evaluator coverage, and verification matrix.
 - [Runtime compatibility](docs/runtime-compatibility.md): selected versions, inspected capability, attempted checks, and missing real-runtime prerequisites.
 - [Verification evidence](docs/verification-evidence.md): acceptance mapping, observed commands, proof status, and blockers.
 - [Setup runbook](docs/runbook-setup.md): dependencies and configuration.
@@ -94,21 +95,23 @@ The POC intentionally supports only an unauthenticated vLLM endpoint on a truste
 ```bash
 npm run check
 npm test -- --run tests/integration/preflight.test.ts
-for fixture in feature bug refactor recovery-success recovery-exhaustion; do
+for fixture in feature bug refactor recovery-success recovery-exhaustion vsa-feature vsa-allocation-feature; do
   dotnet build samples/$fixture/src/Inventory.Api/Inventory.Api.csproj --nologo
   dotnet run --project samples/$fixture/tests/Inventory.Tests/Inventory.Tests.csproj
 done
 proof/evaluators/feature.sh proof/expected/feature
 proof/evaluators/bug.sh proof/expected/bug
 proof/evaluators/refactor.sh proof/expected/refactor
+proof/evaluators/vsa-feature.sh proof/expected/vsa-feature
+proof/evaluators/vsa-allocation-feature.sh proof/expected/vsa-allocation-feature
 export PROOF_ID="$(date +%s)"
-for scenario in feature bug refactor recovery-success recovery-exhaustion; do
+for scenario in feature bug refactor recovery-success recovery-exhaustion vsa-feature vsa-allocation-feature; do
   npx tsx proof/harness/run-proof.ts config/factory.local.json \
     "proof/scenarios/$scenario.json" "factory/proof-$scenario-$PROOF_ID" "$PROOF_ID-$scenario"
 done
 ```
 
-The three expected-solution evaluators above pass; running them against their corresponding `samples/*` baseline MUST fail. `npm test` is deterministic orchestration/adapter evidence. It is not a substitute for the five real-model proof runs.
+The five expected-solution evaluators above MUST pass; running them against their corresponding `samples/*` baselines MUST fail. The original five-case proof matrix remains intact, `vsa-feature` adds a sixth independent architecture-feature run, and `vsa-allocation-feature` adds a seventh independent location-allocation run. `npm test` is deterministic orchestration/adapter evidence, not a substitute for real-model proof runs.
 
 ## Evidence and failure handling
 
@@ -118,7 +121,7 @@ Each normal stage has two attempts. The one optional acceptance correction is a 
 
 ## Current verification status
 
-Factory policy, adapters, real local Git isolation/publication, trusted process checks, the .NET fixtures, and the sample HTTP surface are implemented and exercised. Real Sandcastle/OpenCode/vLLM execution is blocked in the current environment: no vLLM endpoint/model configuration is available, Docker and Podman are absent, and unprivileged user namespaces are disabled. Therefore no real-model proof report or successful factory output branch is claimed.
+Factory policy, adapters, real local Git isolation/publication, trusted process checks, and all seven fixture HTTP surfaces are implemented and deterministically exercised as detailed in the evidence record. Real Sandcastle/OpenCode/vLLM execution remains blocked in the current environment: no vLLM endpoint/model configuration is available, Docker and Podman are absent, and unprivileged user namespaces are disabled. Therefore no real-model proof report or successful factory output branch is claimed.
 
 The known same-host limitation is material: without Docker, filesystem modes and separate host-owned paths do not form a security boundary against arbitrary code running as the same OS user. The real proof MUST use the container paths documented in [runtime compatibility](docs/runtime-compatibility.md).
 

@@ -12,6 +12,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from fulfillment_routing_stub import fulfillment_routing_stub
+
 
 def fail_result(test_id: str, criteria: list[str], kind: str) -> dict:
     return {"id": test_id, "status": "failed", "failureKind": kind, "criteria": criteria}
@@ -43,6 +45,11 @@ def value_at(payload: object, path: str) -> object:
     for part in path.split("."):
         if isinstance(current, dict) and part in current:
             current = current[part]
+        elif isinstance(current, list) and part.isdecimal():
+            index = int(part)
+            if index >= len(current):
+                raise AssertionError(f"JSON path {path} was not present")
+            current = current[index]
         else:
             raise AssertionError(f"JSON path {path} was not present")
     return current
@@ -51,60 +58,90 @@ def value_at(payload: object, path: str) -> object:
 def run_case(workspace: Path, case: dict) -> dict:
     test_id = case["id"]
     criteria = case["criteria"]
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        port = listener.getsockname()[1]
-    base_url = f"http://127.0.0.1:{port}"
-    environment = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "HOME": os.environ.get("HOME", str(workspace)),
-        "DOTNET_CLI_HOME": os.environ.get("DOTNET_CLI_HOME", str(workspace / ".dotnet")),
-        "ASPNETCORE_ENVIRONMENT": "Testing",
-    }
-    process = subprocess.Popen(
-        ["dotnet", "run", "--no-build", "--project", "src/Inventory.Api/Inventory.Api.csproj", "--urls", base_url],
-        cwd=workspace,
-        env=environment,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    process: subprocess.Popen | None = None
     try:
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                return fail_result(test_id, criteria, "infrastructure")
+        with fulfillment_routing_stub() as routing_stub:
+            with socket.socket() as listener:
+                listener.bind(("127.0.0.1", 0))
+                port = listener.getsockname()[1]
+            base_url = f"http://127.0.0.1:{port}"
+            environment = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": os.environ.get("HOME", str(workspace)),
+                "DOTNET_CLI_HOME": os.environ.get(
+                    "DOTNET_CLI_HOME", str(workspace / ".dotnet")
+                ),
+                "ASPNETCORE_ENVIRONMENT": "Testing",
+                "FULFILLMENT_ROUTING_BASE_URL": routing_stub.base_url,
+            }
+            process = subprocess.Popen(
+                [
+                    "dotnet",
+                    "run",
+                    "--no-build",
+                    "--project",
+                    "src/Inventory.Api/Inventory.Api.csproj",
+                    "--urls",
+                    base_url,
+                ],
+                cwd=workspace,
+                env=environment,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             try:
-                status, _ = request_json(base_url, {"path": "/health"})
-                if status == 200:
-                    break
-            except (OSError, urllib.error.URLError):
-                time.sleep(0.1)
-        else:
-            return fail_result(test_id, criteria, "infrastructure")
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        return fail_result(test_id, criteria, "infrastructure")
+                    try:
+                        status, _ = request_json(base_url, {"path": "/health"})
+                        if status == 200:
+                            break
+                    except (OSError, urllib.error.URLError):
+                        time.sleep(0.1)
+                else:
+                    return fail_result(test_id, criteria, "infrastructure")
 
-        captures: dict[str, object] = {}
-        for step in case["steps"]:
-            rendered = json.loads(json.dumps(step).replace("${reservationId}", str(captures.get("reservationId", ""))))
-            status, payload = request_json(base_url, rendered)
-            expected = rendered["expect"]
-            if status != expected["status"]:
-                raise AssertionError(f"expected HTTP {expected['status']}, received {status}")
-            for path, expected_value in expected.get("json", {}).items():
-                if value_at(payload, path) != expected_value:
-                    raise AssertionError(f"expected {path}={expected_value!r}")
-            capture_path = rendered.get("captureReservationId")
-            if capture_path:
-                captures["reservationId"] = value_at(payload, capture_path)
-        return {"id": test_id, "status": "passed", "criteria": criteria}
-    except (AssertionError, KeyError, TypeError, urllib.error.URLError, OSError):
-        return fail_result(test_id, criteria, "assertion")
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+                captures: dict[str, object] = {}
+                for step in case["steps"]:
+                    rendered = json.loads(
+                        json.dumps(step).replace(
+                            "${reservationId}",
+                            str(captures.get("reservationId", "")),
+                        )
+                    )
+                    status, payload = request_json(base_url, rendered)
+                    expected = rendered["expect"]
+                    if status != expected["status"]:
+                        raise AssertionError(
+                            f"expected HTTP {expected['status']}, received {status}"
+                        )
+                    for path, expected_value in expected.get("json", {}).items():
+                        if value_at(payload, path) != expected_value:
+                            raise AssertionError(f"expected {path}={expected_value!r}")
+                    capture_path = rendered.get("captureReservationId")
+                    if capture_path:
+                        captures["reservationId"] = value_at(payload, capture_path)
+                return {"id": test_id, "status": "passed", "criteria": criteria}
+            except (
+                AssertionError,
+                KeyError,
+                TypeError,
+                urllib.error.URLError,
+                OSError,
+            ):
+                return fail_result(test_id, criteria, "assertion")
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+    except (OSError, RuntimeError):
+        return fail_result(test_id, criteria, "infrastructure")
 
 
 def load_cases(suite: Path) -> list[dict]:

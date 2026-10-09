@@ -32,77 +32,156 @@ async function makeWritable(path: string): Promise<void> {
   }
 }
 
-describe("real sample preflight", () => {
-  it("clones a fixed baseline and executes candidate acceptance against its read-only copy", async () => {
-    const root = await mkdtemp(join(tmpdir(), "factory-preflight-"));
-    temporaryDirectories.push(root);
-    const source = join(root, "source");
-    await materializeFixture(resolve("."), "proof/scenarios/feature.json", source);
-    const ticketPath = resolve("samples/tickets/feature.md");
-    const request: RunRequest = {
-      runId: "preflight-integration",
-      ticket: parseTicket(ticketPath, await readFile(ticketPath, "utf8")),
-      repository: {
-        sourcePath: source,
-        baseRef: "main",
-        outputBranch: "factory/preflight-integration",
-        profilePath: resolve("config/sample-repository.json"),
-      },
-      model: { provider: "vllm", modelId: "not-used", endpoint: "http://127.0.0.1:8000/v1" },
-      attemptTimeoutMs: 30_000,
-      standards: [resolve("standards/inventory-api-skill.md")],
-    };
-    const workspaceAdapter = new GitWorkspace({ workspaceRoot: join(root, "workspaces") });
-    const workspace = await workspaceAdapter.prepare(request);
-    const verifier = new TrustedVerification({ stateRoot: join(root, "trusted") });
+async function verifyIntentionalRed(options: {
+  scenarioPath: string;
+  ticketPath: string;
+  runId: string;
+  testId: string;
+  method: string;
+  path: string;
+  expectedStatus: number;
+  json: Record<string, unknown>;
+  evidence: string;
+  beforeSteps?: Array<Record<string, unknown>>;
+  expectedJson?: Record<string, unknown>;
+  standards?: string[];
+}): Promise<void> {
+  const root = await mkdtemp(join(tmpdir(), "factory-preflight-"));
+  temporaryDirectories.push(root);
+  const source = join(root, "source");
+  await materializeFixture(resolve("."), options.scenarioPath, source);
+  const ticketPath = resolve(options.ticketPath);
+  const request: RunRequest = {
+    runId: options.runId,
+    ticket: parseTicket(ticketPath, await readFile(ticketPath, "utf8")),
+    repository: {
+      sourcePath: source,
+      baseRef: "main",
+      outputBranch: `factory/${options.runId}`,
+      profilePath: resolve("config/sample-repository.json"),
+    },
+    model: { provider: "vllm", modelId: "not-used", endpoint: "http://127.0.0.1:8000/v1" },
+    attemptTimeoutMs: 30_000,
+    standards: (options.standards ?? ["standards/inventory-api-skill.md"]).map((path) => resolve(path)),
+  };
+  const workspaceAdapter = new GitWorkspace({ workspaceRoot: join(root, "workspaces") });
+  const workspace = await workspaceAdapter.prepare(request);
+  const verifier = new TrustedVerification({ stateRoot: join(root, "trusted") });
 
-    const result = await verifier.preflight(request, workspace);
+  const result = await verifier.preflight(request, workspace);
 
-    expect(result.passed, result.reason).toBe(true);
-    expect(result.checks.map((check) => check.exitCode)).toEqual([0, 0]);
-    const candidate = join(workspace.path, ".factory", "acceptance-candidate");
-    await mkdir(candidate, { recursive: true });
-    const criteria = request.ticket.criteria.map(({ id }) => id);
-    await Promise.all([
-      writeFile(join(candidate, "manifest.json"), JSON.stringify({
-        schemaVersion: 1,
-        tests: [{
-          id: "missing-reservations",
-          file: "missing-reservations.json",
-          criteria,
-          rationale: "The absent reservation endpoint must produce intentional RED on the original baseline.",
-        }],
-      }), "utf8"),
-      writeFile(join(candidate, "missing-reservations.json"), JSON.stringify({
-        id: "missing-reservations",
+  expect(result.passed, result.reason).toBe(true);
+  expect(result.checks.map((check) => check.exitCode)).toEqual([0, 0]);
+  const candidate = join(workspace.path, ".factory", "acceptance-candidate");
+  await mkdir(candidate, { recursive: true });
+  const criteria = request.ticket.criteria.map(({ id }) => id);
+  const caseFile = `${options.testId}.json`;
+  await Promise.all([
+    writeFile(join(candidate, "manifest.json"), JSON.stringify({
+      schemaVersion: 1,
+      tests: [{
+        id: options.testId,
+        file: caseFile,
         criteria,
-        steps: [{
-          method: "POST",
-          path: "/reservations",
-          json: { sku: "WIDGET", quantity: 1 },
-          expect: { status: 201 },
-        }],
-      }), "utf8"),
-    ]);
-    const validation = await verifier.validateCandidate(request, workspace, {
-      status: "completed",
-      stage: "test-design",
-      criteria: criteria.map((id) => ({
-        id,
-        verdict: "unmet" as const,
-        evidence: ["POST /reservations is absent from the baseline."],
-      })),
-      evidence: ["Candidate executes against the copied baseline."],
-      changedWork: "Added one declarative acceptance case.",
-      unresolvedIssues: [],
-    });
+        rationale: "The absent endpoint must produce intentional RED on the original baseline.",
+      }],
+    }), "utf8"),
+    writeFile(join(candidate, caseFile), JSON.stringify({
+      id: options.testId,
+      criteria,
+      steps: [
+        ...(options.beforeSteps ?? []),
+        {
+          method: options.method,
+          path: options.path,
+          json: options.json,
+          expect: {
+            status: options.expectedStatus,
+            ...(options.expectedJson ? { json: options.expectedJson } : {}),
+          },
+        },
+      ],
+    }), "utf8"),
+  ]);
+  const validation = await verifier.validateCandidate(request, workspace, {
+    status: "completed",
+    stage: "test-design",
+    criteria: criteria.map((id) => ({
+      id,
+      verdict: "unmet" as const,
+      evidence: [options.evidence],
+    })),
+    evidence: ["Candidate executes against the copied baseline."],
+    changedWork: "Added one declarative acceptance case.",
+    unresolvedIssues: [],
+  });
 
-    expect(validation.accepted, validation.reason).toBe(true);
-    expect(validation.passed, validation.reason).toBe(true);
-    expect(validation.checks).toMatchObject([{
-      exitCode: 1,
-      discoveredTests: 1,
-      skippedTests: 0,
-    }]);
+  expect(validation.accepted, validation.reason).toBe(true);
+  expect(validation.passed, validation.reason).toBe(true);
+  expect(validation.checks).toMatchObject([{
+    exitCode: 1,
+    discoveredTests: 1,
+    skippedTests: 0,
+  }]);
+}
+
+describe("real sample preflight", () => {
+  it("clones the feature baseline and executes candidate acceptance against its read-only copy", async () => {
+    await verifyIntentionalRed({
+      scenarioPath: "proof/scenarios/feature.json",
+      ticketPath: "samples/tickets/feature.md",
+      runId: "preflight-integration",
+      testId: "missing-reservations",
+      method: "POST",
+      path: "/reservations",
+      expectedStatus: 201,
+      json: { sku: "WIDGET", quantity: 1 },
+      evidence: "POST /reservations is absent from the baseline.",
+    });
+  }, 180_000);
+
+  it("preflights the VSA baseline and accepts missing PATCH as assertion RED", async () => {
+    await verifyIntentionalRed({
+      scenarioPath: "proof/scenarios/vsa-feature.json",
+      ticketPath: "samples/tickets/vsa-feature.md",
+      runId: "preflight-vsa-integration",
+      testId: "missing-adjustment",
+      method: "PATCH",
+      path: "/reservations/00000000-0000-0000-0000-000000000001",
+      json: { quantity: 7 },
+      expectedStatus: 200,
+      evidence: "PATCH /reservations/{id} is absent from the baseline.",
+    });
+  }, 180_000);
+
+  it("preflights the allocation baseline and accepts missing PUT as assertion RED", async () => {
+    await verifyIntentionalRed({
+      scenarioPath: "proof/scenarios/vsa-allocation-feature.json",
+      ticketPath: "samples/tickets/vsa-allocation-feature.md",
+      runId: "preflight-vsa-allocation-integration",
+      testId: "missing-reallocation",
+      method: "PUT",
+      path: "/reservations/${reservationId}/allocations",
+      json: { quantity: 9, destinationPostalCode: "94105" },
+      expectedStatus: 200,
+      expectedJson: {
+        "allocations.0.location": "SOUTH",
+        "allocations.0.quantity": 7,
+        "allocations.1.location": "NORTH",
+        "allocations.1.quantity": 2,
+      },
+      beforeSteps: [{
+        method: "POST",
+        path: "/reservations",
+        json: { sku: "widget", quantity: 4 },
+        expect: { status: 201 },
+        captureReservationId: "id",
+      }],
+      standards: [
+        "standards/inventory-api-skill.md",
+        "standards/inventory-allocation-api-skill.md",
+      ],
+      evidence: "PUT /reservations/{id}/allocations is absent from the baseline.",
+    });
   }, 180_000);
 });
