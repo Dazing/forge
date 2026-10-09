@@ -1,6 +1,6 @@
 ---
 name: inventory-api
-summary: Reviewed implementation standard for the controlled .NET inventory proof repository.
+description: Reviewed implementation standard for the controlled .NET inventory proof repository.
 ---
 
 # Inventory API standard

@@ -1,6 +1,6 @@
 ---
 name: factory-acceptance-test-design
-summary: Authoritative acceptance-suite protocol for the controlled inventory POC.
+description: Authoritative acceptance-suite protocol for the controlled inventory POC.
 ---
 
 # Acceptance suite protocol
@@ -50,4 +50,4 @@ Every listed file is a declarative executable HTTP case interpreted by the host-
 
 Feature and bug cases MUST fail by an assertion for the intended missing behavior. Refactor cases MUST pass before implementation. Infrastructure failures, malformed cases, skipped cases, zero cases, and unrelated command failures are invalid evidence. Map every ticket criterion in both the manifest and final stage report. Do not copy, modify, or replace the host-owned runner or an authoritative suite mounted under `/factory-inputs/acceptance`.
 
-For feature and bug test-design reports, use criterion verdict `unmet` with the intentional RED evidence; `met` is reserved for criteria already satisfied. For refactors, use `met` with baseline GREEN evidence. The orchestrator validates mapping and RED/GREEN semantics independently.
+For feature and bug test-design reports, use criterion verdict `unmet` with the intentional RED evidence; `met` is reserved for criteria already satisfied. For refactors, use `met` with baseline GREEN evidence. The orchestrator validates mapping and RED/GREEN semantics independently. Do not continue if this skill is unavailable through OpenCode's native `skill` tool.

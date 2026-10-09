@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, symlink } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 import type {
+  AnalysisWorkspace,
   GitWorkspacePort,
   PublishedBranch,
   RunRequest,
@@ -49,6 +50,7 @@ export class GitWorkspace implements GitWorkspacePort {
   #workspace: WorkspaceReference | undefined;
   #sourcePath: string | undefined;
   #sourceBaseRef: string | undefined;
+  readonly #analysisPaths = new Set<string>();
   #published = false;
 
   constructor(options: GitWorkspaceOptions = {}) {
@@ -106,6 +108,51 @@ export class GitWorkspace implements GitWorkspacePort {
       `resolve snapshot commit '${label}'`,
     )).stdout.trim();
     return { id, commit };
+  }
+
+  async createAnalysisWorkspace(expectedTreeId: string): Promise<AnalysisWorkspace> {
+    const workspace = this.#requireWorkspace();
+    await assertNoNestedGitMetadata(workspace.path, workspace.path);
+    const publishableFiles = await this.#publishableFiles(workspace.path);
+    const treeId = await digestPublishableFiles(workspace.path, publishableFiles);
+    if (treeId !== expectedTreeId) {
+      throw new Error(`Cannot create analysis workspace: expected tree ${expectedTreeId}, found ${treeId}`);
+    }
+
+    const analysisPath = await mkdtemp(join(workspace.path, "..", "pull-request-analysis-"));
+    try {
+      await this.#git(join(workspace.path, ".."), [
+        "clone",
+        "--no-local",
+        "--no-hardlinks",
+        "--no-checkout",
+        "--",
+        this.#sourcePath!,
+        analysisPath,
+      ], "create pull-request analysis clone");
+      await this.#git(analysisPath, ["remote", "remove", "origin"], "remove analysis source remote");
+      await this.#git(analysisPath, ["switch", "--detach", workspace.baseCommit], "checkout analysis base");
+      await copyPublishableTree(workspace.path, analysisPath, publishableFiles);
+      const copiedFiles = await this.#publishableFiles(analysisPath);
+      const copiedTreeId = await digestPublishableFiles(analysisPath, copiedFiles);
+      if (copiedTreeId !== expectedTreeId) {
+        throw new Error("Pull-request analysis copy differs from the verified candidate tree");
+      }
+      this.#analysisPaths.add(analysisPath);
+      return { path: analysisPath, treeId: copiedTreeId };
+    } catch (error) {
+      await makeDirectoryTreeRemovable(analysisPath);
+      await rm(analysisPath, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  async disposeAnalysisWorkspace(workspace: AnalysisWorkspace): Promise<void> {
+    if (!this.#analysisPaths.delete(workspace.path)) {
+      throw new Error(`Unknown pull-request analysis workspace: ${workspace.path}`);
+    }
+    await makeDirectoryTreeRemovable(workspace.path);
+    await rm(workspace.path, { recursive: true, force: true });
   }
 
   async publishBranch(expectedBaseCommit: string): Promise<PublishedBranch> {
@@ -231,8 +278,15 @@ export class GitWorkspace implements GitWorkspacePort {
   }
 
   async disposeExecutionResources(): Promise<void> {
+    for (const path of this.#analysisPaths) {
+      await makeDirectoryTreeRemovable(path);
+      await rm(path, { recursive: true, force: true });
+      this.#analysisPaths.delete(path);
+    }
     if (this.#published && this.#workspace !== undefined) {
-      await rm(join(this.#workspace.path, ".."), { recursive: true, force: true });
+      const executionRoot = join(this.#workspace.path, "..");
+      await makeDirectoryTreeRemovable(executionRoot);
+      await rm(executionRoot, { recursive: true, force: true });
       this.#workspace = undefined;
     }
   }
@@ -452,4 +506,19 @@ function assertSafeRelativePath(root: string, path: string): void {
 
 function isMissingPath(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+async function makeDirectoryTreeRemovable(root: string): Promise<void> {
+  let entry;
+  try {
+    entry = await lstat(root);
+  } catch (error) {
+    if (isMissingPath(error)) return;
+    throw error;
+  }
+  if (entry.isSymbolicLink() || !entry.isDirectory()) return;
+  await chmod(root, 0o755);
+  for (const child of await readdir(root)) {
+    await makeDirectoryTreeRemovable(join(root, child));
+  }
 }

@@ -3,6 +3,8 @@ import { z } from "zod";
 export const stages = ["test-design", "implementation", "refactor", "review"] as const;
 export type Stage = (typeof stages)[number];
 export type TicketKind = "feature" | "bug" | "refactor";
+export type AttemptTask = Stage | "pull-request";
+
 
 export interface AcceptanceCriterion {
   readonly id: string;
@@ -49,6 +51,20 @@ export const stageReportSchema = z.object({
   unresolvedIssues: z.array(z.string()),
 });
 export type StageReport = z.infer<typeof stageReportSchema>;
+export const pullRequestReportSchema = z.object({
+  status: z.enum(["completed", "blocked"]),
+  title: z.string().trim().min(1),
+  summary: z.array(z.string().trim().min(1)).min(1).max(5),
+  eli5: z.string().trim().min(1),
+  playByPlay: z.array(z.object({
+    explanation: z.string().trim().min(1),
+    references: z.array(z.string().trim().min(1)),
+  })).min(1),
+  evidence: z.array(z.string().trim().min(1)),
+  unresolvedIssues: z.array(z.string()),
+});
+export type PullRequestReport = z.infer<typeof pullRequestReportSchema>;
+
 
 export interface ContextBundle {
   readonly ticket: Ticket;
@@ -73,6 +89,41 @@ export interface AttemptRequest {
   readonly context: ContextBundle;
   readonly correction: boolean;
 }
+export interface PullRequestContext {
+  readonly ticket: Ticket;
+  readonly baseCommit: string;
+  readonly snapshotId: string;
+  readonly standards: readonly string[];
+  readonly priorReports: readonly StageReport[];
+  readonly verificationChecks: readonly CheckResult[];
+}
+
+export interface PullRequestAttemptRequest {
+  readonly runId: string;
+  readonly attempt: 1 | 2;
+  readonly attemptId: string;
+  readonly sessionId: string;
+  readonly workspacePath: string;
+  readonly deadline: number;
+  readonly context: PullRequestContext;
+}
+
+export type PullRequestAttemptOutcome =
+  | {
+      readonly status: "completed";
+      readonly attemptId: string;
+      readonly sessionId: string;
+      readonly report: PullRequestReport;
+      readonly evidence: readonly string[];
+    }
+  | {
+      readonly status: "execution-failure" | "timeout" | "cancelled";
+      readonly attemptId: string;
+      readonly sessionId: string;
+      readonly error: string;
+      readonly evidence: readonly string[];
+    };
+
 
 export type AttemptOutcome =
   | {
@@ -133,16 +184,24 @@ export interface PublishedBranch {
   readonly branch: string;
   readonly commit: string;
 }
+export interface AnalysisWorkspace {
+  readonly path: string;
+  readonly treeId: string;
+}
+
 
 export interface GitWorkspacePort {
   prepare(request: RunRequest): Promise<WorkspaceReference>;
   snapshot(label: string): Promise<Snapshot>;
   publishBranch(expectedBaseCommit: string): Promise<PublishedBranch>;
+  createAnalysisWorkspace(expectedTreeId: string): Promise<AnalysisWorkspace>;
+  disposeAnalysisWorkspace(workspace: AnalysisWorkspace): Promise<void>;
   disposeExecutionResources(): Promise<void>;
 }
 
 export interface ExecutionBackendPort {
   runAttempt(request: AttemptRequest, signal: AbortSignal): Promise<AttemptOutcome>;
+  runPullRequestAttempt(request: PullRequestAttemptRequest, signal: AbortSignal): Promise<PullRequestAttemptOutcome>;
   stopAttempt(attemptId: string): Promise<void>;
 }
 
@@ -154,13 +213,13 @@ export interface VerificationPort {
   captureProductionIdentity(workspace: WorkspaceReference): Promise<string>;
   validateCorrection(request: RunRequest, workspace: WorkspaceReference, report: StageReport, current: AcceptanceSuite, productionIdentity: string): Promise<CandidateValidation>;
   integrateSuite(workspace: WorkspaceReference, suite: AcceptanceSuite): Promise<void>;
-  verifyPublished(workspace: WorkspaceReference, suite: AcceptanceSuite): Promise<GateResult>;
+  verifyFinalCandidate(workspace: WorkspaceReference, suite: AcceptanceSuite): Promise<GateResult>;
 }
 
 export interface ArtifactEvent {
   readonly type: string;
   readonly runId: string;
-  readonly stage?: Stage;
+  readonly stage?: AttemptTask;
   readonly attempt?: number;
   readonly details: Readonly<Record<string, unknown>>;
 }
@@ -181,7 +240,7 @@ export interface FactoryDependencies {
 }
 
 export interface StageAttemptRecord {
-  readonly stage: Stage;
+  readonly stage: AttemptTask;
   readonly attempt: number;
   readonly sessionId: string;
   readonly status: AttemptOutcome["status"] | "rejected";
@@ -197,5 +256,6 @@ export interface RunOutcome {
   readonly attempts: readonly StageAttemptRecord[];
   readonly criteria: readonly StageReport["criteria"][number][];
   readonly terminalReason: string;
+  readonly pullRequestPath?: string;
   readonly reportPath: string;
 }

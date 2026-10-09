@@ -47,6 +47,9 @@ describe("FaultInjectingBackend", () => {
           evidence: ["agent-transcript"],
         };
       },
+      async runPullRequestAttempt() {
+        throw new Error("Pull-request attempts are not exercised by this fault test");
+      },
       async stopAttempt() {},
     };
     const injected = new FaultInjectingBackend(backend, [{

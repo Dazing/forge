@@ -328,6 +328,7 @@ function renderMarkdown(report: FinalReport): string {
     `**Output branch:** ${singleLine(outcome.outputBranch)}`,
     `**Base commit:** ${singleLine(outcome.baseCommit ?? "not recorded")}`,
     `**Final commit:** ${singleLine(outcome.finalCommit ?? "not produced")}`,
+    `**Pull-request draft:** ${singleLine(outcome.pullRequestPath ?? "not produced")}`,
     `**Terminal reason:** ${singleLine(outcome.terminalReason)}`,
     "",
     "## Attempts",

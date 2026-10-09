@@ -10,15 +10,16 @@ The goal is to prove the **core orchestration engine**: fresh agent contexts, re
 2. **Implementation:** a fresh agent solves the ticket using TDD.
 3. **Refactor:** a fresh agent enforces repository standards and improves code quality.
 4. **Code review:** a fresh agent identifies and fixes remaining issues.
-5. **Output:** the orchestrator verifies the final result and publishes a committed solution branch without merging it.
+5. **Pull-request draft:** after exact-tree verification, a fresh read-only explanation agent describes the complete change from an isolated copy; the orchestrator renders `PR.md`.
+6. **Output:** the orchestrator publishes the unchanged verified solution branch without merging it.
 
-Agents execute autonomously inside a container or sandbox. Standards come from supplied skills and the target repository’s `AGENTS.md`.
+Agents execute autonomously inside a container or sandbox. Each configured standard is an OpenCode skill directory containing `<name>/SKILL.md`; the backend mounts it read-only at `/home/agent/.config/opencode/skills/<name>` and requires every fresh agent to load it through OpenCode's native `skill` tool. Repository-specific instructions still come from the target repository's `AGENTS.md`.
 
 Stage gates combine automated checks with explicit acceptance-criteria verdicts. Downstream agents cannot modify authoritative acceptance tests; suspected test defects use a controlled correction path.
 
 A failed stage gets one fresh recovery attempt. If recovery fails, the run stops with diagnostic evidence rather than claiming success.
 
-Each prompt supplies shared operating rules and only the assigned stage's procedure: contract-derived test design, small implementation RED/GREEN cycles, concrete standards refactoring, or bounded whole-branch review. Handoffs identify the original base commit and current tree snapshot, with instructions to inspect the full tracked diff and untracked files. Supplied standards and acceptance suites under `/factory-inputs/` are read-only inputs explicitly permitted by the sample instructions.
+Each coding prompt supplies shared operating rules and only the assigned stage's procedure: contract-derived test design, small implementation RED/GREEN cycles, concrete standards refactoring, or bounded whole-branch review. After those gates, a separate prompt asks for a concise summary plus ELI5 and execution-order explanation; it cannot write to the publication workspace. Handoffs identify the original base commit and current tree snapshot, with instructions to inspect the full tracked diff and untracked files. Supplied skills are read-only OpenCode global skills; acceptance suites under `/home/agent/factory-inputs/` are separate read-only inputs explicitly permitted by the sample instructions.
 
 Agents report every criterion using the tagged `stage_report` JSON contract. Completed test design may retain intentionally unmet criteria; downstream completion requires every criterion met without unresolved issues. Compilation alone never replaces required behavioral gates. These instructions guide the model; trusted orchestrator checks, test protection, and recovery budgets remain authoritative.
 
@@ -31,7 +32,7 @@ Agents report every criterion using the tagged `stage_report` JSON contract. Com
 | Target repository | A controlled C#/.NET 10 sample project |
 | Execution | One ticket at a time in an isolated workspace |
 | Inference | Local vLLM deployment through an OpenAI-compatible endpoint |
-| Output | A solution branch and evidence report, or an explicit failure report |
+| Output | A solution branch, host-owned `PR.md`, and evidence report—or an explicit failure report |
 | Recovery | Agent-stage recovery within the running process |
 | Standards | Repository instructions and supplied agent skills |
 
@@ -89,6 +90,8 @@ The command emits one JSON terminal outcome. Success exit code is `0`, product f
 
 The POC intentionally supports only an unauthenticated vLLM endpoint on a trusted container network, so no inference credential enters the agent environment or transcript. Endpoint credentials/query strings are rejected. `config/sample-repository.json` is trusted host configuration and MUST remain outside the disposable agent clone.
 
+`standards` entries point to skill directories, not individual Markdown files. The directory name and the `name` field in `SKILL.md` must use the same valid OpenCode skill name. To supply a personal global skill, explicitly add its absolute directory (for example `/home/alice/.config/opencode/skills/coding-best-practices`) to the private config; the factory never exposes all host skills implicitly.
+
 ## Checks
 
 ```bash
@@ -110,11 +113,13 @@ done
 
 The three expected-solution evaluators above pass; running them against their corresponding `samples/*` baseline MUST fail. `npm test` is deterministic orchestration/adapter evidence. It is not a substitute for the five real-model proof runs.
 
+The execution-backend test deterministically verifies the native OpenCode discovery mount and required prompt. A real proof additionally requires each attempt transcript to show native `skill` tool calls for every configured skill; path presence or prompt text alone is not runtime proof.
+
 ## Evidence and failure handling
 
-Host-owned run evidence is written under `<runRoot>/evidence/<run-id>/`: `events.jsonl`, transcripts and attachments, `report.json`, and `report.md`. Verification state and immutable authoritative suites are under `<trustedRoot>/<run-id>/`; neither path is mounted writable into the agent container. Failed disposable workspaces remain under `<runRoot>/workspaces/` for diagnosis. Successful output branches are local branches in the configured source repository.
+Host-owned run evidence is written under `<runRoot>/evidence/<run-id>/`: `events.jsonl`, transcripts and attachments, `artifacts/PR.md`, `report.json`, and `report.md`. `PR.md` is produced only after exact-tree verification and is not committed into the solution branch. Verification state and immutable authoritative suites are under `<trustedRoot>/<run-id>/`; neither path is mounted writable into the agent container. Failed disposable workspaces remain under `<runRoot>/workspaces/` for diagnosis. Successful output branches are local branches in the configured source repository.
 
-Each normal stage has two attempts. The one optional acceptance correction is a fresh test-design session and does not reset the reporting stage's budget. Timeouts, malformed reports, failed gates, and runtime failures consume an attempt. Cancellation is terminal. Recovery starts only after backend stop confirmation.
+Each coding stage and the pull-request drafting step have two attempts. The one optional acceptance correction is a fresh test-design session and does not reset the reporting stage's budget. Timeouts, malformed reports, failed gates, and runtime failures consume an attempt. Cancellation is terminal. Recovery starts only after backend stop confirmation. Pull-request attempts inspect fresh disposable analysis clones; their changes are discarded and cannot alter the verified publication workspace.
 
 ## Current verification status
 

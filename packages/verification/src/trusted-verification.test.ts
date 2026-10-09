@@ -258,7 +258,7 @@ describe("TrustedVerification", () => {
     await writeFile(join(value.workspace.path, "tests", "Factory.Acceptance", "scenario.json"), "agent tampering", "utf8");
 
     expect(await readFile(join(suite.path, "scenario.json"), "utf8")).toBe(authoritativeBefore);
-    const finalGate = await value.verifier.verifyPublished(value.workspace, suite);
+    const finalGate = await value.verifier.verifyFinalCandidate(value.workspace, suite);
     expect(finalGate.passed).toBe(false);
     expect(finalGate.reason).toMatch(/integrated acceptance suite/i);
   });

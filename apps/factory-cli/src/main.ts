@@ -78,6 +78,7 @@ async function main(): Promise<number> {
       branch: outcome.outputBranch,
       finalCommit: outcome.finalCommit,
       report: outcome.reportPath,
+      pullRequest: outcome.pullRequestPath,
       reason: outcome.terminalReason,
     })}\n`);
     return outcome.status === "succeeded" ? 0 : outcome.status === "cancelled" ? 130 : 1;

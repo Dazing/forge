@@ -2,7 +2,11 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AttemptRequest, StageReport } from "@factory/core";
+import type {
+  AttemptRequest,
+  PullRequestAttemptRequest,
+  StageReport,
+} from "@factory/core";
 import {
   ExecutionBackend,
   type RunnerInvocation,
@@ -37,11 +41,15 @@ async function fixture(): Promise<FixturePaths> {
   temporaryRoots.push(root);
   const workspacePath = join(root, "workspace");
   const artifactsPath = join(root, "artifacts");
-  const standardsPath = join(root, "protected", "standards.md");
+  const standardsPath = join(root, "protected", "skills", "test-standard");
   const suitePath = join(root, "protected", "acceptance");
   await mkdir(workspacePath, { recursive: true });
+  await mkdir(standardsPath, { recursive: true });
   await mkdir(suitePath, { recursive: true });
-  await writeFile(standardsPath, "standards");
+  await writeFile(
+    join(standardsPath, "SKILL.md"),
+    "---\nname: test-standard\ndescription: Test standard\n---\n\nApply this standard.",
+  );
   return { workspacePath, artifactsPath, standardsPath, suitePath };
 }
 
@@ -81,6 +89,38 @@ function request(paths: FixturePaths, overrides: Partial<AttemptRequest> = {}): 
     correction: false,
     context,
     ...overrides,
+  };
+}
+
+function pullRequestRequest(paths: FixturePaths): PullRequestAttemptRequest {
+  return {
+    runId: "run-1",
+    attempt: 1,
+    attemptId: "pull-request-1",
+    sessionId: "pull-request-session-1",
+    workspacePath: paths.workspacePath,
+    deadline: Date.now() + 10_000,
+    context: {
+      ticket: {
+        path: "ticket.md",
+        markdown: "# Ticket\n\nImplement it.",
+        digest: "ticket-digest",
+        kind: "feature",
+        criteria: [{ id: "criterion-1", text: "It works" }],
+      },
+      baseCommit: "original-base-commit",
+      snapshotId: "verified-tree",
+      standards: [paths.standardsPath],
+      priorReports: [report],
+      verificationChecks: [{
+        command: "npm test",
+        exitCode: 0,
+        discoveredTests: 1,
+        skippedTests: 0,
+        outputArtifact: "test.log",
+        treeId: "verified-tree",
+      }],
+    },
   };
 }
 
@@ -246,6 +286,67 @@ describe("ExecutionBackend", () => {
     });
   });
 
+  it("uses the pull-request contract and read-only explanation prompt for pull-request attempts", async () => {
+    const paths = await fixture();
+    const invocations: RunnerInvocation[] = [];
+    const runner: SandcastleAttemptRunner = {
+      async run(invocation) {
+        invocations.push(invocation);
+        return {
+          report: {
+            status: "completed",
+            title: "Implement requested behavior",
+            summary: ["Implements the ticket."],
+            eli5: "The service now accepts the requested input and produces the expected result.",
+            playByPlay: [{
+              explanation: "The entry point applies the requested behavior.",
+              references: ["src/service.ts:10"],
+            }],
+            evidence: ["Inspected the verified diff."],
+            unresolvedIssues: [],
+          },
+          runtimeSessionId: "pull-request-runtime-session",
+          evidence: [invocation.transcriptPath],
+        };
+      },
+    };
+    const adapter = await backend(paths, runner);
+
+    const outcome = await adapter.runPullRequestAttempt(
+      pullRequestRequest(paths),
+      new AbortController().signal,
+    );
+
+    expect(outcome).toMatchObject({ status: "completed", report: { title: "Implement requested behavior" } });
+    expect(invocations[0]?.kind).toBe("pull-request");
+    expect(invocations[0]?.prompt).toContain("Stay read-only");
+    expect(invocations[0]?.prompt).toContain("verified-tree");
+  });
+
+  it("rejects a coding-stage report returned for a pull-request attempt", async () => {
+    const paths = await fixture();
+    const runner: SandcastleAttemptRunner = {
+      async run(invocation) {
+        return {
+          report,
+          runtimeSessionId: "wrong-contract-runtime-session",
+          evidence: [invocation.transcriptPath],
+        };
+      },
+    };
+    const adapter = await backend(paths, runner);
+
+    const outcome = await adapter.runPullRequestAttempt(
+      pullRequestRequest(paths),
+      new AbortController().signal,
+    );
+
+    expect(outcome).toMatchObject({
+      status: "execution-failure",
+      error: expect.stringContaining("invalid pull-request report"),
+    });
+  });
+
   it("mounts every protected input read-only and keeps the transcript outside the workspace", async () => {
     const paths = await fixture();
     const invocations: RunnerInvocation[] = [];
@@ -261,9 +362,15 @@ describe("ExecutionBackend", () => {
       paths.suitePath,
     ]);
     expect(invocation?.mounts.map(({ sandboxPath }) => sandboxPath)).toEqual([
-      "/home/agent/factory-inputs/standards/1",
+      "/home/agent/.config/opencode/skills/test-standard",
       "/home/agent/factory-inputs/acceptance",
     ]);
+    expect(invocation?.prompt).toContain(
+      "Load every supplied skill through OpenCode's native `skill` tool before editing",
+    );
+    expect(invocation?.prompt).toContain(
+      "/home/agent/.config/opencode/skills/test-standard/SKILL.md",
+    );
     expect(invocation?.transcriptPath.startsWith(`${paths.workspacePath}/`)).toBe(false);
   });
 });

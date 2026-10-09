@@ -55,7 +55,7 @@ Do not substitute deterministic tests for these observations. Once prerequisites
 2. Run the dedicated compatibility scenario from a disposable sample baseline.
 3. Confirm transcript evidence shows file read, edit, and `dotnet test` inside the container.
 4. Run a second attempt with a different attempt/session identity and an explicit first-attempt handoff; confirm it sees workspace changes but no resumed conversation.
-5. Confirm repository `AGENTS.md` and supplied skill paths appear in each context bundle.
+5. Confirm each attempt transcript contains native OpenCode `skill` tool calls for every configured skill, and that repository `AGENTS.md` is read. Read-only mount paths and prompt text alone are insufficient runtime proof.
 6. Trigger cancellation and timeout; after stop confirmation, hash the workspace, wait beyond the attempted command's write interval, and confirm the hash remains unchanged.
 7. Attempt a write to the read-only authoritative-suite mount and require a filesystem denial.
 8. Inspect the source base ref and output branch before and after; require no base-ref change or automatic merge.

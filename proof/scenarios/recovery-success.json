@@ -2,7 +2,7 @@
   "id": "inventory-recovery-success",
   "fixture": "samples/recovery-success",
   "ticket": "samples/tickets/recovery.md",
-  "standards": ["standards/inventory-api-skill.md"],
+  "standards": ["standards/skills/inventory-api"],
   "evaluator": "proof/evaluators/feature.sh",
   "expectedSolution": "proof/expected/feature",
   "faults": [{"stage": "implementation", "attempt": 1, "point": "after-agent-files-changed", "outcome": "execution-failure"}]

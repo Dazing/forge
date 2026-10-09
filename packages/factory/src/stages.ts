@@ -57,7 +57,7 @@ Deadline (Unix ms): ${request.deadline}
 
 ## Operating rules
 - Execute only the assigned stage, but complete all of its obligations. Resolve ordinary ambiguity with the smallest repository-consistent decision; record consequential assumptions. Do not wait for phase approval or silently reduce scope.
-- Read applicable repository AGENTS.md files and the supplied skills before editing. Apply each instruction within its stage and file scope. Use real tool calls, not action-like prose; correct rejected calls rather than repeating malformed text.
+- Load every supplied skill through OpenCode's native \`skill\` tool before editing, then read its mounted SKILL.md when you need to cite or recheck exact wording. If a supplied skill is absent from the tool, report the attempt blocked instead of proceeding without it. Read applicable repository AGENTS.md files and apply each instruction within its stage and file scope. Use real tool calls, not action-like prose; correct rejected calls rather than repeating malformed text.
 - Ground each criterion in its source, observable behavior, distinguishing input/expected result, and evidence. Keep this record compact; no extra planning document is required. Include known boundary and failure behavior from the start.
 - Preserve public contracts, security, data integrity, and repository boundaries. Verify consequential dependency APIs and semantics using installed versions, local usages, source, or authoritative documentation; do not guess from similar names.
 - Inspect only to resolve the next edit/check or a concrete failure. Record exact commands, exit status, and decisive output. Compilation proves type/structure correctness, not behavioral acceptance; never substitute it for required tests.
@@ -83,9 +83,9 @@ Current snapshot (tree identity, not a diff): ${request.context.snapshotId}
 Inspect the complete tracked change with: git diff ${request.context.baseCommit} --
 Also run git status --short and inspect untracked files; the diff alone omits them. Never use only the last commit as the review baseline.
 Authoritative suite: ${request.context.acceptanceSuite?.path ?? "not frozen yet; follow the supplied candidate-suite protocol"}
-Read its manifest for criterion mapping and rationale when present. Supplied standards and the mounted suite are read-only inputs; write only within the workspace and assigned stage scope.
+Read its manifest for criterion mapping and rationale when present. Supplied skills and the mounted suite are read-only inputs; write only within the workspace and assigned stage scope.
 
-## Supplied standards
+## Supplied skills
 ${request.context.standards.map((path) => `- ${path}`).join("\n") || "None supplied; follow applicable repository instructions."}
 
 ## Prior stage reports

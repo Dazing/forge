@@ -147,9 +147,9 @@ Use an explicit sequential loop and typed state, not a configurable workflow DSL
 
 Normal progression:
 
-`preflight → test-design → implementation → refactor → review → finalize → succeeded`
+`preflight → test-design → implementation → refactor → review → integrate-suite → verify-final-candidate → pull-request → publish → succeeded`
 
-A stage advances only after both a valid report and its stage-specific trusted gates succeed. Refactoring and review may change code; rerun required checks against their resulting snapshots.
+A coding stage advances only after both a valid report and its stage-specific trusted gates succeed. Refactoring and review may change code; rerun required checks against their resulting snapshots. Pull-request drafting starts only after exact-tree verification and runs against a disposable analysis clone whose changes cannot reach the publication workspace.
 
 ### State ownership
 
@@ -161,13 +161,13 @@ Terminate the previous attempt and confirm its process/container has stopped bef
 
 ### Finite budgets
 
-- Each of the four normal stages has at most two attempts: initial plus one fresh recovery.
-- Invalid reports, failed gates, timeouts, and runtime failures consume an attempt.
+- Each of the four coding stages has at most two attempts: initial plus one fresh recovery.
+- Pull-request drafting has at most two fresh attempts. Each attempt receives a new disposable analysis clone of the same verified tree; malformed, blocked, failed, or timed-out drafts consume its budget.
 - Preflight/configuration failures stop immediately; agents do not repair unrelated environment setup.
 - Allow at most one acceptance-test correction invocation per run, in a fresh test-design session. It is distinct from recovery of the initial test-design stage.
-- A defect reported on a downstream stage's first attempt may trigger correction, then the reporting stage's second attempt. A defect on its second attempt stops the run: there is no third execution.
+- A defect reported on a downstream coding stage's first attempt may trigger correction, then the reporting stage's second attempt. A defect on its second attempt stops the run: there is no third execution.
 - A rejected correction or another defect report stops the run. No recovery of the correction agent itself.
-- Absolute ceiling: eight normal-stage attempts plus one correction invocation, with a finite timeout on each. Cancellation is terminal, not automatically retried.
+- Absolute ceiling: eight coding-stage attempts, two pull-request attempts, and one correction invocation, with a finite timeout on each. Cancellation is terminal, not automatically retried.
 
 This resolves the brief's proposed correction-budget rule explicitly. Corrections do not reset counters.
 
@@ -211,12 +211,13 @@ The Git workspace module records the source base commit, creates the run branch,
 
 After review:
 
-1. Stop all agent processes.
+1. Stop all coding-agent processes.
 2. Integrate the authoritative acceptance suite and its reproducible runner assets into the output tree using the orchestrator-owned operation.
 3. Run final checks on that exact tree, with the authoritative external verifier.
-4. Commit any remaining changes and capture the final commit identity. Ensure the tested content matches the published content.
-5. Publish only the designated new branch; refuse an existing branch collision rather than force-update it.
-6. Verify the source base branch reference is unchanged and emit the success report.
+4. Create a disposable Git analysis clone with the same publishable-tree identity. Run a fresh pull-request explanation agent there; discard the clone after every attempt.
+5. Render the accepted structured explanation plus orchestrator-observed checks to host-owned `artifacts/PR.md`. Never commit it into the candidate tree.
+6. Publish the unchanged verified tree as the designated new branch and capture the final commit identity.
+7. Verify the source base branch reference is unchanged and emit the success report with the `PR.md` path.
 
 No remote push or merge is required. On failure preserve the isolated diagnostic branch/workspace and identify its location; never label it as the successfully completed output. Publication errors are terminal infrastructure failures, not coding-agent retries.
 
@@ -265,11 +266,11 @@ Exit: a real disposable repository survives a failed attempt with changes preser
 Deliver:
 
 - Markdown input and trusted repository profile loading.
-- Explicit four-stage execution with fresh sessions and versioned context bundles.
-- Stage-specific prompts, report parsing, criterion gates, TDD evidence, and final review with fixes.
-- Final commit publication and human-readable plus machine-readable reports.
+- Explicit four-stage coding execution plus isolated pull-request drafting, all with fresh sessions and versioned context bundles.
+- Stage-specific prompts, report parsing, criterion gates, TDD evidence, final review with fixes, and structured PR explanation output.
+- Final commit publication and human-readable plus machine-readable reports, including host-owned `PR.md`.
 
-Exit: one actual feature ticket completes through vLLM; inspect the resulting diff and run the published branch independently. All four fresh attempt identities and final check evidence must be present. No human command approval is required within the run.
+Exit: one actual feature ticket completes through vLLM; inspect the resulting diff, `PR.md`, and published branch independently. All four coding-stage identities, the pull-request identity, and final check evidence must be present. No human command approval is required within the run.
 
 ### Phase 4 — Bounded failure and correction paths
 
@@ -338,5 +339,6 @@ Build fixtures in temporary Git repositories from committed source plus explicit
 - [ ] Recovery and correction are bounded and exhausted failures are explicit.
 - [ ] Final checks correspond to the published commit content.
 - [ ] Success publishes only a new solution branch; the base branch is unchanged.
+- [ ] Successful output includes host-owned `PR.md` generated from an isolated copy of the verified tree.
 - [ ] Feature, bug, refactor, recovery-success, and recovery-exhaustion proof cases are exercised.
 - [ ] Operation and replacement boundaries are documented without claiming unimplemented broader-factory capabilities.

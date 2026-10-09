@@ -1,17 +1,24 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative } from "node:path";
+import { basename, isAbsolute, join, relative } from "node:path";
 import {
+  buildPullRequestPrompt,
   buildStagePrompt,
+  pullRequestReportSchema,
   stageReportSchema,
   type AttemptOutcome,
   type AttemptRequest,
   type ExecutionBackendPort,
+  type PullRequestAttemptOutcome,
+  type PullRequestAttemptRequest,
+  type PullRequestReport,
   type StageReport,
 } from "@factory/core";
 import { SandcastleRunner } from "./sandcastle-runner.js";
 
 const SANDBOX_INPUTS_PATH = "/home/agent/factory-inputs";
+const OPENCODE_SKILLS_PATH = "/home/agent/.config/opencode/skills";
+const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export interface ExecutionBackendConfig {
   readonly imageName: string;
@@ -34,6 +41,7 @@ export interface RunnerInvocation {
   readonly attemptId: string;
   readonly sessionId: string;
   readonly workspacePath: string;
+  readonly kind: "stage" | "pull-request";
   readonly prompt: string;
   readonly transcriptPath: string;
   readonly branchStrategy: {
@@ -74,6 +82,9 @@ class AttemptStoppedError extends Error {
     this.name = "AttemptStoppedError";
   }
 }
+type AgentAttemptRequest = AttemptRequest | PullRequestAttemptRequest;
+type AgentAttemptOutcome = AttemptOutcome | PullRequestAttemptOutcome;
+
 
 export class ExecutionBackend implements ExecutionBackendPort {
   readonly #activeAttempts = new Map<string, ActiveAttempt>();
@@ -88,7 +99,32 @@ export class ExecutionBackend implements ExecutionBackendPort {
     this.#runner = runner ?? new SandcastleRunner(this.#config);
   }
 
-  async runAttempt(request: AttemptRequest, signal: AbortSignal): Promise<AttemptOutcome> {
+  runAttempt(request: AttemptRequest, signal: AbortSignal): Promise<AttemptOutcome> {
+    return this.#run(request, signal, "stage");
+  }
+
+  runPullRequestAttempt(
+    request: PullRequestAttemptRequest,
+    signal: AbortSignal,
+  ): Promise<PullRequestAttemptOutcome> {
+    return this.#run(request, signal, "pull-request");
+  }
+
+  async #run(
+    request: AttemptRequest,
+    signal: AbortSignal,
+    kind: "stage",
+  ): Promise<AttemptOutcome>;
+  async #run(
+    request: PullRequestAttemptRequest,
+    signal: AbortSignal,
+    kind: "pull-request",
+  ): Promise<PullRequestAttemptOutcome>;
+  async #run(
+    request: AgentAttemptRequest,
+    signal: AbortSignal,
+    kind: RunnerInvocation["kind"],
+  ): Promise<AgentAttemptOutcome> {
     const identityError = this.#claimIdentity(request);
     if (identityError !== undefined) {
       return executionFailure(request, identityError, []);
@@ -127,9 +163,9 @@ export class ExecutionBackend implements ExecutionBackendPort {
     };
 
     try {
-      validateRequest(request);
+      validateRequest(request, kind);
       cancelAtDeadline();
-      const invocation = await this.#createInvocation(request, controller.signal);
+      const invocation = await this.#createInvocation(request, controller.signal, kind);
       const result = await this.#runner.run(invocation);
 
       if (abortCause !== undefined || controller.signal.aborted) {
@@ -152,25 +188,43 @@ export class ExecutionBackend implements ExecutionBackendPort {
       }
       this.#seenRuntimeSessionIds.add(result.runtimeSessionId);
 
-      const parsedReport = stageReportSchema.safeParse(result.report);
+      if (kind === "stage") {
+        const stageRequest = request as AttemptRequest;
+        const parsedReport = stageReportSchema.safeParse(result.report);
+        if (!parsedReport.success) {
+          return executionFailure(
+            request,
+            `Attempt ${request.attemptId} produced an invalid stage report: ${parsedReport.error.issues
+              .map((issue) => `${issue.path.join(".") || "report"}: ${issue.message}`)
+              .join("; ")}`,
+            result.evidence,
+          );
+        }
+        if (parsedReport.data.stage !== stageRequest.stage) {
+          return executionFailure(
+            stageRequest,
+            `Attempt ${request.attemptId} reported stage ${parsedReport.data.stage}, expected ${stageRequest.stage}.`,
+            result.evidence,
+          );
+        }
+        return completedStageOutcome(stageRequest, parsedReport.data, result.evidence);
+      }
+
+      const parsedReport = pullRequestReportSchema.safeParse(result.report);
       if (!parsedReport.success) {
         return executionFailure(
           request,
-          `Attempt ${request.attemptId} produced an invalid stage report: ${parsedReport.error.issues
+          `Attempt ${request.attemptId} produced an invalid pull-request report: ${parsedReport.error.issues
             .map((issue) => `${issue.path.join(".") || "report"}: ${issue.message}`)
             .join("; ")}`,
           result.evidence,
         );
       }
-      if (parsedReport.data.stage !== request.stage) {
-        return executionFailure(
-          request,
-          `Attempt ${request.attemptId} reported stage ${parsedReport.data.stage}, expected ${request.stage}.`,
-          result.evidence,
-        );
-      }
-
-      return completedOutcome(request, parsedReport.data, result.evidence);
+      return completedPullRequestOutcome(
+        request as PullRequestAttemptRequest,
+        parsedReport.data,
+        result.evidence,
+      );
     } catch (error) {
       if (abortCause !== undefined || controller.signal.aborted) {
         const cause = abortCause ?? "cancelled";
@@ -205,7 +259,7 @@ export class ExecutionBackend implements ExecutionBackendPort {
     await activeAttempt.completion;
   }
 
-  #claimIdentity(request: AttemptRequest): string | undefined {
+  #claimIdentity(request: AgentAttemptRequest): string | undefined {
     if (this.#seenAttemptIds.has(request.attemptId)) {
       return `Attempt identity ${request.attemptId} has already been used.`;
     }
@@ -218,24 +272,41 @@ export class ExecutionBackend implements ExecutionBackendPort {
     return undefined;
   }
 
-  async #createInvocation(request: AttemptRequest, signal: AbortSignal): Promise<RunnerInvocation> {
+  async #createInvocation(
+    request: AgentAttemptRequest,
+    signal: AbortSignal,
+    kind: RunnerInvocation["kind"],
+  ): Promise<RunnerInvocation> {
     const workspacePath = await realpath(request.workspacePath);
     const artifactsPath = await ensureDirectory(this.#config.artifactsPath);
     assertOutsideWorkspace(workspacePath, artifactsPath, "Artifact directory");
 
     const mounts: ReadonlyMount[] = [];
+    const skillNames = new Set<string>();
     for (const [index, standardsPath] of request.context.standards.entries()) {
       const hostPath = await realpath(standardsPath);
-      assertOutsideWorkspace(workspacePath, hostPath, `Standards input ${index + 1}`);
+      assertOutsideWorkspace(workspacePath, hostPath, `Skill input ${index + 1}`);
+      const skillName = basename(hostPath);
+      if (!SKILL_NAME_PATTERN.test(skillName)) {
+        throw new Error(`Skill input ${index + 1} directory name "${skillName}" is not a valid OpenCode skill name.`);
+      }
+      if (skillNames.has(skillName)) {
+        throw new Error(`OpenCode skill name "${skillName}" is configured more than once.`);
+      }
+      const skillFilePath = await realpath(join(hostPath, "SKILL.md"));
+      if (relative(hostPath, skillFilePath) !== "SKILL.md") {
+        throw new Error(`Skill input ${index + 1} must contain its own SKILL.md file.`);
+      }
+      skillNames.add(skillName);
       mounts.push({
         hostPath,
-        sandboxPath: `${SANDBOX_INPUTS_PATH}/standards/${index + 1}`,
+        sandboxPath: `${OPENCODE_SKILLS_PATH}/${skillName}`,
         readonly: true,
       });
     }
 
     let acceptanceSuitePath: string | undefined;
-    if (request.context.acceptanceSuite !== undefined) {
+    if ("acceptanceSuite" in request.context && request.context.acceptanceSuite !== undefined) {
       acceptanceSuitePath = await realpath(request.context.acceptanceSuite.path);
       assertOutsideWorkspace(workspacePath, acceptanceSuitePath, "Authoritative acceptance suite");
       mounts.push({
@@ -249,10 +320,11 @@ export class ExecutionBackend implements ExecutionBackendPort {
     await mkdir(join(artifactsPath, "transcripts"), { recursive: true });
 
     return {
+      kind,
       attemptId: request.attemptId,
       sessionId: request.sessionId,
       workspacePath,
-      prompt: buildPrompt(request),
+      prompt: buildPrompt(request, kind),
       transcriptPath: path,
       branchStrategy: { type: "head" },
       mounts,
@@ -309,12 +381,16 @@ function validateConfig(config: ExecutionBackendConfig): ExecutionBackendConfig 
   return Object.freeze({ ...config, endpoint: endpoint.toString().replace(/\/$/, "") });
 }
 
-function validateRequest(request: AttemptRequest): void {
+function validateRequest(request: AgentAttemptRequest, kind: RunnerInvocation["kind"]): void {
   if (!Number.isFinite(request.deadline)) {
     throw new Error(`Attempt ${request.attemptId} has a non-finite deadline.`);
   }
-  if (request.context.stage !== request.stage || request.context.attempt !== request.attempt) {
-    throw new Error(`Attempt ${request.attemptId} context identity does not match its request.`);
+  if (kind === "stage") {
+    const stageRequest = request as AttemptRequest;
+    if (stageRequest.context.stage !== stageRequest.stage
+      || stageRequest.context.attempt !== stageRequest.attempt) {
+      throw new Error(`Attempt ${request.attemptId} context identity does not match its request.`);
+    }
   }
 }
 
@@ -336,23 +412,38 @@ function transcriptPath(artifactsPath: string, attemptId: string): string {
   return join(artifactsPath, "transcripts", `${prefix}-${digest}.log`);
 }
 
-function buildPrompt(request: AttemptRequest): string {
-  const acceptanceSuite = request.context.acceptanceSuite;
-  const sandboxRequest: AttemptRequest = {
-    ...request,
+function buildPrompt(
+  request: AgentAttemptRequest,
+  kind: RunnerInvocation["kind"],
+): string {
+  const standards = request.context.standards.map((path) =>
+    `${OPENCODE_SKILLS_PATH}/${basename(path)}/SKILL.md`
+  );
+  if (kind === "pull-request") {
+    const pullRequest = request as PullRequestAttemptRequest;
+    return buildPullRequestPrompt({
+      ...pullRequest,
+      workspacePath: "/home/agent/workspace",
+      context: { ...pullRequest.context, standards },
+    });
+  }
+
+  const stageRequest = request as AttemptRequest;
+  const acceptanceSuite = stageRequest.context.acceptanceSuite;
+  return buildStagePrompt({
+    ...stageRequest,
     workspacePath: "/home/agent/workspace",
     context: {
-      ...request.context,
-      standards: request.context.standards.map((_, index) => `${SANDBOX_INPUTS_PATH}/standards/${index + 1}`),
+      ...stageRequest.context,
+      standards,
       ...(acceptanceSuite === undefined
         ? {}
         : { acceptanceSuite: { ...acceptanceSuite, path: `${SANDBOX_INPUTS_PATH}/acceptance` } }),
     },
-  };
-  return buildStagePrompt(sandboxRequest);
+  });
 }
 
-function completedOutcome(
+function completedStageOutcome(
   request: AttemptRequest,
   report: StageReport,
   evidence: readonly string[],
@@ -366,11 +457,25 @@ function completedOutcome(
   };
 }
 
+function completedPullRequestOutcome(
+  request: PullRequestAttemptRequest,
+  report: PullRequestReport,
+  evidence: readonly string[],
+): PullRequestAttemptOutcome {
+  return {
+    status: "completed",
+    attemptId: request.attemptId,
+    sessionId: request.sessionId,
+    report,
+    evidence,
+  };
+}
+
 function executionFailure(
-  request: AttemptRequest,
+  request: AgentAttemptRequest,
   error: string,
   evidence: readonly string[],
-): AttemptOutcome {
+): AgentAttemptOutcome {
   return {
     status: "execution-failure",
     attemptId: request.attemptId,
@@ -381,10 +486,10 @@ function executionFailure(
 }
 
 function abortedOutcome(
-  request: AttemptRequest,
+  request: AgentAttemptRequest,
   cause: Exclude<AbortCause, undefined>,
   evidencePath: string,
-): AttemptOutcome {
+): AgentAttemptOutcome {
   return {
     status: cause,
     attemptId: request.attemptId,

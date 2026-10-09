@@ -9,8 +9,8 @@ Evidence recorded 2026-10-09. `PASS` means the cited command was observed in thi
 | 0 — runtime compatibility | **BLOCKED** | `docs/runtime-compatibility.md`. Sandcastle/OpenCode API and versions inspected; no vLLM configuration and no Docker/Podman. No real tool-calling claim. |
 | 1 — boundaries and fixtures | **PASS** | `npm run typecheck`; `npm run check:dependencies`; ticket parser tests; five .NET 10 fixtures; real sample `/health` returned `{"status":"ok"}` and `/inventory` returned WIDGET quantity 10. |
 | 2 — workspace, evidence, verification | **PASS for local mechanisms; container enforcement BLOCKED** | Git adapter real-repository tests, artifact tests, verifier tests, and `tests/integration/preflight.test.ts`. Docker read-only mount denial and verifier/application container separation remain blocked. |
-| 3 — real happy path | **BLOCKED** | Four-stage sequential implementation and deterministic tests exist. No actual vLLM run, real report, or output branch exists. |
-| 4 — recovery/correction | **PASS deterministically; real agent recovery BLOCKED** | Focused 26-test command covers successful recovery, two-attempt exhaustion, invalid report, correction, timeout/stop, suite tampering, publication hardening, and branch preservation. Fault decorator is `proof/harness/fault-injecting-backend.ts`. |
+| 3 — real happy path | **BLOCKED for the current pipeline** | Four coding stages plus isolated pull-request drafting are implemented and pass deterministic tests. No actual vLLM run has exercised the new pull-request step, so no model-produced `PR.md` or current-pipeline success is claimed. |
+| 4 — recovery/correction | **PASS deterministically; real agent recovery BLOCKED** | Focused tests cover coding-stage and pull-request recovery/exhaustion, invalid reports, correction, timeout/stop, suite tampering, analysis-copy isolation, publication hardening, and branch preservation. Fault decorator is `proof/harness/fault-injecting-backend.ts`. |
 | 5 — proof suite | **BLOCKED for real model** | All independent fixtures and evaluators exist. Expected solutions pass and baselines fail their independent evaluators. No results are represented as model-produced. |
 
 ## Brief definition of done
@@ -18,8 +18,9 @@ Evidence recorded 2026-10-09. `PASS` means the cited command was observed in thi
 | Requirement | Status | Evidence or blocker |
 |---|---|---|
 | One manual invocation runs one ticket without intervention | **BLOCKED** | CLI is runnable and its missing-endpoint failure was observed with exit 2. Actual run needs vLLM and Docker. |
-| Every stage/recovery uses fresh context | **PASS deterministically** | Factory attempt IDs/session IDs are unique; backend rejects reused orchestration or OpenCode runtime session IDs and never calls Sandcastle resume/fork. |
+| Every stage/recovery uses fresh context | **PASS deterministically** | Coding-stage and pull-request attempt IDs/session IDs are unique; backend rejects reused orchestration or OpenCode runtime session IDs and never calls Sandcastle resume/fork. |
 | Autonomous sandbox agents use configured vLLM | **BLOCKED** | Endpoint/model/container prerequisites absent. |
+| Supplied OpenCode skills are available to each agent | **PASS for deterministic delivery contract; real tool discovery BLOCKED** | Backend tests prove each configured skill directory is mounted read-only at OpenCode's global discovery path and each fresh prompt requires the native `skill` tool. Docker/vLLM are absent, so no transcript-level skill call is claimed. |
 | Acceptance tests are independently enforced | **PASS locally; sandbox denial BLOCKED** | Host-owned immutable suites, digest checks, direct trusted runner, zero/skipped/infrastructure rejection, integration-copy verification, and read-only baseline copies that preserve executable launch permissions. Same-UID host execution is not a sandbox boundary. |
 | Feature, bug, refactor produce committed satisfying branches | **BLOCKED** | Fixed baselines and expected-solution evaluators are proven; no substitute branches are published or claimed. |
 | Injected first failure recovers once | **PASS deterministically; real model BLOCKED** | Factory workflow test and proof-only attempt-boundary decorator. |
@@ -34,13 +35,13 @@ Evidence recorded 2026-10-09. `PASS` means the cited command was observed in thi
 | Directed modules and replaceable contracts | **PASS** | `packages/factory/src/contracts.ts`, package public exports, `tools/check-dependencies.ts` |
 | Markdown ticket without human intervention | **BLOCKED at runtime** | Parser/CLI implemented; real backend prerequisites absent |
 | Fresh sessions and explicit handoffs | **PASS deterministically** | `execute-ticket.ts`, `stages.ts`, backend identity tests |
-| Meaningful tests and rationale before implementation | **PASS in verifier contract; real agent BLOCKED** | Candidate manifest/rationale validation, expected RED/GREEN policy, `standards/acceptance-test-design.md` |
+| Meaningful tests and rationale before implementation | **PASS in verifier contract; real agent BLOCKED** | Candidate manifest/rationale validation, expected RED/GREEN policy, `standards/skills/factory-acceptance-test-design/SKILL.md` |
 | TDD/refactor/review evidence | **PASS in contracts and observed feature run** | Run `1791550785-feature` completed all four model stages and trusted gates; its final publication exposed the ignored-output identity defect now covered by the Git workspace regression. |
 | Tests/gates outside downstream write authority | **PASS locally; mount proof BLOCKED** | verifier host paths/digests/modes and Docker readonly mount configuration |
-| Bounded recovery/correction | **PASS** | Two attempts/stage, one correction, cancellation terminal, malformed/timeout consume budget, workspace snapshots have orchestration deadlines, and proof workers have an external no-progress supervisor. |
-| Final checks match publishable content | **PASS deterministically** | Verifier hashes the exact tree before/after final checks; publication derives verification, copying, and materialized-commit comparison from one Git publishable-file set, excludes ignored build/runtime outputs, rejects nested Git metadata, and updates the new source ref only after identity equality. |
+| Bounded recovery/correction | **PASS** | Two attempts per coding stage and pull-request draft, one correction, cancellation terminal, malformed/timeout consume budget, workspace snapshots have orchestration deadlines, and proof workers have an external no-progress supervisor. |
+| Final checks match publishable content | **PASS deterministically** | Verifier hashes the exact tree before/after final checks; pull-request agents receive disposable analysis clones whose mutations cannot reach publication; publication derives verification, copying, and materialized-commit comparison from one Git publishable-file set. |
 | New branch only/base unchanged | **PASS** | real Git adapter tests |
-| Five proof cases exercised | **BLOCKED for complete suite** | The real feature run reached all four stages and final verification but failed the now-fixed publication invariant; bug, refactor, and recovery model proofs remain outstanding. |
+| Five proof cases exercised | **BLOCKED for complete suite** | Real feature runs reached all four stages; run `1791552358-feature` created its output branch and that branch passes the independent evaluator, but the run report remained failed because post-publication cleanup could not remove the protected suite. Cleanup is now covered; bug, refactor, and recovery model proofs remain outstanding. |
 | Operations/replacement boundaries documented | **PASS** | `README.md`, `docs/runtime-compatibility.md` |
 
 ## Observed commands and outcomes
@@ -53,10 +54,13 @@ npm run check:dependencies
   PASS, no forbidden/deep imports
 
 npm test
-  PASS: 12 files, 45 tests, including executable-mode preservation, stage-handoff deadlines, external supervisor termination, ignored-output publication, and real .NET preflight integration
+  PASS: 13 files, 54 tests, including pull-request schema separation, bounded drafting recovery, analysis-copy isolation, deterministic PR.md rendering, native OpenCode skill discovery, exact-tree verification, and real .NET preflight integration
 
-npm test -- --run packages/factory/src/execute-ticket/execute-ticket.test.ts packages/execution-backend/src/execution-backend.test.ts packages/verification/src/trusted-verification.test.ts packages/git-workspace/src/git-workspace.test.ts
-  PASS: 4 files, 26 tests
+npm test -- --run packages/factory/src/execute-ticket/execute-ticket.test.ts packages/factory/src/pull-request.test.ts packages/execution-backend/src/execution-backend.test.ts packages/git-workspace/src/git-workspace.test.ts packages/run-artifacts/src/file-run-artifacts.test.ts packages/verification/src/trusted-verification.test.ts proof/harness/fault-injecting-backend.test.ts
+  PASS: 7 files, 45 tests
+
+npm test -- --run packages/execution-backend/src/execution-backend.test.ts
+  PASS: pull-request and coding-stage contracts remain distinct; read-only explanation prompts, protected mounts, fresh runtime sessions, timeout, cancellation, and malformed-output handling are green
 
 npm test -- tests/integration/preflight.test.ts packages/verification/src/directory-integrity.test.ts
   PASS: copied executable retains launch permission; trusted acceptance runs against the read-only baseline and classifies missing behavior as assertion RED
@@ -65,7 +69,13 @@ npm test -- packages/factory/src/execute-ticket/execute-ticket.test.ts proof/har
   PASS: 3 files, 11 tests; durable snapshot boundaries, timeout failure report, external worker termination/diagnostic, and timeout configuration
 
 npm test -- packages/git-workspace/src/git-workspace.test.ts
-  PASS: 1 file, 6 tests; real disposable Git publication excludes ignored build outputs while preserving exact committed bytes and source refs
+  PASS: 1 file, 8 tests; a mutated pull-request analysis clone cannot change the verified publication workspace or published branch
+
+Run 1791552358-feature
+  Observed: all four stages and final gates passed; output branch factory/proof-feature-1791552358 was created at 5110a85f, then cleanup failed unlinking the read-only integrated suite. The run remains failed evidence; the cleanup regression reproduces and fixes that post-publication failure without rerunning it.
+
+proof/evaluators/feature.sh <checkout-of-factory/proof-feature-1791552358>
+  PASS: feature independent HTTP acceptance; evaluator accepts the preserved baseline `quantity` representation and any explicit 4xx rejection where the ticket does not prescribe an exact status
 
 npx tsx proof/harness/run-proof.ts config/factory.local.json proof/scenarios/feature.json factory/proof-supervisor-smoke supervisor-smoke-1791544643
   Expected environment failure: supervised worker completed with exit 1 because the sandbox image is unavailable; report.json, snapshot events, FACTORY_PROGRESS output, and supervisor.json were all observed
@@ -90,4 +100,4 @@ A trusted-runner smoke initially failed because the temporary assertion expected
 
 ## Proof reports and branches
 
-No `.runs/<run-id>/report.json` from a real model and no factory output branch exist. This is the required honest result while Phase 0 is blocked. Deterministic tests write only temporary repositories and do not masquerade as model proof branches.
+Historical real-model feature attempts and one published feature branch are retained under `.runs/`; they predate the pull-request step and therefore do not prove the current pipeline. No actual vLLM run has produced the new host-owned `artifacts/PR.md`. Deterministic tests and the artifact smoke use only temporary paths and do not masquerade as model proof runs.

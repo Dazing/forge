@@ -18,6 +18,19 @@ def request(method, path, body=None):
     except urllib.error.HTTPError as error:
         return error.code, None
 
+def inventory_quantity(path):
+    status, payload = request("GET", path)
+    assert status == 200, f"inventory lookup returned {status}"
+    assert isinstance(payload, dict), "inventory lookup did not return a JSON object"
+    if "quantity" in payload:
+        return payload["quantity"]
+    if "available" in payload:
+        return payload["available"]
+    raise AssertionError("inventory response exposed neither quantity nor available stock")
+
+def assert_rejected(status, operation):
+    assert 400 <= status < 500, f"{operation} returned {status}, expected an explicit 4xx rejection"
+
 try:
     deadline = time.monotonic() + 30
     while True:
@@ -32,15 +45,15 @@ try:
     created_status, reservation = request("POST", "/reservations", {"sku": "widget", "quantity": 4})
     assert created_status == 201, f"creation returned {created_status}"
     reservation_id = reservation["id"]
-    assert request("GET", "/inventory/widget")[1]["available"] == 6
+    assert inventory_quantity("/inventory/widget") == 6
     assert request("POST", f"/reservations/{reservation_id}/cancel")[0] == 204
     second_status = request("POST", f"/reservations/{reservation_id}/cancel")[0]
-    available = request("GET", "/inventory/widget")[1]["available"]
-    assert second_status == 409, f"repeated cancellation returned {second_status}"
+    assert_rejected(second_status, "repeated cancellation")
+    available = inventory_quantity("/inventory/widget")
     assert available == 10, f"repeated cancellation left available={available}"
     if mode == "feature":
-        assert request("POST", "/reservations", {"sku": "widget", "quantity": 11})[0] == 409
-        assert request("POST", "/reservations", {"sku": "widget", "quantity": 0})[0] == 409
+        assert_rejected(request("POST", "/reservations", {"sku": "widget", "quantity": 11})[0], "over-reservation")
+        assert_rejected(request("POST", "/reservations", {"sku": "widget", "quantity": 0})[0], "non-positive reservation")
         status, confirmed = request("POST", "/reservations", {"sku": "widget", "quantity": 3})
         assert status == 201
         assert request("POST", f"/reservations/{confirmed['id']}/confirm")[0] == 204

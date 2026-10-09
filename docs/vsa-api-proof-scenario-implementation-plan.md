@@ -40,7 +40,7 @@ Concrete ownership and behavior:
 - `proof/harness/run-proof.ts` materializes that fixture, parses the Markdown ticket, combines configured and scenario standards, creates the isolated run, and invokes the independent evaluator on the published checkout only after a successful normal scenario.
 - `config/sample-repository.json` defines the reusable .NET build and executable-test commands, candidate suite location, protected HTTP runner, stage/final checks, and excluded generated paths. Any fixture retaining `src/Inventory.Api` and `tests/Inventory.Tests` works without a second repository profile.
 - `packages/verification/src/trusted-verification.ts` runs baseline checks, snapshots a read-only original baseline, validates the test-design candidate against that baseline, promotes it to a host-owned immutable suite, and reruns it at downstream gates.
-- `standards/acceptance-test-design.md` defines candidate `manifest.json` plus declarative JSON HTTP cases. Each case starts a fresh API process; it can assert status and dotted JSON values and capture a response property as `${reservationId}`.
+- `standards/skills/factory-acceptance-test-design/SKILL.md` defines candidate `manifest.json` plus declarative JSON HTTP cases. Each case starts a fresh API process; it can assert status and dotted JSON values and capture a response property as `${reservationId}`.
 - `proof/harness/trusted_acceptance.py` is the host-owned interpreter. Feature candidates are valid RED evidence only when they discover tests and fail with the configured assertion exit code `1`, not on setup or infrastructure.
 - `proof/evaluators/api_evaluator.py` starts the real API on an ephemeral loopback port and checks observable HTTP behavior. `proof/evaluators/{feature,bug}.sh` select its current modes. Evaluators and `proof/expected/*` remain outside the materialized agent repository.
 - `tests/integration/preflight.test.ts` proves the feature fixture can be materialized, pass baseline build/tests, and produce intentional assertion RED against the protected runner.
@@ -49,7 +49,7 @@ Concrete ownership and behavior:
 ### 2.2 Existing sample conventions
 
 - All five fixtures target `net10.0`, enable nullable references and implicit usings, treat warnings as errors, and use an ASP.NET Core minimal API project plus a dependency-free console test executable.
-- `samples/*/AGENTS.md` supplies fixture-local architecture and safety rules. `standards/inventory-api-skill.md` supplies reservation states, transition, case normalization, atomicity, cancellation, and dependency rules.
+- `samples/*/AGENTS.md` supplies fixture-local architecture and safety rules. `standards/skills/inventory-api/SKILL.md` supplies reservation states, transition, case normalization, atomicity, cancellation, and dependency rules.
 - The current `samples/feature` fixture is deliberately thin: health plus inventory list/get/set. The current expected feature solution adds reservation creation, confirmation, and cancellation in one `Program.cs`/`ReservationStore` implementation. It is appropriate for proving a medium feature, but not for proving that an agent can preserve and extend established slice boundaries.
 - Existing deterministic commands are `dotnet build src/Inventory.Api/Inventory.Api.csproj --nologo` and `dotnet run --project tests/Inventory.Tests/Inventory.Tests.csproj`. Existing evaluators prove the HTTP surface independently; the console tests are not the authoritative acceptance suite.
 - The current environment record in `docs/runtime-compatibility.md` says Docker/Podman and a compatible configured vLLM endpoint are unavailable. Deterministic implementation verification can still complete; real-model proof results must remain `BLOCKED` until those prerequisites exist.
@@ -233,7 +233,7 @@ docs/
   "id": "inventory-vsa-feature",
   "fixture": "samples/vsa-feature",
   "ticket": "samples/tickets/vsa-feature.md",
-  "standards": ["standards/inventory-api-skill.md"],
+  "standards": ["standards/skills/inventory-api"],
   "evaluator": "proof/evaluators/vsa-feature.sh",
   "expectedSolution": "proof/expected/vsa-feature",
   "faults": []
@@ -405,7 +405,7 @@ Run from repository root. `PROOF_ID` and output paths must be unique.
 | Full deterministic factory suite | `npm run check` | Typecheck, dependency checks, and all deterministic tests pass. |
 | All fixture builds/tests | `for fixture in feature bug refactor recovery-success recovery-exhaustion vsa-feature; do dotnet build "samples/$fixture/src/Inventory.Api/Inventory.Api.csproj" --nologo && dotnet run --project "samples/$fixture/tests/Inventory.Tests/Inventory.Tests.csproj"; done` | Every fixture baseline is independently green. |
 | Real model proof | `PROOF_ID="$(date +%s)"; npx tsx proof/harness/run-proof.ts config/factory.local.json proof/scenarios/vsa-feature.json "factory/proof-vsa-feature-$PROOF_ID" "$PROOF_ID-vsa-feature"` | With prerequisites: terminal `succeeded`, new branch, trusted gates green, independent evaluator green. Without Docker/vLLM: report exact infrastructure blocker; do not claim proof success. |
-| Published branch inspection | `cat ".runs/evidence/$PROOF_ID-vsa-feature/report.json"` and `git -C ".runs/proof-inputs/inventory-vsa-feature-$PROOF_ID-vsa-feature/source" show --stat "factory/proof-vsa-feature-$PROOF_ID"` | Report identifies all four fresh stages; branch contains one coherent slice plus legitimate tests and no evaluator/oracle files. |
+| Published branch and PR-draft inspection | `cat ".runs/evidence/$PROOF_ID-vsa-feature/report.json"`, `cat ".runs/evidence/$PROOF_ID-vsa-feature/artifacts/PR.md"`, and `git -C ".runs/proof-inputs/inventory-vsa-feature-$PROOF_ID-vsa-feature/source" show --stat "factory/proof-vsa-feature-$PROOF_ID"` | Report identifies all four coding stages plus isolated pull-request drafting; branch contains one coherent slice plus legitimate tests and no evaluator, oracle, or committed `PR.md` files. |
 
 For the API smoke required before evaluator integration, launch with an ephemeral explicit URL using the repository pattern:
 

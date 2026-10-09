@@ -47,10 +47,10 @@ async function runProof(
     model: { provider: "vllm", modelId: configuration.modelId, endpoint: configuration.endpoint },
     attemptTimeoutMs: configuration.attemptTimeoutMs,
     orchestrationTimeoutMs: configuration.orchestrationTimeoutMs,
-    standards: [
+    standards: [...new Set([
       ...configuration.standards,
       ...scenario.standards.map((path) => resolve(repositoryRoot, path)),
-    ],
+    ])],
   };
   const artifacts = new FileRunArtifacts({
     rootDirectory: evidenceRoot,

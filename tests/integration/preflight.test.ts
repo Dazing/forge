@@ -50,7 +50,7 @@ describe("real sample preflight", () => {
       },
       model: { provider: "vllm", modelId: "not-used", endpoint: "http://127.0.0.1:8000/v1" },
       attemptTimeoutMs: 30_000,
-      standards: [resolve("standards/inventory-api-skill.md")],
+      standards: [resolve("standards/skills/inventory-api")],
     };
     const workspaceAdapter = new GitWorkspace({ workspaceRoot: join(root, "workspaces") });
     const workspace = await workspaceAdapter.prepare(request);

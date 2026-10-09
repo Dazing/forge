@@ -12,7 +12,13 @@
   "attemptTimeoutSeconds": 900,
   "orchestrationTimeoutSeconds": 60,
   "standards": [
-    "../standards/inventory-api-skill.md",
-    "../standards/acceptance-test-design.md"
+    "../standards/skills/coding-best-practices",
+    "../standards/skills/commit-conventions",
+    "../standards/skills/csharp",
+    "../standards/skills/dotnet-10",
+    "../standards/skills/factory-acceptance-test-design",
+    "../standards/skills/inventory-api",
+    "../standards/skills/tdd",
+    "../standards/skills/vertical-slice-architecture"
   ]
 }

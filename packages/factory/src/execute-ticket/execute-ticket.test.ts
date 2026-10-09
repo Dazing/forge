@@ -57,6 +57,11 @@ function dependencies(
         calls.push(`snapshot:${label}`);
         return snapshot?.(label) ?? { id: `${label}-tree`, commit: `${label}-commit` };
       },
+      async createAnalysisWorkspace(expectedTreeId) {
+        calls.push(`analysis:create:${expectedTreeId}`);
+        return { path: "/run/analysis", treeId: expectedTreeId };
+      },
+      async disposeAnalysisWorkspace() { calls.push("analysis:dispose"); },
       async publishBranch() { calls.push("publish"); return { branch: "solution/run-1", commit: "final" }; },
       async disposeExecutionResources() { calls.push("dispose"); },
     },
@@ -66,6 +71,16 @@ function dependencies(
         const result = outcomes[outcomeIndex++];
         if (!result) throw new Error("No configured outcome");
         return result;
+      },
+      async runPullRequestAttempt(attempt) {
+        calls.push(`attempt:pull-request:${attempt.attempt}:${attempt.sessionId}`);
+        return {
+          status: "completed" as const,
+          attemptId: attempt.attemptId,
+          sessionId: attempt.sessionId,
+          report: pullRequestReport(),
+          evidence: ["pull-request-transcript"],
+        };
       },
       async stopAttempt(attemptId) { calls.push(`stop:${attemptId}`); },
     },
@@ -77,11 +92,11 @@ function dependencies(
       async captureProductionIdentity() { calls.push("capture-production"); return "production-before-correction"; },
       async validateCorrection(_request, _workspace, _report, _current, identity) { calls.push(`correct:${identity}`); return { accepted: true, passed: true, suiteVersion: "suite-2", mapping: [{ criterionId: "AC-1", tests: ["acceptance"] }], checks: [failedCheck("corrected-red")] }; },
       async integrateSuite() { calls.push("integrate-suite"); },
-      async verifyPublished() { calls.push("verify-published"); return { passed: true, checks: [{ ...passedCheck("published"), treeId: "final-candidate-tree" }] }; },
+      async verifyFinalCandidate() { calls.push("verify-final-candidate"); return { passed: true, checks: [{ ...passedCheck("published"), treeId: "final-candidate-tree" }] }; },
     },
     artifacts: {
       async record(event) { calls.push(`record:${event.type}`); },
-      async attach() { return "artifact"; },
+      async attach(name) { calls.push(`attach:${name}`); return `/runs/run-1/artifacts/${name}`; },
       async finalize(outcome) { calls.push(`finalize:${outcome.status}`); return "/runs/run-1/report.json"; },
     },
   };
@@ -90,6 +105,21 @@ function dependencies(
 function outcome(stage: Stage, report = completedReport(stage)): AttemptOutcome {
   return { status: "completed", attemptId: `${stage}-attempt`, sessionId: `${stage}-session`, report, evidence: ["agent-log"] };
 }
+function pullRequestReport() {
+  return {
+    status: "completed" as const,
+    title: "Add requested behavior",
+    summary: ["Implements the ticket."],
+    eli5: "The service now handles the requested input and returns the expected result.",
+    playByPlay: [{
+      explanation: "The entry point delegates to the new behavior.",
+      references: ["src/service.ts:10"],
+    }],
+    evidence: ["Inspected the verified candidate."],
+    unresolvedIssues: [],
+  };
+}
+
 
 function passedCheck(command: string) {
   return { command, exitCode: 0, discoveredTests: 1, skippedTests: 0, outputArtifact: "out", treeId: "tree" };
@@ -110,8 +140,9 @@ describe("executeTicket", () => {
       "attempt:implementation:1:run-1-implementation-1",
       "attempt:refactor:1:run-1-refactor-1",
       "attempt:review:1:run-1-review-1",
+      "attempt:pull-request:1:run-1-pull-request-1",
     ]);
-    expect(deps.calls.indexOf("verify-published")).toBeLessThan(deps.calls.indexOf("publish"));
+    expect(deps.calls.indexOf("verify-final-candidate")).toBeLessThan(deps.calls.indexOf("publish"));
   });
 
   it("records durable boundaries around every workspace snapshot", async () => {
@@ -232,4 +263,107 @@ describe("executeTicket", () => {
     expect(deps.calls.filter((call) => call.startsWith("attempt:implementation"))).toHaveLength(1);
     expect(deps.calls.some((call) => call.includes("refactor"))).toBe(false);
   });
+  it("drafts a pull-request artifact from an isolated copy of the verified candidate before publication", async () => {
+    const deps = dependencies(stages.map((stage) => outcome(stage)));
+    Object.assign(deps.workspace, {
+      async createAnalysisWorkspace(expectedTreeId: string) {
+        deps.calls.push(`analysis:create:${expectedTreeId}`);
+        return { path: "/run/analysis", treeId: expectedTreeId };
+      },
+      async disposeAnalysisWorkspace() {
+        deps.calls.push("analysis:dispose");
+      },
+    });
+    Object.assign(deps.backend, {
+      async runPullRequestAttempt() {
+        deps.calls.push("attempt:pull-request:1:run-1-pull-request-1");
+        return {
+          status: "completed",
+          attemptId: "run-1-pull-request-1",
+          sessionId: "run-1-pull-request-1",
+          report: {
+            status: "completed",
+            title: "Add requested behavior",
+            summary: ["Implements the ticket."],
+            eli5: "The service now handles the requested input and returns the expected result.",
+            playByPlay: [{
+              explanation: "The entry point delegates to the new behavior.",
+              references: ["src/service.ts:10"],
+            }],
+            evidence: ["Inspected the verified candidate."],
+            unresolvedIssues: [],
+          },
+          evidence: ["pull-request-transcript"],
+        };
+      },
+    });
+
+    const result = await executeTicket(request(), deps);
+
+    expect(result.status).toBe("succeeded");
+    expect(result.pullRequestPath).toBe("/runs/run-1/artifacts/PR.md");
+    expect(deps.calls.indexOf("verify-final-candidate")).toBeLessThan(
+      deps.calls.indexOf("analysis:create:final-candidate-tree"),
+    );
+    expect(deps.calls.indexOf("analysis:dispose")).toBeLessThan(deps.calls.indexOf("attach:PR.md"));
+    expect(deps.calls.indexOf("attach:PR.md")).toBeLessThan(deps.calls.indexOf("publish"));
+  });
+  it("uses one fresh pull-request recovery attempt and discards each analysis workspace", async () => {
+    const deps = dependencies(stages.map((stage) => outcome(stage)));
+    let invocation = 0;
+    Object.assign(deps.backend, {
+      async runPullRequestAttempt(attempt: { attempt: number; attemptId: string; sessionId: string }) {
+        deps.calls.push(`attempt:pull-request:${attempt.attempt}:${attempt.sessionId}`);
+        invocation += 1;
+        if (invocation === 1) {
+          return {
+            status: "execution-failure" as const,
+            attemptId: attempt.attemptId,
+            sessionId: attempt.sessionId,
+            error: "malformed draft",
+            evidence: ["first-transcript"],
+          };
+        }
+        return {
+          status: "completed" as const,
+          attemptId: attempt.attemptId,
+          sessionId: attempt.sessionId,
+          report: pullRequestReport(),
+          evidence: ["second-transcript"],
+        };
+      },
+    });
+
+    const result = await executeTicket(request(), deps);
+
+    expect(result.status).toBe("succeeded");
+    expect(deps.calls.filter((call) => call.startsWith("analysis:create:"))).toHaveLength(2);
+    expect(deps.calls.filter((call) => call === "analysis:dispose")).toHaveLength(2);
+    expect(deps.calls).toContain("attempt:pull-request:2:run-1-pull-request-2");
+  });
+
+  it("does not publish when both pull-request attempts fail", async () => {
+    const deps = dependencies(stages.map((stage) => outcome(stage)));
+    Object.assign(deps.backend, {
+      async runPullRequestAttempt(attempt: { attempt: number; attemptId: string; sessionId: string }) {
+        deps.calls.push(`attempt:pull-request:${attempt.attempt}:${attempt.sessionId}`);
+        return {
+          status: "execution-failure" as const,
+          attemptId: attempt.attemptId,
+          sessionId: attempt.sessionId,
+          error: "draft unavailable",
+          evidence: ["pull-request-transcript"],
+        };
+      },
+    });
+
+    const result = await executeTicket(request(), deps);
+
+    expect(result.status).toBe("failed");
+    expect(result.terminalReason).toContain("Pull-request");
+    expect(deps.calls.filter((call) => call.startsWith("attempt:pull-request"))).toHaveLength(2);
+    expect(deps.calls).not.toContain("publish");
+    expect(deps.calls).not.toContain("attach:PR.md");
+  });
+
 });

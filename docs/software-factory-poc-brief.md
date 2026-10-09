@@ -17,7 +17,7 @@ The POC tests **core orchestration**: fresh-context stages, artifact handoffs, q
 | Inference | vLLM, OpenAI-compatible endpoint, configurable model |
 | Standards | Supplied agent skills and repository `AGENTS.md` |
 | Agent context | Fresh session for every stage and recovery attempt |
-| Success output | Committed Git branch and evidence report; no automatic merge |
+| Success output | Committed Git branch, host-owned `PR.md`, and evidence report; no automatic merge |
 | Failure output | Explicit failure report and preserved diagnostic artifacts |
 | Recovery | One fresh recovery attempt per failed stage |
 | Restart behavior | No recovery after orchestrator crash or restart |
@@ -73,6 +73,7 @@ A broken baseline or invalid setup fails preflight; it is not handed to an imple
 | **Implementation** | Solve the ticket using TDD; add implementation-level tests as needed | Working code, TDD evidence, green checks, and an explicit acceptance-criteria verdict |
 | **Refactor** | Enforce supplied standards and improve code quality without changing required behavior | Refactored code, changes explained, green checks, and an updated verdict |
 | **Code review** | Inspect the complete diff, identify issues, and fix them | Review findings and resolutions, green checks, and final acceptance-criteria verdict |
+| **Pull-request draft** | Explain the complete verified change from an isolated analysis copy without modifying the publication workspace | Concise title, summary, ELI5 explanation, execution-order play-by-play, and orchestrator-rendered trusted verification |
 
 #### Test-design gate
 
@@ -203,6 +204,7 @@ Each run produces:
 - Test/check commands, exit codes, and relevant output.
 - Review findings and fixes.
 - Recovery and authorized test-correction records.
+- Pull-request draft path and isolated drafting-attempt outcomes.
 - Final success or failure status.
 
 Artifacts support inspection; they are **not** a promise of crash-resumable execution.
@@ -224,6 +226,7 @@ The POC is complete when:
 - Agents execute autonomously inside the sandbox using the configured vLLM deployment.
 - Acceptance tests are enforced independently of downstream agents.
 - The feature, bug, and refactor cases produce committed branches satisfying their criteria and checks.
+- Successful runs produce a host-owned `PR.md` that describes the verified tree without adding the file to the solution branch.
 - Injected stage failure demonstrates successful recovery.
 - Injected recovery failure demonstrates bounded stopping with an accurate failure report.
 - No run modifies or merges into the base branch.

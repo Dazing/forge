@@ -1,10 +1,13 @@
 import {
+  pullRequestReportSchema,
   stageReportSchema,
   stages,
   type AcceptanceSuite,
   type AttemptOutcome,
   type FactoryDependencies,
   type GateResult,
+  type PullRequestReport,
+  type PullRequestAttemptOutcome,
   type RunOutcome,
   type RunRequest,
   type Snapshot,
@@ -13,6 +16,7 @@ import {
   type StageReport,
   type WorkspaceReference,
 } from "../contracts.js";
+import { renderPullRequestMarkdown } from "../pull-request.js";
 
 interface ActiveRun {
   workspace: WorkspaceReference;
@@ -81,12 +85,42 @@ export async function executeTicket(
     }
 
     await dependencies.verification.integrateSuite(active.workspace, active.suite);
-    await snapshotWorkspace(request, dependencies, "final-candidate", cancellation);
-    const finalGate = await dependencies.verification.verifyPublished(active.workspace, active.suite);
+    const finalSnapshot = await snapshotWorkspace(request, dependencies, "final-candidate", cancellation);
+    const finalGate = await dependencies.verification.verifyFinalCandidate(active.workspace, active.suite);
     await recordGate(dependencies, request.runId, "final", finalGate);
     if (!finalGate.passed) {
       return await finishFailure(request, dependencies, active, finalGate.reason ?? "Final exact-tree verification failed");
     }
+    const pullRequestReport = await executePullRequestStep(
+      request,
+      dependencies,
+      active,
+      cancellation,
+      now,
+      finalSnapshot,
+      finalGate,
+    );
+    if (pullRequestReport === undefined) {
+      return await finishFailure(
+        request,
+        dependencies,
+        active,
+        "Pull-request step exhausted its two-attempt budget",
+      );
+    }
+    const pullRequestMarkdown = renderPullRequestMarkdown(
+      pullRequestReport,
+      finalGate.checks,
+      active.reports.at(-1)?.criteria ?? [],
+    );
+    const pullRequestPath = await dependencies.artifacts.attach("PR.md", pullRequestMarkdown);
+    await dependencies.artifacts.record({
+      type: "pull-request-drafted",
+      runId: request.runId,
+      stage: "pull-request",
+      details: { path: pullRequestPath, snapshotId: finalSnapshot.id },
+    });
+
 
     const published = await dependencies.workspace.publishBranch(active.workspace.baseCommit);
     await dependencies.workspace.disposeExecutionResources();
@@ -96,9 +130,10 @@ export async function executeTicket(
       baseCommit: active.workspace.baseCommit,
       outputBranch: published.branch,
       finalCommit: published.commit,
+      pullRequestPath,
       attempts: active.attempts,
       criteria: active.reports.at(-1)?.criteria ?? [],
-      terminalReason: "All stages and exact published-tree checks passed",
+      terminalReason: "All stages, exact final-tree checks, and pull-request drafting passed",
     };
     const reportPath = await dependencies.artifacts.finalize(outcomeWithoutPath);
     return { ...outcomeWithoutPath, reportPath };
@@ -295,6 +330,95 @@ async function executeStage(
     return true;
   }
   return false;
+}
+
+async function executePullRequestStep(
+  request: RunRequest,
+  dependencies: FactoryDependencies,
+  active: ActiveRun,
+  signal: AbortSignal,
+  now: () => number,
+  finalSnapshot: Snapshot,
+  finalGate: GateResult,
+): Promise<PullRequestReport | undefined> {
+  for (const attempt of [1, 2] as const) {
+    signal.throwIfAborted();
+    const attemptId = `${request.runId}-pull-request-${attempt}`;
+    const analysis = await dependencies.workspace.createAnalysisWorkspace(finalSnapshot.id);
+    dependencies.progress?.({
+      type: "attempt-execution-started",
+      runId: request.runId,
+      stage: "pull-request",
+      attempt,
+      details: { attemptId, deadline: now() + request.attemptTimeoutMs },
+    });
+
+    let outcome: PullRequestAttemptOutcome;
+    try {
+      outcome = await dependencies.backend.runPullRequestAttempt({
+        runId: request.runId,
+        attempt,
+        attemptId,
+        sessionId: attemptId,
+        workspacePath: analysis.path,
+        deadline: now() + request.attemptTimeoutMs,
+        context: {
+          ticket: request.ticket,
+          baseCommit: active.workspace.baseCommit,
+          snapshotId: analysis.treeId,
+          standards: request.standards,
+          priorReports: active.reports,
+          verificationChecks: finalGate.checks,
+        },
+      }, signal);
+      await dependencies.backend.stopAttempt(outcome.attemptId);
+    } finally {
+      await dependencies.workspace.disposeAnalysisWorkspace(analysis);
+    }
+
+    const parsedReport = outcome.status === "completed"
+      ? pullRequestReportSchema.safeParse(outcome.report)
+      : undefined;
+    active.attempts.push({
+      stage: "pull-request",
+      attempt,
+      sessionId: outcome.sessionId,
+      status: outcome.status === "completed" && !parsedReport?.success ? "rejected" : outcome.status,
+      evidence: outcome.evidence,
+    });
+    await dependencies.artifacts.record({
+      type: "pull-request-attempt-finished",
+      runId: request.runId,
+      stage: "pull-request",
+      attempt,
+      details: {
+        status: outcome.status,
+        sessionId: outcome.sessionId,
+        evidence: outcome.evidence,
+        ...(outcome.status !== "completed"
+          ? { error: outcome.error }
+          : parsedReport?.success
+            ? { report: parsedReport.data }
+            : { reportProblems: parsedReport?.error.issues ?? [] }),
+      },
+    });
+    if (outcome.status === "cancelled") {
+      throw new RunCancelledError(`Pull-request attempt ${outcome.attemptId} was cancelled`);
+    }
+    if (outcome.status !== "completed" || !parsedReport?.success) {
+      active.failureEvidence = outcome.status === "completed"
+        ? [...outcome.evidence, "Missing or malformed pull-request report"]
+        : [...outcome.evidence, outcome.error];
+      continue;
+    }
+    if (parsedReport.data.status !== "completed" || parsedReport.data.unresolvedIssues.length > 0) {
+      active.failureEvidence = [...outcome.evidence, ...parsedReport.data.unresolvedIssues];
+      continue;
+    }
+    active.failureEvidence = [];
+    return parsedReport.data;
+  }
+  return undefined;
 }
 
 async function executeCorrection(

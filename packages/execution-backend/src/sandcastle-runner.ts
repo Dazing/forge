@@ -1,6 +1,6 @@
 import { opencode, Output, run } from "@ai-hero/sandcastle";
 import { docker, type DockerOptions } from "@ai-hero/sandcastle/sandboxes/docker";
-import { stageReportSchema } from "@factory/core";
+import { pullRequestReportSchema, stageReportSchema } from "@factory/core";
 import type {
   ExecutionBackendConfig,
   RunnerInvocation,
@@ -36,11 +36,17 @@ export class SandcastleRunner implements SandcastleAttemptRunner {
       branchStrategy: invocation.branchStrategy,
       prompt: invocation.prompt,
       maxIterations: 1,
-      output: Output.object({
-        tag: "stage_report",
-        schema: stageReportSchema,
-        maxRetries: 0,
-      }),
+      output: invocation.kind === "stage"
+        ? Output.object({
+            tag: "stage_report",
+            schema: stageReportSchema,
+            maxRetries: 0,
+          })
+        : Output.object({
+            tag: "pull_request_report",
+            schema: pullRequestReportSchema,
+            maxRetries: 0,
+          }),
       signal: invocation.signal,
       logging: {
         type: "file",
@@ -74,6 +80,11 @@ function buildOpenCodeEnvironment(config: ExecutionBackendConfig): Record<string
       autoupdate: false,
       share: "disabled",
       enabled_providers: [VLLM_PROVIDER_ID],
+      permission: {
+        skill: {
+          "*": "allow",
+        },
+      },
       provider: {
         [VLLM_PROVIDER_ID]: {
           npm: "@ai-sdk/openai-compatible",

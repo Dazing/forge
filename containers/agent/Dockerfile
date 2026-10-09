@@ -19,7 +19,7 @@ COPY --from=node-runtime /usr/local/ /usr/local/
 COPY --from=roslyn-mcp-build /out/ /opt/roslyn-mcp/
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates curl git jq openssh-client \
+    && apt-get install --yes --no-install-recommends ca-certificates curl git jq openssh-client python3 \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global opencode-ai@1.18.35 \
     && npm cache clean --force

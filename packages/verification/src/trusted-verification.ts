@@ -285,7 +285,7 @@ export class TrustedVerification implements VerificationPort {
     await makeDirectoryReadOnly(destination);
   }
 
-  async verifyPublished(workspace: WorkspaceReference, suite: AcceptanceSuite): Promise<GateResult> {
+  async verifyFinalCandidate(workspace: WorkspaceReference, suite: AcceptanceSuite): Promise<GateResult> {
     const checks: CheckResult[] = [];
     try {
       const state = await this.requireState(workspace);

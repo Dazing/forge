@@ -30,7 +30,7 @@ it("loads the vLLM endpoint directly from the configuration file", async () => {
       },
       attemptTimeoutSeconds: 30,
       orchestrationTimeoutSeconds: 45,
-      standards: ["./standard.md"],
+      standards: ["./skills/standard"],
     }),
   );
 

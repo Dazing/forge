@@ -5,6 +5,8 @@ import type {
   AttemptOutcome,
   AttemptRequest,
   ExecutionBackendPort,
+  PullRequestAttemptOutcome,
+  PullRequestAttemptRequest,
   Stage,
 } from "@factory/core";
 
@@ -53,6 +55,13 @@ export class FaultInjectingBackend implements ExecutionBackendPort {
       error: `Injected proof fault at ${fault.point}`,
       evidence: [...outcome.evidence, `fault:${request.stage}:${request.attempt}:${fault.point}`],
     };
+  }
+
+  runPullRequestAttempt(
+    request: PullRequestAttemptRequest,
+    signal: AbortSignal,
+  ): Promise<PullRequestAttemptOutcome> {
+    return this.#backend.runPullRequestAttempt(request, signal);
   }
 
   stopAttempt(attemptId: string): Promise<void> {

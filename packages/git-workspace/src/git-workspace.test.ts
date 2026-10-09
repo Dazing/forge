@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -105,6 +105,30 @@ describe("GitWorkspace", () => {
     expect(git(source.path, "rev-list", "--min-parents=2", `${source.baseCommit}..${published.commit}`)).toBe("");
   });
 
+  it("isolates pull-request analysis changes from the verified publication workspace", async () => {
+    const source = createSourceRepository();
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "git-workspace-root-"));
+    temporaryDirectories.push(workspaceRoot);
+    const adapter = new GitWorkspace({ workspaceRoot });
+    const workspace = await adapter.prepare(request(source.path, "factory/analysis"));
+    writeFileSync(join(workspace.path, "tracked.txt"), "verified candidate\n");
+    writeFileSync(join(workspace.path, "new.txt"), "publish me\n");
+    const snapshot = await adapter.snapshot("verified tree");
+
+    const analysis = await adapter.createAnalysisWorkspace(snapshot.id);
+    expect(analysis.treeId).toBe(snapshot.id);
+    expect(readFileSync(join(analysis.path, "tracked.txt"), "utf8")).toBe("verified candidate\n");
+    writeFileSync(join(analysis.path, "tracked.txt"), "agent mutation\n");
+    writeFileSync(join(analysis.path, "analysis-only.txt"), "discarded\n");
+    await adapter.disposeAnalysisWorkspace(analysis);
+
+    expect(readFileSync(join(workspace.path, "tracked.txt"), "utf8")).toBe("verified candidate\n");
+    expect(() => statSync(analysis.path)).toThrow();
+    const published = await adapter.publishBranch(source.baseCommit);
+    expect(git(source.path, "show", `${published.commit}:tracked.txt`)).toBe("verified candidate");
+    expect(git(source.path, "show", `${published.commit}:new.txt`)).toBe("publish me");
+  });
+
   it("excludes ignored build outputs from both verification and publication", async () => {
     const source = createSourceRepository();
     const workspaceRoot = mkdtempSync(join(tmpdir(), "git-workspace-root-"));
@@ -121,6 +145,33 @@ describe("GitWorkspace", () => {
 
     expect(git(source.path, "show", `${published.commit}:tracked.txt`)).toBe("completed");
     expect(git(source.path, "ls-tree", "-r", "--name-only", published.commit).split("\n")).not.toContain("build/generated.bin");
+  });
+
+  it("disposes a published workspace containing a read-only integrated suite", async () => {
+    const source = createSourceRepository();
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "git-workspace-root-"));
+    temporaryDirectories.push(workspaceRoot);
+    const adapter = new GitWorkspace({ workspaceRoot });
+    const workspace = await adapter.prepare(request(source.path, "factory/read-only-suite"));
+    const suite = join(workspace.path, "tests", "Factory.Acceptance");
+    const casePath = join(suite, "case.json");
+    mkdirSync(suite, { recursive: true });
+    writeFileSync(casePath, "{}\n");
+    chmodSync(casePath, 0o444);
+    chmodSync(suite, 0o555);
+
+    await adapter.publishBranch(source.baseCommit);
+    try {
+      await expect(adapter.disposeExecutionResources()).resolves.toBeUndefined();
+      expect(() => statSync(workspace.path)).toThrow();
+    } finally {
+      try {
+        chmodSync(suite, 0o755);
+        chmodSync(casePath, 0o644);
+      } catch {
+        // Successful disposal removes the suite before cleanup.
+      }
+    }
   });
 
   it("refuses an output branch collision without changing either source branch", async () => {
