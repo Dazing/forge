@@ -58,7 +58,8 @@ function request(paths: FixturePaths, overrides: Partial<AttemptRequest> = {}): 
     },
     stage,
     attempt,
-    diffFromBase: "diff --git a/file b/file",
+    baseCommit: "original-base-commit",
+    snapshotId: "current-tree",
     standards: [paths.standardsPath],
     acceptanceSuite: {
       version: "1",
@@ -258,6 +259,10 @@ describe("ExecutionBackend", () => {
     expect(invocation?.mounts.map(({ hostPath }) => hostPath)).toEqual([
       paths.standardsPath,
       paths.suitePath,
+    ]);
+    expect(invocation?.mounts.map(({ sandboxPath }) => sandboxPath)).toEqual([
+      "/home/agent/factory-inputs/standards/1",
+      "/home/agent/factory-inputs/acceptance",
     ]);
     expect(invocation?.transcriptPath.startsWith(`${paths.workspacePath}/`)).toBe(false);
   });

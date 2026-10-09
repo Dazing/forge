@@ -18,7 +18,7 @@ interface Arguments {
 
 async function main(): Promise<number> {
   const args = parseArguments(process.argv.slice(2));
-  const configuration = await loadConfiguration(args.configPath, process.env);
+  const configuration = await loadConfiguration(args.configPath);
   const ticketPath = resolve(args.ticketPath);
   const ticket = parseTicket(ticketPath, await readFile(ticketPath, "utf8"));
   const abortController = new AbortController();
@@ -42,6 +42,7 @@ async function main(): Promise<number> {
       endpoint: configuration.endpoint,
     },
     attemptTimeoutMs: configuration.attemptTimeoutMs,
+    orchestrationTimeoutMs: configuration.orchestrationTimeoutMs,
     standards: configuration.standards,
   };
 
@@ -59,12 +60,16 @@ async function main(): Promise<number> {
         endpoint: configuration.endpoint,
         modelId: configuration.modelId,
         artifactsPath: artifacts.runDirectory,
+        ...(configuration.sandboxNetwork === undefined ? {} : { network: configuration.sandboxNetwork }),
       }),
       verification: new TrustedVerification({
         stateRoot: resolve(configuration.trustedRoot, args.runId),
         signal: abortController.signal,
       }),
       artifacts,
+      progress(event) {
+        process.stderr.write(`FACTORY_PROGRESS=${JSON.stringify(event)}\n`);
+      },
     }, abortController.signal);
 
     process.stdout.write(`${JSON.stringify({

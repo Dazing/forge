@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { executeTicket } from "./execute-ticket.js";
 import type {
   AttemptOutcome,
@@ -43,14 +43,20 @@ function request(): RunRequest {
   };
 }
 
-function dependencies(outcomes: AttemptOutcome[]): FactoryDependencies & { calls: string[] } {
+function dependencies(
+  outcomes: AttemptOutcome[],
+  snapshot?: (label: string) => Promise<{ id: string; commit?: string }>,
+): FactoryDependencies & { calls: string[] } {
   const calls: string[] = [];
   let outcomeIndex = 0;
   return {
     calls,
     workspace: {
       async prepare() { calls.push("prepare"); return { path: "/run/work", baseCommit: "base", branch: "solution/run-1" }; },
-      async snapshot(label) { calls.push(`snapshot:${label}`); return { id: `${label}-tree`, commit: `${label}-commit` }; },
+      async snapshot(label) {
+        calls.push(`snapshot:${label}`);
+        return snapshot?.(label) ?? { id: `${label}-tree`, commit: `${label}-commit` };
+      },
       async publishBranch() { calls.push("publish"); return { branch: "solution/run-1", commit: "final" }; },
       async disposeExecutionResources() { calls.push("dispose"); },
     },
@@ -106,6 +112,46 @@ describe("executeTicket", () => {
       "attempt:review:1:run-1-review-1",
     ]);
     expect(deps.calls.indexOf("verify-published")).toBeLessThan(deps.calls.indexOf("publish"));
+  });
+
+  it("records durable boundaries around every workspace snapshot", async () => {
+    const deps = dependencies(stages.map((stage) => outcome(stage)));
+
+    await executeTicket(request(), deps);
+
+    expect(deps.calls.filter((call) => call.startsWith("record:workspace-snapshot-"))).toEqual([
+      "record:workspace-snapshot-started",
+      "record:workspace-snapshot-completed",
+      "record:workspace-snapshot-started",
+      "record:workspace-snapshot-completed",
+      "record:workspace-snapshot-started",
+      "record:workspace-snapshot-completed",
+      "record:workspace-snapshot-started",
+      "record:workspace-snapshot-completed",
+      "record:workspace-snapshot-started",
+      "record:workspace-snapshot-completed",
+    ]);
+  });
+
+  it("fails with a durable report when a between-stage snapshot stops responding", async () => {
+    vi.useFakeTimers();
+    let snapshots = 0;
+    const deps = dependencies(stages.map((stage) => outcome(stage)), async (label) => {
+      snapshots += 1;
+      if (snapshots === 2) return new Promise<never>(() => undefined);
+      return { id: `${label}-tree` };
+    });
+    const run = executeTicket({ ...request(), orchestrationTimeoutMs: 25 }, deps);
+
+    await vi.advanceTimersByTimeAsync(25);
+    const result = await run;
+    vi.useRealTimers();
+
+    expect(result.status).toBe("failed");
+    expect(result.terminalReason).toMatch(/workspace snapshot/i);
+    expect(deps.calls).toContain("record:workspace-snapshot-started");
+    expect(deps.calls).toContain("finalize:failed");
+    expect(deps.calls.some((call) => call.startsWith("attempt:refactor"))).toBe(false);
   });
 
   it("stops a failed attempt before one fresh recovery and preserves stage order", async () => {

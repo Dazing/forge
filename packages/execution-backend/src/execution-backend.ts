@@ -11,6 +11,8 @@ import {
 } from "@factory/core";
 import { SandcastleRunner } from "./sandcastle-runner.js";
 
+const SANDBOX_INPUTS_PATH = "/home/agent/factory-inputs";
+
 export interface ExecutionBackendConfig {
   readonly imageName: string;
   readonly endpoint: string;
@@ -227,7 +229,7 @@ export class ExecutionBackend implements ExecutionBackendPort {
       assertOutsideWorkspace(workspacePath, hostPath, `Standards input ${index + 1}`);
       mounts.push({
         hostPath,
-        sandboxPath: `/factory-inputs/standards/${index + 1}`,
+        sandboxPath: `${SANDBOX_INPUTS_PATH}/standards/${index + 1}`,
         readonly: true,
       });
     }
@@ -238,7 +240,7 @@ export class ExecutionBackend implements ExecutionBackendPort {
       assertOutsideWorkspace(workspacePath, acceptanceSuitePath, "Authoritative acceptance suite");
       mounts.push({
         hostPath: acceptanceSuitePath,
-        sandboxPath: "/factory-inputs/acceptance",
+        sandboxPath: `${SANDBOX_INPUTS_PATH}/acceptance`,
         readonly: true,
       });
     }
@@ -341,10 +343,10 @@ function buildPrompt(request: AttemptRequest): string {
     workspacePath: "/home/agent/workspace",
     context: {
       ...request.context,
-      standards: request.context.standards.map((_, index) => `/factory-inputs/standards/${index + 1}`),
+      standards: request.context.standards.map((_, index) => `${SANDBOX_INPUTS_PATH}/standards/${index + 1}`),
       ...(acceptanceSuite === undefined
         ? {}
-        : { acceptanceSuite: { ...acceptanceSuite, path: "/factory-inputs/acceptance" } }),
+        : { acceptanceSuite: { ...acceptanceSuite, path: `${SANDBOX_INPUTS_PATH}/acceptance` } }),
     },
   };
   return buildStagePrompt(sandboxRequest);

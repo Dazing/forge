@@ -22,7 +22,6 @@ export class SandcastleRunner implements SandcastleAttemptRunner {
     const dockerOptions: DockerOptions = {
       imageName: this.#config.imageName,
       mounts: invocation.mounts,
-      env: environment,
       ...(this.#config.network === undefined ? {} : { network: this.#config.network }),
       ...(this.#config.containerUid === undefined ? {} : { containerUid: this.#config.containerUid }),
       ...(this.#config.containerGid === undefined ? {} : { containerGid: this.#config.containerGid }),

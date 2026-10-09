@@ -18,6 +18,10 @@ Stage gates combine automated checks with explicit acceptance-criteria verdicts.
 
 A failed stage gets one fresh recovery attempt. If recovery fails, the run stops with diagnostic evidence rather than claiming success.
 
+Each prompt supplies shared operating rules and only the assigned stage's procedure: contract-derived test design, small implementation RED/GREEN cycles, concrete standards refactoring, or bounded whole-branch review. Handoffs identify the original base commit and current tree snapshot, with instructions to inspect the full tracked diff and untracked files. Supplied standards and acceptance suites under `/factory-inputs/` are read-only inputs explicitly permitted by the sample instructions.
+
+Agents report every criterion using the tagged `stage_report` JSON contract. Completed test design may retain intentionally unmet criteria; downstream completion requires every criterion met without unresolved issues. Compilation alone never replaces required behavioral gates. These instructions guide the model; trusted orchestrator checks, test protection, and recovery budgets remain authoritative.
+
 ## POC scope
 
 | Area | Scope |
@@ -60,6 +64,7 @@ The implemented backend is Sandcastle 0.12.0 with OpenCode and one configured vL
 
 - [Product brief](docs/software-factory-poc-brief.md): agreed outcome, workflow, constraints, and proof cases.
 - [Implementation plan](docs/software-factory-poc-implementation-plan.md): module boundaries, repository layout, contracts, delivery phases, and verification criteria.
+- [VSA API proof scenario plan](docs/vsa-api-proof-scenario-implementation-plan.md): additive six-slice inventory scenario, trusted acceptance design, evaluator coverage, delivery phases, and verification matrix.
 - [Runtime compatibility](docs/runtime-compatibility.md): selected versions, inspected capability, attempted checks, and missing real-runtime prerequisites.
 - [Verification evidence](docs/verification-evidence.md): acceptance mapping, observed commands, proof status, and blockers.
 - [Setup runbook](docs/runbook-setup.md): dependencies and configuration.
@@ -74,9 +79,9 @@ npm install --ignore-scripts
 docker build -t software-factory-agent:0.1.0 -f containers/agent/Dockerfile .
 npx tsx proof/harness/materialize-fixture.ts proof/scenarios/feature.json /tmp/factory-feature
 cp config/factory.example.json config/factory.local.json
-# Edit config/factory.local.json: sourceRepository (for example /tmp/factory-feature) and exact modelId.
-# This POC supports a trusted-network, unauthenticated local vLLM endpoint only.
-export VLLM_BASE_URL=http://vllm-host:8000/v1
+# Edit config/factory.local.json: sourceRepository (for example /tmp/factory-feature),
+# exact vllm.modelId, and a vllm.endpoint reachable from the agent container.
+# For a host-only or Tailscale endpoint on Linux, set sandboxNetwork to "host".
 npm run factory -- run --config config/factory.local.json --ticket samples/tickets/feature.md --branch factory/feature-001
 ```
 

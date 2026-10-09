@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 import type {
   GitWorkspacePort,
@@ -99,7 +99,7 @@ export class GitWorkspace implements GitWorkspacePort {
 
   async snapshot(label: string): Promise<Snapshot> {
     const workspace = this.#requireWorkspace();
-    const id = await digestPublishableTree(workspace.path);
+    const id = await digestPublishableFiles(workspace.path, await this.#publishableFiles(workspace.path));
     const commit = (await this.#git(
       workspace.path,
       ["rev-parse", "--verify", "HEAD"],
@@ -149,8 +149,10 @@ export class GitWorkspace implements GitWorkspacePort {
     ], "create trusted publication clone");
     await this.#git(publicationPath, ["remote", "remove", "origin"], "remove publication source remote");
     await this.#git(publicationPath, ["switch", "--detach", workspace.baseCommit], "checkout trusted base");
-    const verifiedTreeIdentity = await digestPublishableTree(workspace.path);
-    await copyPublishableTree(workspace.path, publicationPath);
+    await assertNoNestedGitMetadata(workspace.path, workspace.path);
+    const publishableFiles = await this.#publishableFiles(workspace.path);
+    const verifiedTreeIdentity = await digestPublishableFiles(workspace.path, publishableFiles);
+    await copyPublishableTree(workspace.path, publicationPath, publishableFiles);
     await this.#git(publicationPath, ["add", "--all"], "stage trusted final tree");
     const staged = await this.#gitAllowExitCode(
       publicationPath,
@@ -179,7 +181,7 @@ export class GitWorkspace implements GitWorkspacePort {
       materializedPath,
     ], "materialize trusted final commit");
     await this.#git(materializedPath, ["switch", "--detach", finalCommit], "checkout trusted final commit");
-    const committedTreeIdentity = await digestPublishableTree(materializedPath);
+    const committedTreeIdentity = await digestPublishableFiles(materializedPath, publishableFiles);
     if (committedTreeIdentity !== verifiedTreeIdentity) {
       throw new Error("Cannot publish: committed content differs from the verified workspace tree");
     }
@@ -270,6 +272,34 @@ export class GitWorkspace implements GitWorkspacePort {
     if (current !== workspace.baseCommit) {
       throw new Error(`Cannot publish: source base ref '${this.#sourceBaseRef}' changed ${phase}`);
     }
+  }
+
+  async #publishableFiles(root: string): Promise<readonly string[]> {
+    const output = (await this.#git(
+      root,
+      ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+      "enumerate publishable files",
+    )).stdout;
+    const files: string[] = [];
+    const seen = new Set<string>();
+    for (const path of output.split("\0")) {
+      if (path.length === 0 || path === ".sandcastle" || path.startsWith(".sandcastle/")) continue;
+      assertSafeRelativePath(root, path);
+      if (seen.has(path)) throw new Error(`Cannot publish duplicate path ${path}`);
+      seen.add(path);
+      try {
+        const entry = await lstat(resolve(root, path));
+        if (!entry.isFile() && !entry.isSymbolicLink()) {
+          throw new Error(`Cannot publish unsupported filesystem entry ${path}`);
+        }
+        files.push(path);
+      } catch (error) {
+        if (isMissingPath(error)) continue;
+        throw error;
+      }
+    }
+    files.sort();
+    return files;
   }
 
   async #git(
@@ -365,20 +395,26 @@ export class GitWorkspace implements GitWorkspacePort {
   }
 }
 
-async function copyPublishableTree(source: string, destination: string): Promise<void> {
-  await assertNoNestedGitMetadata(source, source);
+async function copyPublishableTree(
+  source: string,
+  destination: string,
+  files: readonly string[],
+): Promise<void> {
   for (const entry of await readdir(destination, { withFileTypes: true })) {
     if (entry.name !== ".git") {
       await rm(join(destination, entry.name), { recursive: true, force: true });
     }
   }
-  for (const entry of await readdir(source, { withFileTypes: true })) {
-    if (entry.name === ".git" || entry.name === ".sandcastle") continue;
-    await cp(join(source, entry.name), join(destination, entry.name), {
-      recursive: true,
-      dereference: false,
-      preserveTimestamps: true,
-    });
+  for (const path of files) {
+    const sourcePath = resolve(source, path);
+    const destinationPath = resolve(destination, path);
+    await mkdir(dirname(destinationPath), { recursive: true });
+    const entry = await lstat(sourcePath);
+    if (entry.isSymbolicLink()) {
+      await symlink(await readlink(sourcePath), destinationPath);
+    } else {
+      await copyFile(sourcePath, destinationPath);
+    }
   }
 }
 
@@ -392,26 +428,28 @@ async function assertNoNestedGitMetadata(root: string, directory: string): Promi
   }
 }
 
-async function digestPublishableTree(root: string): Promise<string> {
-  const files: string[] = [];
-  async function collect(directory: string): Promise<void> {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      if (directory === root && (entry.name === ".git" || entry.name === ".sandcastle")) continue;
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) await collect(path);
-      else files.push(path);
-    }
-  }
-  await collect(root);
-  files.sort();
+async function digestPublishableFiles(root: string, files: readonly string[]): Promise<string> {
   const digest = createHash("sha256");
-  for (const path of files) {
-    const name = relative(root, path).split(sep).join("/");
+  for (const name of files) {
+    const path = resolve(root, name);
     const metadata = await lstat(path);
-    digest.update(name);
+    digest.update(name.split(sep).join("/"));
     digest.update("\0");
     digest.update(metadata.isSymbolicLink() ? `link:${await readlink(path)}` : await readFile(path));
     digest.update("\n");
   }
   return digest.digest("hex");
+}
+
+function assertSafeRelativePath(root: string, path: string): void {
+  if (isAbsolute(path)) throw new Error(`Cannot publish absolute path ${path}`);
+  const resolved = resolve(root, path);
+  const relation = relative(root, resolved);
+  if (relation === ".." || relation.startsWith(`..${sep}`) || isAbsolute(relation)) {
+    throw new Error(`Cannot publish path outside the workspace: ${path}`);
+  }
+}
+
+function isMissingPath(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }

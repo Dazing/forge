@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -33,7 +33,7 @@ async function makeWritable(path: string): Promise<void> {
 }
 
 describe("real sample preflight", () => {
-  it("clones a fixed baseline and passes host-controlled build and behavior checks", async () => {
+  it("clones a fixed baseline and executes candidate acceptance against its read-only copy", async () => {
     const root = await mkdtemp(join(tmpdir(), "factory-preflight-"));
     temporaryDirectories.push(root);
     const source = join(root, "source");
@@ -60,5 +60,49 @@ describe("real sample preflight", () => {
 
     expect(result.passed, result.reason).toBe(true);
     expect(result.checks.map((check) => check.exitCode)).toEqual([0, 0]);
+    const candidate = join(workspace.path, ".factory", "acceptance-candidate");
+    await mkdir(candidate, { recursive: true });
+    const criteria = request.ticket.criteria.map(({ id }) => id);
+    await Promise.all([
+      writeFile(join(candidate, "manifest.json"), JSON.stringify({
+        schemaVersion: 1,
+        tests: [{
+          id: "missing-reservations",
+          file: "missing-reservations.json",
+          criteria,
+          rationale: "The absent reservation endpoint must produce intentional RED on the original baseline.",
+        }],
+      }), "utf8"),
+      writeFile(join(candidate, "missing-reservations.json"), JSON.stringify({
+        id: "missing-reservations",
+        criteria,
+        steps: [{
+          method: "POST",
+          path: "/reservations",
+          json: { sku: "WIDGET", quantity: 1 },
+          expect: { status: 201 },
+        }],
+      }), "utf8"),
+    ]);
+    const validation = await verifier.validateCandidate(request, workspace, {
+      status: "completed",
+      stage: "test-design",
+      criteria: criteria.map((id) => ({
+        id,
+        verdict: "unmet" as const,
+        evidence: ["POST /reservations is absent from the baseline."],
+      })),
+      evidence: ["Candidate executes against the copied baseline."],
+      changedWork: "Added one declarative acceptance case.",
+      unresolvedIssues: [],
+    });
+
+    expect(validation.accepted, validation.reason).toBe(true);
+    expect(validation.passed, validation.reason).toBe(true);
+    expect(validation.checks).toMatchObject([{
+      exitCode: 1,
+      discoveredTests: 1,
+      skippedTests: 0,
+    }]);
   }, 180_000);
 });

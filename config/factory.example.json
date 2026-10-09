@@ -6,10 +6,11 @@
   "trustedRoot": "../.factory-trusted",
   "sandboxImage": "software-factory-agent:0.1.0",
   "vllm": {
-    "endpointEnvironmentVariable": "VLLM_BASE_URL",
+    "endpoint": "http://vllm-host:8000/v1",
     "modelId": "REPLACE_WITH_ACTUAL_SERVED_MODEL_ID"
   },
   "attemptTimeoutSeconds": 900,
+  "orchestrationTimeoutSeconds": 60,
   "standards": [
     "../standards/inventory-api-skill.md",
     "../standards/acceptance-test-design.md"

@@ -32,6 +32,7 @@ export interface RunRequest {
     readonly endpoint: string;
   };
   readonly attemptTimeoutMs: number;
+  readonly orchestrationTimeoutMs?: number;
   readonly standards: readonly string[];
 }
 
@@ -53,7 +54,8 @@ export interface ContextBundle {
   readonly ticket: Ticket;
   readonly stage: Stage;
   readonly attempt: 1 | 2;
-  readonly diffFromBase: string;
+  readonly baseCommit: string;
+  readonly snapshotId: string;
   readonly standards: readonly string[];
   readonly acceptanceSuite?: AcceptanceSuite;
   readonly priorReports: readonly StageReport[];
@@ -175,6 +177,7 @@ export interface FactoryDependencies {
   readonly verification: VerificationPort;
   readonly artifacts: RunArtifactsPort;
   readonly now?: () => number;
+  readonly progress?: (event: ArtifactEvent) => void;
 }
 
 export interface StageAttemptRecord {

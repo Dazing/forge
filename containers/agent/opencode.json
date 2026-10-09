@@ -1,0 +1,25 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "roslyn": {
+      "type": "local",
+      "command": [
+        "dotnet",
+        "/opt/roslyn-mcp/RoslynMcpServer.dll"
+      ],
+      "timeout": 600000,
+      "enabled": true,
+      "environment": {
+        "ROSLYN_MCP_WORKSPACE": "/home/agent/workspace",
+        "ROSLYN_MCP_TOOL_PROFILE": "lite"
+      }
+    },
+    "microsoft-learn": {
+      "type": "remote",
+      "url": "https://learn.microsoft.com/api/mcp",
+      "timeout": 30000,
+      "enabled": true,
+      "oauth": false
+    }
+  }
+}

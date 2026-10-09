@@ -7,6 +7,7 @@ import {
   type GateResult,
   type RunOutcome,
   type RunRequest,
+  type Snapshot,
   type Stage,
   type StageAttemptRecord,
   type StageReport,
@@ -80,7 +81,7 @@ export async function executeTicket(
     }
 
     await dependencies.verification.integrateSuite(active.workspace, active.suite);
-    await dependencies.workspace.snapshot("final-candidate");
+    await snapshotWorkspace(request, dependencies, "final-candidate", cancellation);
     const finalGate = await dependencies.verification.verifyPublished(active.workspace, active.suite);
     await recordGate(dependencies, request.runId, "final", finalGate);
     if (!finalGate.passed) {
@@ -129,7 +130,14 @@ async function executeStage(
     signal.throwIfAborted();
     const attemptId = `${request.runId}-${stage}-${attempt}`;
     const sessionId = attemptId;
-    const snapshot = await dependencies.workspace.snapshot(`${stage}-before-${attempt}`);
+    const snapshot = await snapshotWorkspace(request, dependencies, `${stage}-before-${attempt}`, signal, stage, attempt);
+    dependencies.progress?.({
+      type: "attempt-execution-started",
+      runId: request.runId,
+      stage,
+      attempt,
+      details: { attemptId, deadline: now() + request.attemptTimeoutMs },
+    });
     const outcome = await dependencies.backend.runAttempt({
       runId: request.runId,
       stage,
@@ -142,7 +150,8 @@ async function executeStage(
         ticket: request.ticket,
         stage,
         attempt,
-        diffFromBase: snapshot.id,
+        baseCommit: active.workspace.baseCommit,
+        snapshotId: snapshot.id,
         standards: request.standards,
         ...(active.suite ? { acceptanceSuite: active.suite } : {}),
         priorReports: active.reports,
@@ -150,6 +159,13 @@ async function executeStage(
       },
       correction: false,
     }, signal);
+    dependencies.progress?.({
+      type: "attempt-execution-completed",
+      runId: request.runId,
+      stage,
+      attempt,
+      details: { attemptId, status: outcome.status },
+    });
     await dependencies.backend.stopAttempt(outcome.attemptId);
 
     const report = outcome.status === "completed"
@@ -210,6 +226,13 @@ async function executeStage(
     }
 
     if (stage === "test-design") {
+      dependencies.progress?.({
+        type: "trusted-gate-started",
+        runId: request.runId,
+        stage,
+        attempt,
+        details: { gate: "candidate-suite" },
+      });
       const validation = await dependencies.verification.validateCandidate(request, active.workspace, report.data);
       await dependencies.artifacts.record({
         type: "candidate-suite-validated",
@@ -231,6 +254,13 @@ async function executeStage(
       active.suite = await dependencies.verification.freezeSuite(validation);
     } else {
       if (!active.suite) return false;
+      dependencies.progress?.({
+        type: "trusted-gate-started",
+        runId: request.runId,
+        stage,
+        attempt,
+        details: { gate: stage },
+      });
       const gate = await dependencies.verification.runChecks(stage, active.workspace, active.suite);
       await recordGate(dependencies, request.runId, stage, gate);
       if (!gate.passed) {
@@ -239,12 +269,26 @@ async function executeStage(
       }
     }
 
+    dependencies.progress?.({
+      type: "stage-checkpoint-started",
+      runId: request.runId,
+      stage,
+      attempt,
+      details: { reportStatus: report.data.status },
+    });
     await dependencies.artifacts.record({
       type: "stage-report-accepted",
       runId: request.runId,
       stage,
       attempt,
       details: { report: report.data, suite: active.suite },
+    });
+    dependencies.progress?.({
+      type: "stage-checkpoint-completed",
+      runId: request.runId,
+      stage,
+      attempt,
+      details: { suiteVersion: active.suite?.version },
     });
     active.reports.push(report.data);
     active.failureEvidence = [];
@@ -275,7 +319,8 @@ async function executeCorrection(
       ticket: request.ticket,
       stage: "test-design",
       attempt: 1,
-      diffFromBase: (await dependencies.workspace.snapshot("correction-before")).id,
+      baseCommit: active.workspace.baseCommit,
+      snapshotId: (await snapshotWorkspace(request, dependencies, "correction-before", signal, "test-design", 1)).id,
       standards: request.standards,
       ...(active.suite ? { acceptanceSuite: active.suite } : {}),
       priorReports: active.reports,
@@ -350,6 +395,62 @@ async function executeCorrection(
     },
   });
   return true;
+}
+
+async function snapshotWorkspace(
+  request: RunRequest,
+  dependencies: FactoryDependencies,
+  label: string,
+  signal: AbortSignal,
+  stage?: Stage,
+  attempt?: number,
+): Promise<Snapshot> {
+  const timeoutMs = request.orchestrationTimeoutMs ?? 60_000;
+  const started = {
+    type: "workspace-snapshot-started",
+    runId: request.runId,
+    ...(stage === undefined ? {} : { stage }),
+    ...(attempt === undefined ? {} : { attempt }),
+    details: { label, timeoutMs },
+  };
+  dependencies.progress?.(started);
+  await dependencies.artifacts.record(started);
+
+  const timeout = Promise.withResolvers<never>();
+  const timer = setTimeout(
+    () => timeout.reject(new Error(`Workspace snapshot '${label}' exceeded its ${timeoutMs}ms orchestration deadline`)),
+    timeoutMs,
+  );
+  timer.unref();
+  const cancelled = Promise.withResolvers<never>();
+  const onAbort = () => cancelled.reject(signal.reason ?? new Error("Workspace snapshot cancelled"));
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (signal.aborted) onAbort();
+
+  try {
+    const snapshot = await Promise.race([
+      dependencies.workspace.snapshot(label),
+      timeout.promise,
+      cancelled.promise,
+    ]);
+    const completed = {
+      type: "workspace-snapshot-completed",
+      runId: request.runId,
+      ...(stage === undefined ? {} : { stage }),
+      ...(attempt === undefined ? {} : { attempt }),
+      details: {
+        label,
+        snapshotId: snapshot.id,
+        ...(snapshot.commit === undefined ? {} : { commit: snapshot.commit }),
+      },
+    };
+    dependencies.progress?.(completed);
+    await dependencies.artifacts.record(completed);
+    return snapshot;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", onAbort);
+  }
 }
 
 function allCriteriaMet(request: RunRequest, report: StageReport): boolean {

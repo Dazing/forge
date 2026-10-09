@@ -17,18 +17,25 @@ docker build -t software-factory-agent:0.1.0 -f containers/agent/Dockerfile .
 cp config/factory.example.json config/factory.local.json
 ```
 
+The image enables two OpenCode MCP servers:
+
+- `roslyn` runs RoslynMcpServer 1.5.5 locally with its context-saving `lite` tool profile. It starts against `/home/agent/workspace`; the agent can enable additional Roslyn tool groups during a session.
+- `microsoft-learn` connects to the unauthenticated Microsoft Learn endpoint at `https://learn.microsoft.com/api/mcp`. Agent containers therefore require outbound HTTPS access to `learn.microsoft.com`.
+
 Edit `config/factory.local.json`:
 
 - Set `sourceRepository` to the repository used for a standalone CLI run.
+- Set `vllm.endpoint` to an endpoint reachable from the agent container.
 - Set `vllm.modelId` to the exact ID returned by vLLM.
-- Change paths, image, or timeout only when required.
+- For a host-only or Tailscale endpoint on Linux, set `sandboxNetwork` to `"host"`. Omit it to retain Docker's isolated bridge network.
+- Set `attemptTimeoutSeconds` for one sandbox-agent attempt and `orchestrationTimeoutSeconds` for host workspace operations between attempts. The latter defaults to 60 seconds and prevents an unbounded stage-handoff snapshot.
 
-Set an endpoint reachable from both the host and agent container:
+Verify the endpoint through the same network mode used by the agent, then run the checks:
 
 ```bash
-export VLLM_BASE_URL=http://vllm-host:8000/v1
-curl --fail "$VLLM_BASE_URL/models"
+docker run --rm --network host --entrypoint curl software-factory-agent:0.1.0 \
+  --fail https://openai.example.ts.net/v1/models
 npm run check
 ```
 
-Do not put credentials in the config. This POC supports only an unauthenticated vLLM endpoint on a trusted network. Keep `config/factory.local.json`, `.runs/`, and `.factory-trusted/` outside agent-writable paths.
+Do not put credentials in the config. This POC supports only an unauthenticated vLLM endpoint on a trusted network. Host networking shares the host's network namespace and weakens container isolation; use it only when the endpoint is otherwise unreachable, such as a host Tailscale route. Keep `config/factory.local.json`, `.runs/`, and `.factory-trusted/` outside agent-writable paths.

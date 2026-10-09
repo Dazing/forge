@@ -34,6 +34,14 @@ git -C ".runs/proof-inputs/$SCENARIO-$RUN_ID/source" \
   show --stat "factory/proof-$SCENARIO-$PROOF_ID"
 ```
 
+## Diagnose stalled progress
+
+The proof launcher supervises the worker process. It prints `FACTORY_PROGRESS` records for snapshot, attempt, trusted-gate, and accepted-stage boundaries. Workspace snapshots also append durable `workspace-snapshot-started` and `workspace-snapshot-completed` events.
+
+Inspect `.runs/evidence/<run-id>/supervisor.json` first. It records the worker exit code or signal, whether the no-progress watchdog fired, and the last progress boundary observed outside the worker. A snapshot exceeding `orchestrationTimeoutSeconds` becomes a normal failed report; a worker that stops sending progress receives `SIGINT` and then `SIGKILL` after the grace period.
+
+Do not reuse or overwrite a stalled run ID. Preserve its workspace, report, events, transcript, and supervisor diagnostic, then start a new run ID. Automatic resume is intentionally unsupported because the in-memory verifier state and immutable acceptance-suite binding must not be reconstructed from untrusted workspace data.
+
 Expected results:
 
 - `feature`, `bug`, `refactor`, and `recovery-success`: `succeeded` with a new output branch.

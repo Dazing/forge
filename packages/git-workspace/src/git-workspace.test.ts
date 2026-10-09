@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -103,6 +103,24 @@ describe("GitWorkspace", () => {
       "refs/heads/main",
     ]);
     expect(git(source.path, "rev-list", "--min-parents=2", `${source.baseCommit}..${published.commit}`)).toBe("");
+  });
+
+  it("excludes ignored build outputs from both verification and publication", async () => {
+    const source = createSourceRepository();
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "git-workspace-root-"));
+    temporaryDirectories.push(workspaceRoot);
+    const adapter = new GitWorkspace({ workspaceRoot });
+    const workspace = await adapter.prepare(request(source.path, "factory/ignored-output"));
+    writeFileSync(join(workspace.path, ".gitignore"), "build/\n");
+    writeFileSync(join(workspace.path, "tracked.txt"), "completed\n");
+    mkdirSync(join(workspace.path, "build"));
+    writeFileSync(join(workspace.path, "build", "generated.bin"), "not publishable\n");
+
+    await adapter.snapshot("verified tree with ignored output");
+    const published = await adapter.publishBranch(source.baseCommit);
+
+    expect(git(source.path, "show", `${published.commit}:tracked.txt`)).toBe("completed");
+    expect(git(source.path, "ls-tree", "-r", "--name-only", published.commit).split("\n")).not.toContain("build/generated.bin");
   });
 
   it("refuses an output branch collision without changing either source branch", async () => {

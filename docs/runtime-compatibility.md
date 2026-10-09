@@ -51,7 +51,7 @@ Environment-variable names were inspected without printing values; none matched 
 
 Do not substitute deterministic tests for these observations. Once prerequisites exist:
 
-1. Build `containers/agent/Dockerfile`, expose an unauthenticated trusted-network vLLM `VLLM_BASE_URL`, and set the exact served model ID in a private configuration copied from `config/factory.example.json`. Authenticated endpoints require a future credential-isolating proxy and are not supported by this POC.
+1. Build `containers/agent/Dockerfile`, expose an unauthenticated trusted-network vLLM endpoint, and set its URL and the exact served model ID in a private configuration copied from `config/factory.example.json`. Authenticated endpoints require a future credential-isolating proxy and are not supported by this POC.
 2. Run the dedicated compatibility scenario from a disposable sample baseline.
 3. Confirm transcript evidence shows file read, edit, and `dotnet test` inside the container.
 4. Run a second attempt with a different attempt/session identity and an explicit first-attempt handoff; confirm it sees workspace changes but no resumed conversation.

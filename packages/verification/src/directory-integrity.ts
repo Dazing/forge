@@ -69,7 +69,7 @@ export async function makeDirectoryWritable(root: string): Promise<void> {
     for await (const child of directory) await makeDirectoryWritable(join(root, child.name));
     return;
   }
-  await chmod(root, 0o644);
+  await chmod(root, 0o644 | (entry.mode & 0o111));
 }
 
 async function collectFiles(
@@ -127,7 +127,7 @@ async function makeEntriesReadOnly(root: string, directories: string[]): Promise
   const entry = await lstat(root);
   if (entry.isSymbolicLink()) throw new Error(`Cannot protect symbolic link ${root}`);
   if (!entry.isDirectory()) {
-    await chmod(root, 0o444);
+    await chmod(root, 0o444 | (entry.mode & 0o111));
     return;
   }
   directories.push(root);
