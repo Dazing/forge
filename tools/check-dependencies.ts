@@ -7,8 +7,9 @@ const ALLOWED_DEPENDENCIES: Readonly<Record<string, readonly string[]>> = {
   "execution-backend": ["factory"],
   "git-workspace": ["factory"],
   verification: ["factory"],
+  "orchestration-supervisor": ["factory"],
   "run-artifacts": ["factory"],
-  "factory-cli": ["factory", "execution-backend", "git-workspace", "verification", "run-artifacts"],
+  "factory-cli": ["factory", "execution-backend", "git-workspace", "verification", "run-artifacts", "orchestration-supervisor"],
 };
 
 export interface DependencyViolation {

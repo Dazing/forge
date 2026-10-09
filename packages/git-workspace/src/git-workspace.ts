@@ -51,6 +51,8 @@ export class GitWorkspace implements GitWorkspacePort {
   #sourcePath: string | undefined;
   #sourceBaseRef: string | undefined;
   readonly #analysisPaths = new Set<string>();
+  readonly #analysisDigests = new Map<string, string>();
+  readonly #snapshotManifests = new Map<string, ReadonlyMap<string, string>>();
   #published = false;
 
   constructor(options: GitWorkspaceOptions = {}) {
@@ -101,7 +103,9 @@ export class GitWorkspace implements GitWorkspacePort {
 
   async snapshot(label: string): Promise<Snapshot> {
     const workspace = this.#requireWorkspace();
-    const id = await digestPublishableFiles(workspace.path, await this.#publishableFiles(workspace.path));
+    const manifest = new Map<string, string>();
+    const id = await digestPublishableFiles(workspace.path, await this.#publishableFiles(workspace.path), manifest);
+    this.#snapshotManifests.set(id, manifest);
     const commit = (await this.#git(
       workspace.path,
       ["rev-parse", "--verify", "HEAD"],
@@ -136,9 +140,12 @@ export class GitWorkspace implements GitWorkspacePort {
       const copiedFiles = await this.#publishableFiles(analysisPath);
       const copiedTreeId = await digestPublishableFiles(analysisPath, copiedFiles);
       if (copiedTreeId !== expectedTreeId) {
-        throw new Error("Pull-request analysis copy differs from the verified candidate tree");
+        throw new Error("Analysis copy differs from the verified candidate tree");
       }
+      const inputDigest = await digestCompleteTree(analysisPath);
+      await makeDirectoryTreeReadOnly(analysisPath);
       this.#analysisPaths.add(analysisPath);
+      this.#analysisDigests.set(analysisPath, inputDigest);
       return { path: analysisPath, treeId: copiedTreeId };
     } catch (error) {
       await makeDirectoryTreeRemovable(analysisPath);
@@ -147,10 +154,41 @@ export class GitWorkspace implements GitWorkspacePort {
     }
   }
 
+  async createChangePackage(fromTreeId: string, toTreeId: string): Promise<string> {
+    const from = this.#snapshotManifests.get(fromTreeId);
+    const to = this.#snapshotManifests.get(toTreeId);
+    if (from === undefined) throw new Error(`Unknown change-package baseline tree ${fromTreeId}`);
+    if (to === undefined) throw new Error(`Unknown change-package candidate tree ${toTreeId}`);
+    const added = [...to.keys()].filter((path) => !from.has(path)).sort();
+    const modified = [...to.keys()].filter((path) => from.has(path) && from.get(path) !== to.get(path)).sort();
+    const deleted = [...from.keys()].filter((path) => !to.has(path)).sort();
+    return `${JSON.stringify({
+      schemaVersion: 1,
+      fromTreeId,
+      toTreeId,
+      added,
+      modified,
+      deleted,
+      files: [...to].map(([path, sha256]) => ({ path, sha256 })),
+    }, null, 2)}\n`;
+  }
+
+  async verifyAnalysisWorkspace(workspace: AnalysisWorkspace): Promise<void> {
+    const expectedDigest = this.#analysisDigests.get(workspace.path);
+    if (expectedDigest === undefined || !this.#analysisPaths.has(workspace.path)) {
+      throw new Error(`Unknown analysis workspace: ${workspace.path}`);
+    }
+    const actualDigest = await digestCompleteTree(workspace.path);
+    if (actualDigest !== expectedDigest) {
+      throw new Error(`Read-only analysis input was modified: expected ${expectedDigest}, found ${actualDigest}`);
+    }
+  }
+
   async disposeAnalysisWorkspace(workspace: AnalysisWorkspace): Promise<void> {
     if (!this.#analysisPaths.delete(workspace.path)) {
       throw new Error(`Unknown pull-request analysis workspace: ${workspace.path}`);
     }
+    this.#analysisDigests.delete(workspace.path);
     await makeDirectoryTreeRemovable(workspace.path);
     await rm(workspace.path, { recursive: true, force: true });
   }
@@ -282,6 +320,7 @@ export class GitWorkspace implements GitWorkspacePort {
       await makeDirectoryTreeRemovable(path);
       await rm(path, { recursive: true, force: true });
       this.#analysisPaths.delete(path);
+      this.#analysisDigests.delete(path);
     }
     if (this.#published && this.#workspace !== undefined) {
       const executionRoot = join(this.#workspace.path, "..");
@@ -482,15 +521,23 @@ async function assertNoNestedGitMetadata(root: string, directory: string): Promi
   }
 }
 
-async function digestPublishableFiles(root: string, files: readonly string[]): Promise<string> {
+async function digestPublishableFiles(
+  root: string,
+  files: readonly string[],
+  manifest?: Map<string, string>,
+): Promise<string> {
   const digest = createHash("sha256");
   for (const name of files) {
     const path = resolve(root, name);
     const metadata = await lstat(path);
+    const content = metadata.isSymbolicLink() ? `link:${await readlink(path)}` : await readFile(path);
     digest.update(name.split(sep).join("/"));
     digest.update("\0");
-    digest.update(metadata.isSymbolicLink() ? `link:${await readlink(path)}` : await readFile(path));
+    digest.update(content);
     digest.update("\n");
+    if (manifest !== undefined) {
+      manifest.set(name.split(sep).join("/"), createHash("sha256").update(content).digest("hex"));
+    }
   }
   return digest.digest("hex");
 }
@@ -521,4 +568,43 @@ async function makeDirectoryTreeRemovable(root: string): Promise<void> {
   for (const child of await readdir(root)) {
     await makeDirectoryTreeRemovable(join(root, child));
   }
+}
+
+async function makeDirectoryTreeReadOnly(root: string): Promise<void> {
+  const entry = await lstat(root);
+  if (entry.isSymbolicLink()) return;
+  if (!entry.isDirectory()) {
+    await chmod(root, 0o444);
+    return;
+  }
+  for (const child of await readdir(root)) {
+    await makeDirectoryTreeReadOnly(join(root, child));
+  }
+  await chmod(root, 0o555);
+}
+
+async function digestCompleteTree(root: string): Promise<string> {
+  const hash = createHash("sha256");
+  async function visit(directory: string): Promise<void> {
+    const children = (await readdir(directory)).sort();
+    for (const child of children) {
+      const path = join(directory, child);
+      const relativePath = relative(root, path).replaceAll("\\", "/");
+      const entry = await lstat(path);
+      if (entry.isSymbolicLink()) {
+        hash.update(`L\\0${relativePath}\\0${await readlink(path)}\\0`);
+      } else if (entry.isDirectory()) {
+        hash.update(`D\\0${relativePath}\\0`);
+        await visit(path);
+      } else if (entry.isFile()) {
+        hash.update(`F\\0${relativePath}\\0${entry.size}\\0`);
+        hash.update(await readFile(path));
+        hash.update("\\0");
+      } else {
+        throw new Error(`Analysis workspace contains unsupported entry ${relativePath}`);
+      }
+    }
+  }
+  await visit(root);
+  return hash.digest("hex");
 }

@@ -330,6 +330,9 @@ function renderMarkdown(report: FinalReport): string {
     `**Final commit:** ${singleLine(outcome.finalCommit ?? "not produced")}`,
     `**Pull-request draft:** ${singleLine(outcome.pullRequestPath ?? "not produced")}`,
     `**Terminal reason:** ${singleLine(outcome.terminalReason)}`,
+    ...(outcome.terminalReasonCode ? [`**Terminal reason code:** ${outcome.terminalReasonCode}`] : []),
+    `**Repair rounds used:** ${outcome.repairRoundsUsed} of 2`,
+    `**Approved review tree:** ${singleLine(outcome.approvedReviewTreeId ?? "not approved")}`,
     "",
     "## Attempts",
     "",
@@ -343,6 +346,14 @@ function renderMarkdown(report: FinalReport): string {
       ? ["- None"]
       : outcome.criteria.map((criterion) => `- ${singleLine(criterion.id)}: ${criterion.verdict}`)),
     "",
+    "## Findings",
+    "",
+    ...(outcome.findings.length === 0
+      ? ["- None"]
+      : outcome.findings.map((finding) =>
+          `- ${finding.id}: ${finding.severity} ${finding.category}, ${finding.lifecycle} — ${singleLine(finding.scenario)}`
+        )),
+    "",
     "## Recorded evidence",
     "",
     ...(report.events.length === 0
@@ -351,7 +362,23 @@ function renderMarkdown(report: FinalReport): string {
         const location = [event.stage, event.attempt === undefined ? undefined : `attempt ${event.attempt}`]
           .filter((part) => part !== undefined)
           .join(", ");
-        return `- ${singleLine(event.type)}${location.length > 0 ? ` (${location})` : ""}`;
+        const operation = event.operationId === undefined ? "" : ` operation ${singleLine(event.operationId)}`;
+        const deadline = event.deadlineAt === undefined ? "" : ` deadline ${singleLine(event.deadlineAt)}`;
+        const transcript = typeof event.details.transcriptPath === "string"
+          ? ` transcript ${singleLine(event.details.transcriptPath)}`
+          : "";
+        const reason = typeof event.details.reason === "string"
+          ? ` reason ${singleLine(event.details.reason)}`
+          : typeof event.details.error === "string"
+            ? ` error ${singleLine(event.details.error)}`
+            : "";
+        const reasonCode = typeof event.details.reasonCode === "string"
+          ? ` [${singleLine(event.details.reasonCode)}]`
+          : "";
+        const diagnostics = event.details.diagnostics === undefined
+          ? ""
+          : ` diagnostics ${singleLine(JSON.stringify(event.details.diagnostics))}`;
+        return `- #${event.sequence} ${singleLine(event.occurredAt)} +${event.runElapsedMs}ms ${singleLine(event.type)}${location.length > 0 ? ` (${location})` : ""}${operation}${deadline}${transcript}${reasonCode}${reason}${diagnostics}`;
       })),
     "",
   ];

@@ -60,9 +60,15 @@ async function verifyIntentionalRed(options: {
       outputBranch: `factory/${options.runId}`,
       profilePath: resolve("config/sample-repository.json"),
     },
-    model: { provider: "vllm", modelId: "not-used", endpoint: "http://127.0.0.1:8000/v1" },
+    model: { provider: "openai-subscription", modelId: "gpt-6-luna" },
     attemptTimeoutMs: 30_000,
-    standards: (options.standards ?? ["standards/inventory-api-skill.md"]).map((path) => resolve(path)),
+    skills: {
+      shared: (options.standards ?? ["standards/skills/inventory-api"]).map((path) => resolve(path)),
+      byRole: {
+        "test-design": [], implementation: [], refactor: [], review: [],
+        "acceptance-correction": [], repair: [], "re-review": [], "pull-request": [],
+      },
+    },
   };
   const workspaceAdapter = new GitWorkspace({ workspaceRoot: join(root, "workspaces") });
   const workspace = await workspaceAdapter.prepare(request);
@@ -78,12 +84,27 @@ async function verifyIntentionalRed(options: {
   const caseFile = `${options.testId}.json`;
   await Promise.all([
     writeFile(join(candidate, "manifest.json"), JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       tests: [{
         id: options.testId,
         file: caseFile,
         criteria,
         rationale: "The absent endpoint must produce intentional RED on the original baseline.",
+      }],
+      expectations: [{
+        criteria,
+        target: `${options.testId} final response`,
+        provenance: {
+          kind: "ticket",
+          source: criteria.join(", "),
+          rationale: "The ticket criteria define the expected public response.",
+        },
+        distinguishingInput: `${options.method} ${options.path}`,
+        expectedResult: `status ${options.expectedStatus}`,
+        rejects: "The endpoint remaining absent or returning a different contract response.",
+        materialAlternative: false,
+        ambiguity: "resolved",
+        derived: false,
       }],
     }), "utf8"),
     writeFile(join(candidate, caseFile), JSON.stringify({
@@ -104,8 +125,10 @@ async function verifyIntentionalRed(options: {
     }), "utf8"),
   ]);
   const validation = await verifier.validateCandidate(request, workspace, {
+    kind: "authoring",
     status: "completed",
     stage: "test-design",
+    operation: "test-design",
     criteria: criteria.map((id) => ({
       id,
       verdict: "unmet" as const,
@@ -178,8 +201,8 @@ describe("real sample preflight", () => {
         captureReservationId: "id",
       }],
       standards: [
-        "standards/inventory-api-skill.md",
-        "standards/inventory-allocation-api-skill.md",
+        "standards/skills/inventory-api",
+        "standards/skills/inventory-allocation-api",
       ],
       evidence: "PUT /reservations/{id}/allocations is absent from the baseline.",
     });

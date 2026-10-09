@@ -10,7 +10,7 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-it("loads the vLLM endpoint directly from the configuration file", async () => {
+it("loads OpenAI subscription authentication and the configured model", async () => {
   const directory = await mkdtemp(join(tmpdir(), "factory-configuration-"));
   temporaryDirectories.push(directory);
   const path = join(directory, "factory.json");
@@ -24,19 +24,33 @@ it("loads the vLLM endpoint directly from the configuration file", async () => {
       trustedRoot: "./trusted",
       sandboxImage: "factory-agent:test",
       sandboxNetwork: "host",
-      vllm: {
-        endpoint: "http://vllm-host:8000/v1",
-        modelId: "served-model",
+      openaiSubscription: {
+        authFile: "./credentials/opencode-auth.json",
+        modelId: "gpt-6-luna",
       },
       attemptTimeoutSeconds: 30,
       orchestrationTimeoutSeconds: 45,
-      standards: ["./skills/standard"],
+      sharedSkills: ["./skills/standard"],
+      roleSkills: {
+        "test-design": ["./skills/test-design"],
+        implementation: ["./skills/implementation"],
+        refactor: [],
+        review: ["./skills/review"],
+        "acceptance-correction": ["./skills/test-design"],
+        repair: ["./skills/implementation"],
+        "re-review": ["./skills/review"],
+        "pull-request": [],
+      },
     }),
   );
 
   const configuration = await loadConfiguration(path);
 
-  expect(configuration.endpoint).toBe("http://vllm-host:8000/v1");
+  expect(configuration.authFile).toBe(join(directory, "credentials/opencode-auth.json"));
+  expect(configuration.modelId).toBe("gpt-6-luna");
   expect(configuration.sandboxNetwork).toBe("host");
   expect(configuration.orchestrationTimeoutMs).toBe(45_000);
+  expect(configuration.skills.byRole.implementation.at(-1)).toMatch(/skills\/implementation$/);
+  expect(configuration.skills.byRole.review.at(-1)).toMatch(/skills\/review$/);
+  expect(configuration.skills.byRole.review).not.toContain(configuration.skills.byRole.implementation.at(-1));
 });

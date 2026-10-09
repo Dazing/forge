@@ -1,6 +1,6 @@
 # VSA API proof scenario — implementation plan
 
-Status: implemented deterministically on 2026-10-09. The fixture, ticket, oracle, scenario binding, trusted preflight, evaluator, and documentation described below are present; the real-model proof remains blocked by the recorded Docker/vLLM prerequisites.
+Status: implemented deterministically on 2026-10-09. The fixture, ticket, oracle, scenario binding, trusted preflight, evaluator, and documentation described below are present; the real-model proof remains blocked by the recorded Docker and OpenAI subscription authentication prerequisites.
 
 Authority: [Software Factory POC brief](software-factory-poc-brief.md), [factory implementation plan](software-factory-poc-implementation-plan.md), and the current executable proof harness.
 
@@ -52,7 +52,7 @@ Concrete ownership and behavior:
 - `samples/*/AGENTS.md` supplies fixture-local architecture and safety rules. `standards/skills/inventory-api/SKILL.md` supplies reservation states, transition, case normalization, atomicity, cancellation, and dependency rules.
 - The current `samples/feature` fixture is deliberately thin: health plus inventory list/get/set. The current expected feature solution adds reservation creation, confirmation, and cancellation in one `Program.cs`/`ReservationStore` implementation. It is appropriate for proving a medium feature, but not for proving that an agent can preserve and extend established slice boundaries.
 - Existing deterministic commands are `dotnet build src/Inventory.Api/Inventory.Api.csproj --nologo` and `dotnet run --project tests/Inventory.Tests/Inventory.Tests.csproj`. Existing evaluators prove the HTTP surface independently; the console tests are not the authoritative acceptance suite.
-- The current environment record in `docs/runtime-compatibility.md` says Docker/Podman and a compatible configured vLLM endpoint are unavailable. Deterministic implementation verification can still complete; real-model proof results must remain `BLOCKED` until those prerequisites exist.
+- The current environment record in `docs/runtime-compatibility.md` says Docker/Podman and a dedicated OpenCode OpenAI subscription login are unavailable. Deterministic implementation verification can still complete; real-model proof results must remain `BLOCKED` until those prerequisites exist.
 
 ## 3. Integration decision
 
@@ -380,7 +380,7 @@ Do not add aliases for old scenario names, duplicate evaluator entry points, a s
 
 **Files:** no new production files; evidence outputs remain under ignored `.runs/` and `.factory-trusted/`. Update `docs/verification-evidence.md` from observations only.
 
-**Changes:** run the matrix in section 10, inspect the expected baseline failure, and remove all temporary fixture/materialization directories outside ignored run roots. If Docker and vLLM prerequisites exist, run one new real proof with a unique ID and inspect its branch/report. If unavailable, record `BLOCKED` and stop; do not substitute deterministic results.
+**Changes:** run the matrix in section 10, inspect the expected baseline failure, and remove all temporary fixture/materialization directories outside ignored run roots. If Docker and OpenAI subscription authentication prerequisites exist, run one new real proof with a unique ID and inspect its branch/report. If unavailable, record `BLOCKED` and stop; do not substitute deterministic results.
 
 **Completion evidence:** all deterministic rows have their expected result; real proof either has an inspected report/branch/evaluator pass or an explicit prerequisite blocker.
 
@@ -404,7 +404,7 @@ Run from repository root. `PROOF_ID` and output paths must be unique.
 | Focused trusted integration | `npm test -- --run tests/integration/preflight.test.ts` | Existing and VSA materialization/preflight/intentional-RED cases pass. |
 | Full deterministic factory suite | `npm run check` | Typecheck, dependency checks, and all deterministic tests pass. |
 | All fixture builds/tests | `for fixture in feature bug refactor recovery-success recovery-exhaustion vsa-feature; do dotnet build "samples/$fixture/src/Inventory.Api/Inventory.Api.csproj" --nologo && dotnet run --project "samples/$fixture/tests/Inventory.Tests/Inventory.Tests.csproj"; done` | Every fixture baseline is independently green. |
-| Real model proof | `PROOF_ID="$(date +%s)"; npx tsx proof/harness/run-proof.ts config/factory.local.json proof/scenarios/vsa-feature.json "factory/proof-vsa-feature-$PROOF_ID" "$PROOF_ID-vsa-feature"` | With prerequisites: terminal `succeeded`, new branch, trusted gates green, independent evaluator green. Without Docker/vLLM: report exact infrastructure blocker; do not claim proof success. |
+| Real model proof | `PROOF_ID="$(date +%s)"; npx tsx proof/harness/run-proof.ts config/factory.local.json proof/scenarios/vsa-feature.json "factory/proof-vsa-feature-$PROOF_ID" "$PROOF_ID-vsa-feature"` | With prerequisites: terminal `succeeded`, new branch, trusted gates green, independent evaluator green. Without Docker/authentication: report the exact infrastructure blocker; do not claim proof success. |
 | Published branch and PR-draft inspection | `cat ".runs/evidence/$PROOF_ID-vsa-feature/report.json"`, `cat ".runs/evidence/$PROOF_ID-vsa-feature/artifacts/PR.md"`, and `git -C ".runs/proof-inputs/inventory-vsa-feature-$PROOF_ID-vsa-feature/source" show --stat "factory/proof-vsa-feature-$PROOF_ID"` | Report identifies all four coding stages plus isolated pull-request drafting; branch contains one coherent slice plus legitimate tests and no evaluator, oracle, or committed `PR.md` files. |
 
 For the API smoke required before evaluator integration, launch with an ephemeral explicit URL using the repository pattern:

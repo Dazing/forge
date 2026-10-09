@@ -57,12 +57,12 @@ Also run git status --short and inspect untracked files; the diff alone omits th
 ## Supplied skills
 ${request.context.standards.map((path) => `- ${path}`).join("\n") || "None supplied; follow applicable repository instructions."}
 
-## Prior stage reports
-${JSON.stringify(request.context.priorReports, null, 2)}
+## Predecessor report pointers
+${JSON.stringify(request.context.reportReferences, null, 2)}
 
-## Trusted verification facts
-These facts were observed by the orchestrator. Explain code using them as context, but do not copy or reinterpret them as checks you ran.
-${JSON.stringify(request.context.verificationChecks, null, 2)}
+## Trusted host evidence
+These facts were observed by the orchestrator and are bound to recorded tree/suite identities. Artifact paths are read-only sandbox paths.
+${JSON.stringify(request.context.evidenceBundles, null, 2)}
 
 ## Required completion report
 Finish with exactly one JSON object enclosed in pull_request_report tags, without Markdown fences inside the tags.

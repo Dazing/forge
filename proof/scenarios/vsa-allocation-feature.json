@@ -3,8 +3,8 @@
   "fixture": "samples/vsa-allocation-feature",
   "ticket": "samples/tickets/vsa-allocation-feature.md",
   "standards": [
-    "standards/inventory-api-skill.md",
-    "standards/inventory-allocation-api-skill.md"
+    "standards/skills/inventory-api",
+    "standards/skills/inventory-allocation-api"
   ],
   "evaluator": "proof/evaluators/vsa-allocation-feature.sh",
   "expectedSolution": "proof/expected/vsa-allocation-feature",

@@ -1,0 +1,32 @@
+{
+  "sourceRepository": "../samples/inventory-reservations",
+  "baseRef": "main",
+  "repositoryProfile": "./sample-repository.json",
+  "runRoot": "../.runs",
+  "trustedRoot": "../.factory-trusted",
+  "sandboxImage": "software-factory-agent:0.1.0",
+  "openaiSubscription": {
+    "authFile": "../.factory-auth/opencode/auth.json",
+    "modelId": "gpt-6-luna"
+  },
+  "attemptTimeoutSeconds": 900,
+  "orchestrationTimeoutSeconds": 60,
+  "attemptShutdownGraceSeconds": 10,
+  "sharedSkills": [
+    "../standards/skills/coding-best-practices",
+    "../standards/skills/csharp",
+    "../standards/skills/dotnet-10",
+    "../standards/skills/inventory-api",
+    "../standards/skills/vertical-slice-architecture"
+  ],
+  "roleSkills": {
+    "test-design": ["../standards/skills/factory-acceptance-test-design"],
+    "implementation": ["../standards/skills/tdd"],
+    "refactor": [],
+    "review": ["../standards/skills/factory-independent-review"],
+    "acceptance-correction": ["../standards/skills/factory-acceptance-test-design"],
+    "repair": ["../standards/skills/tdd"],
+    "re-review": ["../standards/skills/factory-independent-review"],
+    "pull-request": []
+  }
+}

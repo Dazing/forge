@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const attemptFaultSchema = z.object({
-  stage: z.enum(["test-design", "implementation", "refactor", "review"]),
+  operation: z.enum(["test-design", "implementation", "refactor", "review", "acceptance-correction", "repair", "re-review"]),
   attempt: z.union([z.literal(1), z.literal(2)]),
   point: z.literal("after-agent-files-changed"),
   outcome: z.literal("execution-failure"),

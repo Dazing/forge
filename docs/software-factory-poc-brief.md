@@ -14,7 +14,7 @@ The POC tests **core orchestration**: fresh-context stages, artifact handoffs, q
 | Target | One controlled C#/.NET 10 sample repository |
 | Invocation | Terminal command; agents execute in containers/sandboxes |
 | Concurrency | One ticket per invocation |
-| Inference | vLLM, OpenAI-compatible endpoint, configurable model |
+| Inference | ChatGPT subscription through OpenCode, `openai/gpt-6-luna` |
 | Standards | Supplied agent skills and repository `AGENTS.md` |
 | Agent context | Fresh session for every stage and recovery attempt |
 | Success output | Committed Git branch, host-owned `PR.md`, and evidence report; no automatic merge |
@@ -27,19 +27,19 @@ Initially use the same configured model across stages. Stage responsibilities an
 
 ## 1. Runtime compatibility spike
 
-**Purpose:** prove the agent runtime can execute the required workflow against the actual vLLM deployment before building the pipeline.
+**Purpose:** prove the agent runtime can execute the required workflow against the authenticated GPT-6 Luna subscription before building the pipeline.
 
 Sandcastle and OpenHands remain candidates. [Sandcastle](https://github.com/mattpocock/sandcastle) is an orchestration/sandbox library that launches an underlying agent; choosing it does not by itself settle the coding-agent runtime.
 
 ### Spike procedure
 
-Evaluate one candidate end to end first. Start with Sandcastle plus an agent runtime that documents configurable OpenAI-compatible endpoints. Evaluate OpenHands if that combination cannot meet the requirements without disproportionate custom work.
+Evaluate one candidate end to end first. Start with Sandcastle plus OpenCode's built-in OpenAI subscription provider. Evaluate OpenHands if that combination cannot meet the requirements without disproportionate custom work.
 
-Use the actual vLLM model identifiers and quantizations from the deployment; do not assume model names imply compatible tool calling.
+Use the exact `openai/gpt-6-luna` model identifier and record the OpenCode/container versions; the configured name alone does not prove compatible tool calling.
 
 | Capability | Required evidence |
 |---|---|
-| Local inference | Agent completes a task through the configured vLLM endpoint, without silently using a hosted model |
+| Subscription inference | Agent completes a task through the authenticated OpenAI provider using GPT-6 Luna |
 | Coding tools | Agent reads files, edits code, and runs a .NET command inside the sandbox |
 | Fresh sessions | A second invocation receives explicit handoff artifacts but no previous conversation history |
 | Workspace continuity | Second invocation sees code changes from the first |
@@ -223,7 +223,7 @@ The POC is complete when:
 
 - One manual invocation runs one ticket without human intervention.
 - Every stage and recovery attempt uses fresh agent context.
-- Agents execute autonomously inside the sandbox using the configured vLLM deployment.
+- Agents execute autonomously inside the sandbox using the configured OpenAI subscription and GPT-6 Luna.
 - Acceptance tests are enforced independently of downstream agents.
 - The feature, bug, and refactor cases produce committed branches satisfying their criteria and checks.
 - Successful runs produce a host-owned `PR.md` that describes the verified tree without adding the file to the solution branch.
@@ -231,4 +231,4 @@ The POC is complete when:
 - Injected recovery failure demonstrates bounded stopping with an accurate failure report.
 - No run modifies or merges into the base branch.
 
-**First implementation action:** run the compatibility spike against the real vLLM endpoint. That is the remaining dependency with the greatest influence on the design.
+**First implementation action:** run the compatibility spike against authenticated GPT-6 Luna. That is the remaining dependency with the greatest influence on the design.

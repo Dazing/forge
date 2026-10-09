@@ -1,6 +1,6 @@
 # VSA allocation API proof scenario — implementation plan
 
-Status: implemented and deterministically verified on 2026-10-09. The baseline, ticket, protected routing stub, trusted runner integration, oracle, evaluator, preflight, documentation, and verification matrix are complete; the real-model proof remains blocked by the recorded Docker/vLLM prerequisites.
+Status: implemented and deterministically verified on 2026-10-09. The baseline, ticket, protected routing stub, trusted runner integration, oracle, evaluator, preflight, documentation, and verification matrix are complete; the real-model proof remains blocked by the recorded Docker and OpenAI subscription authentication prerequisites.
 
 Authority: [Software Factory POC brief](software-factory-poc-brief.md), [factory implementation plan](software-factory-poc-implementation-plan.md), the implemented [VSA quantity-adjustment scenario](vsa-api-proof-scenario-implementation-plan.md), and the current executable proof harness.
 
@@ -23,7 +23,7 @@ Create:
 
 - `samples/vsa-allocation-feature/**` — fixed location-aware baseline with six working business slices and no reallocation endpoint;
 - `samples/tickets/vsa-allocation-feature.md` — the reallocation ticket and seven stable criteria;
-- `standards/inventory-allocation-api-skill.md` — routing contract, deterministic acceptance-stub behaviors, mapping rules, and architecture constraints;
+- `standards/skills/inventory-allocation-api/SKILL.md` — routing contract, deterministic acceptance-stub behaviors, mapping rules, and architecture constraints;
 - `proof/scenarios/vsa-allocation-feature.json`;
 - `proof/expected/vsa-allocation-feature/**` — manually reviewed oracle;
 - `proof/evaluators/vsa-allocation-feature.sh` and a distinct mode in `api_evaluator.py`;
@@ -329,7 +329,7 @@ Baseline contract: evaluator reaches the first reallocation request only after b
 4. **Oracle:** add tests first, then calculator, explicit mappings, typed HTTP client, optimistic operation, and composition wiring.
 5. **Evaluator:** add external failure, timeout, stale-snapshot, concurrent conservation, and baseline-fail/oracle-pass checks.
 6. **Integration:** add preflight RED, README/runbook loops, fixture matrix, implementation-plan amendment, and only observed verification evidence.
-7. **Verification:** run the matrix below, remove generated outputs and temporary repositories, and run a real proof only when Docker/vLLM prerequisites exist.
+7. **Verification:** run the matrix below, remove generated outputs and temporary repositories, and run a real proof only when Docker and OpenAI subscription authentication prerequisites exist.
 
 ## 10. Verification matrix
 
@@ -344,7 +344,7 @@ Baseline contract: evaluator reaches the first reallocation request only after b
 | Focused integration | `npm test -- --run tests/integration/preflight.test.ts` | Existing cases plus allocation intentional RED pass. |
 | Full deterministic suite | `npm run check` | Typecheck, dependency checks, and all tests pass. |
 | Fixture matrix | `for fixture in feature bug refactor recovery-success recovery-exhaustion vsa-feature vsa-allocation-feature; do dotnet build "samples/$fixture/src/Inventory.Api/Inventory.Api.csproj" --nologo && dotnet run --project "samples/$fixture/tests/Inventory.Tests/Inventory.Tests.csproj"; done` | All seven baselines pass independently. |
-| Real proof | `PROOF_ID="$(date +%s)"; npx tsx proof/harness/run-proof.ts config/factory.local.json proof/scenarios/vsa-allocation-feature.json "factory/proof-vsa-allocation-feature-$PROOF_ID" "$PROOF_ID-vsa-allocation-feature"` | With prerequisites: succeeded branch and evaluator. Without Docker/vLLM: exact blocker, no success claim. |
+| Real proof | `PROOF_ID="$(date +%s)"; npx tsx proof/harness/run-proof.ts config/factory.local.json proof/scenarios/vsa-allocation-feature.json "factory/proof-vsa-allocation-feature-$PROOF_ID" "$PROOF_ID-vsa-allocation-feature"` | With prerequisites: succeeded branch and evaluator. Without Docker/authentication: exact blocker, no success claim. |
 
 ## 11. Risks and fixed decisions
 

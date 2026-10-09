@@ -2,11 +2,14 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
+import { candidateManifestExpectationSchema } from "@factory/core";
 import type {
   AcceptanceSuite,
   CandidateValidation,
   CheckResult,
+  CorrectionBoundaryDiagnostics,
   GateResult,
+  ProtectedContentIdentity,
   RunRequest,
   Stage,
   StageReport,
@@ -29,23 +32,25 @@ import {
 import { TrustedCommandRunner, type CommandExecution, type TestSummary } from "./trusted-command-runner.js";
 
 const candidateManifestSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(2),
   tests: z.array(z.object({
     id: z.string().min(1),
     file: z.string().min(1),
     criteria: z.array(z.string().min(1)).min(1),
     rationale: z.string().min(1),
   }).strict()).min(1),
+  expectations: z.array(candidateManifestExpectationSchema).min(1),
 }).strict();
 
 const immutableManifestSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(2),
   version: z.string().min(1),
   digest: z.string().regex(/^[a-f0-9]{64}$/),
   ticketDigest: z.string().min(1),
   baseCommit: z.string().min(1),
   files: z.array(z.object({ path: z.string(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict()),
   mapping: z.array(z.object({ criterionId: z.string(), tests: z.array(z.string()) }).strict()),
+  expectations: z.array(candidateManifestExpectationSchema),
 }).strict();
 
 type CandidateManifest = z.infer<typeof candidateManifestSchema>;
@@ -70,6 +75,7 @@ interface PendingSuite {
   readonly candidateDigest: DirectoryDigest;
   readonly mapping: CriterionMapping;
   readonly version: string;
+  readonly expectations: CandidateManifest["expectations"];
 }
 
 export interface TrustedVerificationOptions {
@@ -184,13 +190,14 @@ export class TrustedVerification implements VerificationPort {
         throw new Error("Candidate acceptance suite changed while it was being promoted");
       }
       const immutableManifest = {
-        schemaVersion: 1 as const,
+        schemaVersion: 2 as const,
         version: pending.version,
         digest: copiedDigest.digest,
         ticketDigest: pending.state.ticketDigest,
         baseCommit: pending.state.baseCommit,
         files: copiedDigest.files,
         mapping: pending.mapping,
+        expectations: pending.expectations,
       };
       const serializedManifest = JSON.stringify(immutableManifest, null, 2) + "\n";
       const manifestPath = join(temporaryRoot, "suite.manifest.json");
@@ -231,9 +238,12 @@ export class TrustedVerification implements VerificationPort {
     }
   }
 
-  async captureProductionIdentity(workspace: WorkspaceReference): Promise<string> {
+  async captureProtectedContentIdentity(workspace: WorkspaceReference): Promise<ProtectedContentIdentity> {
     const state = await this.requireState(workspace);
-    return this.productionDigest(workspace.path, state);
+    return digestDirectory(workspace.path, {
+      rejectSymlinks: false,
+      excludes: this.protectedContentExclusions(state),
+    });
   }
 
   async validateCorrection(
@@ -241,7 +251,7 @@ export class TrustedVerification implements VerificationPort {
     workspace: WorkspaceReference,
     report: StageReport,
     current: AcceptanceSuite,
-    productionIdentity: string,
+    protectedIdentity: ProtectedContentIdentity,
   ): Promise<CandidateValidation> {
     const state = await this.requireState(workspace);
     if (requestIdentity(request) !== state.requestIdentity) {
@@ -251,9 +261,36 @@ export class TrustedVerification implements VerificationPort {
       return rejectedValidation("Correction was not based on the current authoritative suite", []);
     }
     const integrityProblem = await this.suiteIntegrityProblem(state, current);
-    const currentProductionIdentity = await this.productionDigest(workspace.path, state);
-    if (currentProductionIdentity !== productionIdentity) {
-      return rejectedValidation("Acceptance correction modified production content", []);
+    const currentIdentity = await this.captureProtectedContentIdentity(workspace);
+    if (currentIdentity.digest !== protectedIdentity.digest) {
+      const before = new Map(protectedIdentity.files.map((file) => [file.path, file.sha256]));
+      const after = new Map(currentIdentity.files.map((file) => [file.path, file.sha256]));
+      const diagnostics: CorrectionBoundaryDiagnostics = {
+        policy: "protected-workspace-content",
+        exclusions: this.protectedContentExclusions(state),
+        beforeIdentity: protectedIdentity.digest,
+        afterIdentity: currentIdentity.digest,
+        added: currentIdentity.files.filter((file) => !before.has(file.path)).map((file) => file.path),
+        modified: currentIdentity.files.filter((file) => before.has(file.path) && before.get(file.path) !== file.sha256).map((file) => file.path),
+        deleted: protectedIdentity.files.filter((file) => !after.has(file.path)).map((file) => file.path),
+        binding: {
+          runId: request.runId,
+          ticketDigest: state.ticketDigest,
+          baseCommit: state.baseCommit,
+          suiteVersion: current.version,
+          suiteDigest: current.digest,
+        },
+      };
+      const changes = [
+        ...diagnostics.added.map((path) => `added ${path}`),
+        ...diagnostics.modified.map((path) => `modified ${path}`),
+        ...diagnostics.deleted.map((path) => `deleted ${path}`),
+      ].join("; ");
+      return {
+        ...rejectedValidation(`Acceptance correction violated protected workspace content: ${changes} (run ${request.runId}, suite ${current.version}, before ${protectedIdentity.digest}, after ${currentIdentity.digest})`, []),
+        reasonCode: "correction-boundary-violation",
+        diagnostics,
+      };
     }
     if (integrityProblem) return rejectedValidation(integrityProblem, []);
 
@@ -371,6 +408,8 @@ export class TrustedVerification implements VerificationPort {
       }
       const mappingResult = await validateMapping(parsedManifest.data, request, candidatePath);
       if (mappingResult instanceof Error) return rejectedValidation(mappingResult.message, checks);
+      const expectationProblem = validateExpectations(parsedManifest.data, request);
+      if (expectationProblem) return rejectedValidation(expectationProblem.message, checks);
 
       const treeId = await this.treeDigest(state.baselinePath, state.profile);
       const execution = await state.runner.run(
@@ -400,7 +439,14 @@ export class TrustedVerification implements VerificationPort {
         mapping: mappingResult,
         checks,
       };
-      this.#pending.set(validation, { state, candidatePath, candidateDigest, mapping: mappingResult, version });
+      this.#pending.set(validation, {
+        state,
+        candidatePath,
+        candidateDigest,
+        mapping: mappingResult,
+        expectations: parsedManifest.data.expectations,
+        version,
+      });
       return validation;
     } catch (error) {
       return rejectedValidation(contextualError("Candidate validation failed", error), checks);
@@ -512,14 +558,18 @@ export class TrustedVerification implements VerificationPort {
     }
   }
 
+  private protectedContentExclusions(state: RunState): readonly string[] {
+    return [
+      ...state.profile.profile.treeExcludes,
+      state.profile.profile.acceptance.candidateDirectory,
+      ".factory/verification-runtime",
+    ];
+  }
+
   private async productionDigest(workspacePath: string, state: RunState): Promise<string> {
     return (await digestDirectory(workspacePath, {
       rejectSymlinks: false,
-      excludes: [
-        ...state.profile.profile.treeExcludes,
-        state.profile.profile.acceptance.candidateDirectory,
-        ".factory/verification-runtime",
-      ],
+      excludes: this.protectedContentExclusions(state),
     })).digest;
   }
 
@@ -529,6 +579,36 @@ export class TrustedVerification implements VerificationPort {
       excludes: [...profile.profile.treeExcludes, ".factory/verification-runtime"],
     })).digest;
   }
+}
+
+function validateExpectations(manifest: CandidateManifest, request: RunRequest): Error | undefined {
+  const ticketCriteria = new Set(request.ticket.criteria.map(({ id }) => id));
+  const coveredCriteria = new Set<string>();
+  const targets = new Set<string>();
+  for (const expectation of manifest.expectations) {
+    if (targets.has(expectation.target)) {
+      return new Error(`Expectation metadata contains duplicate target ${expectation.target}`);
+    }
+    targets.add(expectation.target);
+    for (const criterionId of expectation.criteria) {
+      if (!ticketCriteria.has(criterionId)) {
+        return new Error(`Expectation ${expectation.target} references unknown criterion ${criterionId}`);
+      }
+      coveredCriteria.add(criterionId);
+    }
+    if (expectation.materialAlternative && expectation.ambiguity === "unresolved") {
+      return new Error(`Expectation ${expectation.target} has unresolved material ambiguity`);
+    }
+    if (expectation.materialAlternative && expectation.provenance.kind === "assumption") {
+      return new Error(`Expectation ${expectation.target} is a material assumption without contract support`);
+    }
+  }
+  for (const criterionId of ticketCriteria) {
+    if (!coveredCriteria.has(criterionId)) {
+      return new Error(`Acceptance criterion ${criterionId} has no expectation provenance`);
+    }
+  }
+  return undefined;
 }
 
 async function validateMapping(

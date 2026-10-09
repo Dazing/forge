@@ -132,7 +132,7 @@ Validate agent-produced reports at the boundary. Keep the schema source and runt
 | Change | Expected edit surface |
 |---|---|
 | Sandcastle-based backend to another runtime | Execution backend, its contract tests, image, composition wiring |
-| vLLM model or endpoint | Configuration; backend compatibility evidence if tool behavior changes |
+| OpenAI subscription model or auth delivery | Configuration and execution backend; compatibility evidence if auth/model behavior changes |
 | Review instructions | Review stage assets and relevant behavior scenarios |
 | Git publication strategy | Git workspace adapter and branch-preservation integration tests |
 | Check implementation or sample stack | Verification adapter/profile and corresponding fixtures; no retry-policy changes |
@@ -199,7 +199,7 @@ Run trusted acceptance tests in a separate verifier container/process from the a
 
 The agent can run local checks for TDD, but agent-generated output alone is not trusted gate evidence. Have the orchestrator capture check process exits and results from its own verifier. Do not let a repository script select a different test suite or fabricate a successful acceptance report.
 
-Do not expose the host Docker socket, privileged mode, or publication credentials inside agent containers. The host orchestrator/backend may control Docker; the agent cannot. Restrict mounts to the dedicated workspace and explicit read-only inputs. vLLM must be reachable from the sandbox without falling back to a hosted provider.
+Do not expose the host Docker socket, privileged mode, publication credentials, or unrelated provider credentials inside agent containers. The host orchestrator/backend may control Docker; the agent cannot. Restrict mounts to the dedicated workspace, explicit read-only inputs, and the dedicated OpenAI OAuth file required by OpenCode. The OAuth file is readable by the agent's container identity; use only controlled repositories and tickets.
 
 Read-only suites prevent modification, not overfitting. Tests remain visible by design; independent review and fixture evaluation address adequacy, not a claim of adversarial-proof correctness.
 
@@ -223,16 +223,16 @@ No remote push or merge is required. On failure preserve the isolated diagnostic
 
 ## 8. Delivery phases
 
-Run focused behavioral tests during each implementation phase and a real smoke scenario at its exit. Tests using deterministic substitute agents establish orchestration semantics; they do not replace real vLLM proof runs.
+Run focused behavioral tests during each implementation phase and a real smoke scenario at its exit. Tests using deterministic substitute agents establish orchestration semantics; they do not replace authenticated GPT-6 Luna proof runs.
 
 ### Phase 0 — Runtime compatibility and stack decision
 
 Deliver:
 
-- One minimal real sandboxed coding task through the actual vLLM deployment.
+- One minimal real sandboxed coding task through the authenticated OpenAI subscription using GPT-6 Luna.
 - Two independent sessions showing workspace continuity without conversation/session reuse.
 - Observed tool calling, standards delivery, structured output extraction, branch control, cancellation, timeout, and read-only mount behavior.
-- A runtime decision with exact versions, model ID, quantization, endpoint configuration, and known limits, excluding secrets.
+- A runtime decision with exact versions, model ID, subscription auth mechanism, and known limits, excluding secrets.
 
 Prefer Sandcastle plus a compatible coding runtime; evaluate OpenHands if the first combination fails requirements. Do not write a custom coding-agent loop to rescue an unsuitable dependency.
 
@@ -270,7 +270,7 @@ Deliver:
 - Stage-specific prompts, report parsing, criterion gates, TDD evidence, final review with fixes, and structured PR explanation output.
 - Final commit publication and human-readable plus machine-readable reports, including host-owned `PR.md`.
 
-Exit: one actual feature ticket completes through vLLM; inspect the resulting diff, `PR.md`, and published branch independently. All four coding-stage identities, the pull-request identity, and final check evidence must be present. No human command approval is required within the run.
+Exit: one actual feature ticket completes through authenticated GPT-6 Luna; inspect the resulting diff, `PR.md`, and published branch independently. All four coding-stage identities, the pull-request identity, and final check evidence must be present. No human command approval is required within the run.
 
 ### Phase 4 — Bounded failure and correction paths
 
@@ -324,7 +324,7 @@ Build fixtures in temporary Git repositories from committed source plus explicit
 - Factory tests cover consumer-visible transitions, recovery ceilings, acceptance verdicts, correction rules, and failure precedence.
 - Adapter contract tests cover fresh sessions, cancellation, evidence validity, immutable suites, and branch preservation using actual boundaries where feasible.
 - Integration tests use disposable Git repositories and containers for filesystem, process, and publication behavior.
-- Proof scenarios exercise real runtime/vLLM behavior and published branches; they are distinct from deterministic policy tests.
+- Proof scenarios exercise real Sandcastle/OpenCode/GPT-6 Luna behavior and published branches; they are distinct from deterministic policy tests.
 - Do not test prompt wording, copies of configuration defaults, forwarding methods, or exact incidental event sequences.
 - Keep report schemas additive only when needed; during this POC migrate producers/consumers together rather than add compatibility shims.
 - Each module change owns its local tests and docs. Only composition wiring, shared contract changes, and workspace dependencies require cross-module integration.
@@ -333,7 +333,7 @@ Build fixtures in temporary Git repositories from committed source plus explicit
 
 ## 11. Completion checklist
 
-- [ ] Actual vLLM/runtime compatibility is demonstrated and recorded.
+- [ ] Actual GPT-6 Luna/runtime compatibility is demonstrated and recorded.
 - [ ] Modules have directed dependencies and replaceable external contracts.
 - [ ] One Markdown ticket runs without human intervention inside isolated execution.
 - [ ] Every stage and recovery uses a fresh session and explicit handoff artifacts.

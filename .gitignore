@@ -3,6 +3,7 @@ dist/
 *.tsbuildinfo
 .runs/
 .factory-trusted/
+.factory-auth/
 config/factory.local.json
 .env
 .env.*

@@ -40,9 +40,15 @@ function request(sourcePath: string, outputBranch = "factory/run-1"): RunRequest
       outputBranch,
       profilePath: "profile.json",
     },
-    model: { provider: "vllm", modelId: "model", endpoint: "http://localhost" },
+    model: { provider: "openai-subscription", modelId: "gpt-6-luna" },
     attemptTimeoutMs: 30_000,
-    standards: [],
+    skills: {
+      shared: [],
+      byRole: {
+        "test-design": [], implementation: [], refactor: [], review: [],
+        "acceptance-correction": [], repair: [], "re-review": [], "pull-request": [],
+      },
+    },
   };
 }
 
@@ -105,21 +111,33 @@ describe("GitWorkspace", () => {
     expect(git(source.path, "rev-list", "--min-parents=2", `${source.baseCommit}..${published.commit}`)).toBe("");
   });
 
-  it("isolates pull-request analysis changes from the verified publication workspace", async () => {
+  it("enforces read-only analysis input and preserves the publication workspace", async () => {
     const source = createSourceRepository();
     const workspaceRoot = mkdtempSync(join(tmpdir(), "git-workspace-root-"));
     temporaryDirectories.push(workspaceRoot);
     const adapter = new GitWorkspace({ workspaceRoot });
     const workspace = await adapter.prepare(request(source.path, "factory/analysis"));
+    const baseline = await adapter.snapshot("baseline");
     writeFileSync(join(workspace.path, "tracked.txt"), "verified candidate\n");
     writeFileSync(join(workspace.path, "new.txt"), "publish me\n");
     const snapshot = await adapter.snapshot("verified tree");
+    const changePackage = JSON.parse(await adapter.createChangePackage(baseline.id, snapshot.id)) as {
+      added: string[];
+      modified: string[];
+      deleted: string[];
+    };
+    expect(changePackage).toMatchObject({
+      added: ["new.txt"],
+      modified: ["tracked.txt"],
+      deleted: [],
+    });
 
     const analysis = await adapter.createAnalysisWorkspace(snapshot.id);
     expect(analysis.treeId).toBe(snapshot.id);
     expect(readFileSync(join(analysis.path, "tracked.txt"), "utf8")).toBe("verified candidate\n");
-    writeFileSync(join(analysis.path, "tracked.txt"), "agent mutation\n");
-    writeFileSync(join(analysis.path, "analysis-only.txt"), "discarded\n");
+    expect(() => writeFileSync(join(analysis.path, "tracked.txt"), "agent mutation\n")).toThrow(/EACCES|permission denied/i);
+    expect(() => writeFileSync(join(analysis.path, "analysis-only.txt"), "discarded\n")).toThrow(/EACCES|permission denied/i);
+    await adapter.verifyAnalysisWorkspace(analysis);
     await adapter.disposeAnalysisWorkspace(analysis);
 
     expect(readFileSync(join(workspace.path, "tracked.txt"), "utf8")).toBe("verified candidate\n");

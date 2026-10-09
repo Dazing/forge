@@ -4,24 +4,25 @@ A local-first proof of concept for a hands-off coding pipeline: give it a Markdo
 
 The goal is to prove the **core orchestration engine**: fresh agent contexts, reliable handoffs, quality gates, protected acceptance tests, and bounded recovery.
 
-## Planned workflow
+## Workflow
 
-1. **Test design:** a fresh agent writes executable acceptance tests and a short rationale before implementation.
-2. **Implementation:** a fresh agent solves the ticket using TDD.
-3. **Refactor:** a fresh agent enforces repository standards and improves code quality.
-4. **Code review:** a fresh agent identifies and fixes remaining issues.
-5. **Pull-request draft:** after exact-tree verification, a fresh read-only explanation agent describes the complete change from an isolated copy; the orchestrator renders `PR.md`.
-6. **Output:** the orchestrator publishes the unchanged verified solution branch without merging it.
+1. **Test design:** a fresh agent writes executable acceptance tests, criterion mappings, and expectation provenance before implementation.
+2. **Implementation:** a fresh agent implements the ticket using TDD.
+3. **Refactor:** a fresh agent makes supported behavior-preserving improvements or reports a justified no-op. Behavioral defects become findings, not refactor edits.
+4. **Independent review:** a read-only fresh agent emits contract-compliance and implementation-quality verdicts plus evidence-backed findings.
+5. **Conditional repair:** blocking findings consume one of two run-wide repair rounds. A repair agent claims each authorized finding; a separate read-only re-review verifies resolution and repair consequences.
+6. **Pull-request draft:** after exact-tree verification, a fresh read-only explanation agent describes the complete change from an isolated copy; the orchestrator renders `PR.md`.
+7. **Output:** the orchestrator publishes the unchanged verified solution branch without merging it.
 
-Agents execute autonomously inside a container or sandbox. Each configured standard is an OpenCode skill directory containing `<name>/SKILL.md`; the backend mounts it read-only at `/home/agent/.config/opencode/skills/<name>` and requires every fresh agent to load it through OpenCode's native `skill` tool. Repository-specific instructions still come from the target repository's `AGENTS.md`.
+Agents execute autonomously inside a container or sandbox. Shared and role-specific skills are explicit OpenCode skill directories containing `<name>/SKILL.md`; the backend mounts only the skills selected for that role under `/home/agent/.config/opencode/skills/<name>`. Repository-specific instructions still come from the target repository's `AGENTS.md`.
 
-Stage gates combine automated checks with explicit acceptance-criteria verdicts. Downstream agents cannot modify authoritative acceptance tests; suspected test defects use a controlled correction path.
+Stage gates combine automated checks with explicit acceptance-criteria verdicts. Downstream agents cannot modify authoritative acceptance tests. Review/re-review receive a host-created read-only candidate copy and external writable scratch. Suspected test defects use one controlled correction path.
 
-A failed stage gets one fresh recovery attempt. If recovery fails, the run stops with diagnostic evidence rather than claiming success.
+Each operation has at most two execution attempts. Review `changes-required` is a completed judgment, not an execution retry. Two repair rounds are shared across refactor/review findings. Exhaustion stops with findings and host evidence preserved.
 
-Each coding prompt supplies shared operating rules and only the assigned stage's procedure: contract-derived test design, small implementation RED/GREEN cycles, concrete standards refactoring, or bounded whole-branch review. After those gates, a separate prompt asks for a concise summary plus ELI5 and execution-order explanation; it cannot write to the publication workspace. Handoffs identify the original base commit and current tree snapshot, with instructions to inspect the full tracked diff and untracked files. Supplied skills are read-only OpenCode global skills; acceptance suites under `/home/agent/factory-inputs/` are separate read-only inputs explicitly permitted by the sample instructions.
+Prompts use a six-part role contract: purpose, permitted changes, forbidden changes, required evidence, completion, and escalation. Handoffs contain compact report pointers and versioned host evidence bound to tree and suite identities. Full sanitized check output is available through mounted read-only artifact paths instead of accumulated inline report bodies.
 
-Agents report every criterion using the tagged `stage_report` JSON contract. Completed test design may retain intentionally unmet criteria; downstream completion requires every criterion met without unresolved issues. Compilation alone never replaces required behavioral gates. These instructions guide the model; trusted orchestrator checks, test protection, and recovery budgets remain authoritative.
+Agents emit role-discriminated `stage_report` JSON. Review completion is separate from approval; repair claims cannot independently close findings. Publication requires every criterion met, no unresolved blocking finding, an approved review/re-review for the current candidate identity, and final exact-tree verification.
 
 ## POC scope
 
@@ -59,7 +60,7 @@ Use one modular application with separate responsibilities:
 
 Narrow contracts and enforced dependency boundaries keep these modules replaceable without spreading provider-specific behavior through the workflow. No microservices or generic plugin framework are planned for the POC.
 
-The implemented backend is Sandcastle 0.12.0 with OpenCode and one configured vLLM OpenAI-compatible endpoint. TypeScript is the orchestrator language. OpenHands is not shipped. See the runtime compatibility record for the observed infrastructure blocker.
+The implemented backend is Sandcastle 0.12.0 with OpenCode and one configured vLLM OpenAI-compatible endpoint. Every Sandcastle agent invocation uses OpenCode's `medium` reasoning-effort variant. TypeScript is the orchestrator language. OpenHands is not shipped. See the runtime compatibility record for the observed infrastructure blocker.
 
 ## Documentation
 
@@ -67,6 +68,7 @@ The implemented backend is Sandcastle 0.12.0 with OpenCode and one configured vL
 - [Implementation plan](docs/software-factory-poc-implementation-plan.md): module boundaries, repository layout, contracts, delivery phases, and verification criteria.
 - [VSA API proof scenario plan](docs/vsa-api-proof-scenario-implementation-plan.md): additive six-slice inventory scenario, trusted acceptance design, evaluator coverage, delivery phases, and verification matrix.
 - [VSA allocation API proof scenario plan](docs/vsa-allocation-api-proof-scenario-implementation-plan.md): location-aware six-slice baseline, external routing boundary, optimistic allocation commit, evaluator coverage, and verification matrix.
+- [Orchestrator observability plan](docs/orchestrator-observability-implementation-plan.md): durable lifecycle events, early transcripts, deadline containment, supervision, and status inspection.
 - [Runtime compatibility](docs/runtime-compatibility.md): selected versions, inspected capability, attempted checks, and missing real-runtime prerequisites.
 - [Verification evidence](docs/verification-evidence.md): acceptance mapping, observed commands, proof status, and blockers.
 - [Setup runbook](docs/runbook-setup.md): dependencies and configuration.
@@ -84,14 +86,17 @@ cp config/factory.example.json config/factory.local.json
 # Edit config/factory.local.json: sourceRepository (for example /tmp/factory-feature),
 # exact vllm.modelId, and a vllm.endpoint reachable from the agent container.
 # For a host-only or Tailscale endpoint on Linux, set sandboxNetwork to "host".
-npm run factory -- run --config config/factory.local.json --ticket samples/tickets/feature.md --branch factory/feature-001
+RUN_ID="feature-$(date +%s)"
+npm run factory -- run --config config/factory.local.json --ticket samples/tickets/feature.md --branch factory/feature-001 --run-id "$RUN_ID"
+# From another terminal:
+npm run factory -- status --config config/factory.local.json --run-id "$RUN_ID"
 ```
 
-The command emits one JSON terminal outcome. Success exit code is `0`, product failure is `1`, configuration/infrastructure failure is `2`, and cancellation is `130`. A branch collision fails; the factory never force-updates, merges, or modifies the base branch.
+The run command emits sequenced `FACTORY_PROGRESS` JSON records on stderr and one terminal JSON outcome on stdout. The status command reads host-owned evidence without changing the run. Success exit code is `0`, product failure is `1`, configuration/infrastructure failure is `2`, and cancellation is `130`. A branch collision fails; the factory never force-updates, merges, or modifies the base branch.
 
 The POC intentionally supports only an unauthenticated vLLM endpoint on a trusted container network, so no inference credential enters the agent environment or transcript. Endpoint credentials/query strings are rejected. `config/sample-repository.json` is trusted host configuration and MUST remain outside the disposable agent clone.
 
-`standards` entries point to skill directories, not individual Markdown files. The directory name and the `name` field in `SKILL.md` must use the same valid OpenCode skill name. To supply a personal global skill, explicitly add its absolute directory (for example `/home/alice/.config/opencode/skills/coding-best-practices`) to the private config; the factory never exposes all host skills implicitly.
+`sharedSkills` lists language, domain, architecture, and engineering standards that apply to every role. `roleSkills` explicitly lists procedure skills for each operation (`test-design`, `implementation`, `refactor`, `review`, `acceptance-correction`, `repair`, `re-review`, and `pull-request`). Entries point to skill directories, not individual Markdown files. The directory name and the `name` field in `SKILL.md` must use the same valid OpenCode skill name. There is no legacy `standards` alias.
 
 ## Checks
 
@@ -120,9 +125,9 @@ The execution-backend test deterministically verifies the native OpenCode discov
 
 ## Evidence and failure handling
 
-Host-owned run evidence is written under `<runRoot>/evidence/<run-id>/`: `events.jsonl`, transcripts and attachments, `artifacts/PR.md`, `report.json`, and `report.md`. `PR.md` is produced only after exact-tree verification and is not committed into the solution branch. Verification state and immutable authoritative suites are under `<trustedRoot>/<run-id>/`; neither path is mounted writable into the agent container. Failed disposable workspaces remain under `<runRoot>/workspaces/` for diagnosis. Successful output branches are local branches in the configured source repository.
+Host-owned run evidence is written under `<runRoot>/evidence/<run-id>/`: sequenced `events.jsonl`, pre-created attempt transcripts, `supervisor.json`, attachments, `artifacts/PR.md`, `report.json`, and `report.md`. Every live progress event is persisted before publication. `PR.md` is produced only after exact-tree verification and is not committed into the solution branch. Verification state and immutable authoritative suites are under `<trustedRoot>/<run-id>/`; neither path is mounted writable into the agent container. Failed disposable workspaces remain under `<runRoot>/workspaces/` for diagnosis. Successful output branches are local branches in the configured source repository.
 
-Each coding stage and the pull-request drafting step have two attempts. The one optional acceptance correction is a fresh test-design session and does not reset the reporting stage's budget. Timeouts, malformed reports, failed gates, and runtime failures consume an attempt. Cancellation is terminal. Recovery starts only after backend stop confirmation. Pull-request attempts inspect fresh disposable analysis clones; their changes are discarded and cannot alter the verified publication workspace.
+Each coding stage and the pull-request drafting step have two attempts. The one optional acceptance correction is a fresh test-design session and does not reset the reporting stage's budget. Timeouts, malformed reports, failed gates, and runtime failures consume an attempt. Cancellation is terminal. Recovery starts only after backend stop confirmation. If a runner ignores cancellation beyond `attemptShutdownGraceSeconds`, the run becomes terminal `shutdown-stalled`; no recovery or later stage starts, and the outer supervisor terminates the worker. Pull-request attempts inspect fresh disposable analysis clones; their changes are discarded and cannot alter the verified publication workspace.
 
 ## Current verification status
 

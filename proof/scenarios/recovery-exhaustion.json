@@ -6,7 +6,7 @@
   "evaluator": "proof/evaluators/recovery-exhaustion.sh",
   "expectedSolution": null,
   "faults": [
-    {"stage": "implementation", "attempt": 1, "point": "after-agent-files-changed", "outcome": "execution-failure"},
-    {"stage": "implementation", "attempt": 2, "point": "after-agent-files-changed", "outcome": "execution-failure"}
+    {"operation": "implementation", "attempt": 1, "point": "after-agent-files-changed", "outcome": "execution-failure"},
+    {"operation": "implementation", "attempt": 2, "point": "after-agent-files-changed", "outcome": "execution-failure"}
   ]
 }

@@ -6,14 +6,16 @@ Observed on 2026-10-09. This document distinguishes inspected capability from ex
 
 The implementation stack is TypeScript 6.0.3 on Node.js 24.21.0, with `@ai-hero/sandcastle` 0.12.0, Sandcastle's OpenCode agent provider, and a Docker sandbox containing OpenCode plus .NET SDK 10.0.401.
 
-Sandcastle was retained instead of moving to OpenHands because its released API provides the required programmatic run result, named branch strategy, structured output, stream evidence, `AbortSignal`, idle timeout, and Docker read-only mounts. OpenCode accepts an ordinary provider configuration for one OpenAI-compatible vLLM endpoint. The factory creates a new `run()` invocation for every attempt and never resumes Sandcastle/OpenCode sessions.
+Sandcastle was retained instead of moving to OpenHands because its released API provides the required programmatic run result, named branch strategy, structured output, stream evidence, `AbortSignal`, idle timeout, and Docker mounts. OpenCode is configured with its built-in `openai` provider and `openai/gpt-6-luna`; each attempt receives a fresh OpenCode session. The factory bind-mounts one dedicated OpenCode ChatGPT OAuth file so token refreshes persist, and never resumes Sandcastle/OpenCode sessions.
 
-This is an implementation decision, not a successful real-runtime compatibility claim. The environment lacked both prerequisites needed for the real spike:
+This is an implementation decision, not a successful real-runtime compatibility claim. The environment lacks both prerequisites needed for the real spike:
 
-- No configured vLLM endpoint, model identifier, API-key reference, or matching environment-variable name was present. No listener was available on `127.0.0.1:8000`, `localhost:8000`, or `host.docker.internal:8000`.
-- Neither Docker nor Podman was installed. Unprivileged user namespaces were disabled (`unshare --user --map-root-user` returned `Operation not permitted`).
+- No dedicated OpenCode OpenAI subscription auth file is available. The model selection is configured but has not been authenticated or exercised here.
+- Neither Docker nor Podman is installed. Unprivileged user namespaces are disabled (`unshare --user --map-root-user` returned `Operation not permitted`).
 
-OpenHands was not evaluated: missing model and sandbox access would block it identically, while no inspected Sandcastle requirement required disproportionate custom runtime work.
+OpenHands was not evaluated: missing subscription authentication and sandbox access would block it identically, while no inspected Sandcastle requirement required disproportionate custom runtime work.
+
+The writable OAuth mount is a deliberate trust tradeoff: OpenCode needs it to persist refreshed credentials, but the coding agent runs under the same container identity and can read the token. The dedicated-file check prevents unrelated provider credentials from entering the sandbox; it cannot prevent token exfiltration by a compromised agent with outbound model access. Restrict this runtime to controlled repositories and tickets.
 
 ## Versions observed
 
@@ -29,9 +31,9 @@ OpenHands was not evaluated: missing model and sandbox access would block it ide
 | OpenCode container package | `opencode-ai` 1.18.35 |
 | Docker | unavailable |
 | Podman | unavailable |
-| vLLM endpoint/model | not configured or discoverable |
+| OpenAI subscription/model | auth unavailable; `openai/gpt-6-luna` configured but unexercised |
 
-The actual deployment's model identifier and quantization remain unknown. They MUST be recorded from `/v1/models` and deployment metadata before a proof run; names or quantization are never inferred.
+The exact model ID comes from OpenCode's current model catalog. Compatibility still requires a real authenticated run; the configured name alone is not tool-calling evidence.
 
 ## Checks performed
 
@@ -45,20 +47,21 @@ podman               -> command not found
 unshare --user --map-root-user true -> Operation not permitted
 ```
 
-Environment-variable names were inspected without printing values; none matched vLLM, OpenAI, endpoint, model, Sandcastle, OpenHands, LiteLLM, or Anthropic configuration. Local `/v1/models` probes returned no HTTP response.
+No dedicated OpenCode OAuth file was available. Historical local vLLM endpoint probes are no longer prerequisites for the selected runtime.
 
 ## Required real-spike procedure
 
 Do not substitute deterministic tests for these observations. Once prerequisites exist:
 
-1. Build `containers/agent/Dockerfile`, expose an unauthenticated trusted-network vLLM endpoint, and set its URL and the exact served model ID in a private configuration copied from `config/factory.example.json`. Authenticated endpoints require a future credential-isolating proxy and are not supported by this POC.
-2. Run the dedicated compatibility scenario from a disposable sample baseline.
-3. Confirm transcript evidence shows file read, edit, and `dotnet test` inside the container.
-4. Run a second attempt with a different attempt/session identity and an explicit first-attempt handoff; confirm it sees workspace changes but no resumed conversation.
-5. Confirm each attempt transcript contains native OpenCode `skill` tool calls for every configured skill, and that repository `AGENTS.md` is read. Read-only mount paths and prompt text alone are insufficient runtime proof.
-6. Trigger cancellation and timeout; after stop confirmation, hash the workspace, wait beyond the attempted command's write interval, and confirm the hash remains unchanged.
-7. Attempt a write to the read-only authoritative-suite mount and require a filesystem denial.
-8. Inspect the source base ref and output branch before and after; require no base-ref change or automatic merge.
-9. Retain the unedited first-run report even if it fails. Any deliberate rerun receives a new run ID.
+1. Build `containers/agent/Dockerfile`, create a dedicated OpenCode auth data directory, and use `opencode auth login` to select OpenAI and ChatGPT Plus/Pro. The resulting `auth.json` must contain only the `openai` OAuth entry and have mode `0600`.
+2. Confirm `config/factory.local.json` selects `gpt-6-luna` and references that dedicated auth file.
+3. Run the dedicated compatibility scenario from a disposable sample baseline.
+4. Confirm transcript evidence shows file read, edit, and `dotnet test` inside the container.
+5. Run a second attempt with a different attempt/session identity and an explicit first-attempt handoff; confirm it sees workspace changes but no resumed conversation.
+6. Confirm each attempt transcript contains native OpenCode `skill` tool calls for every configured skill, and that repository `AGENTS.md` is read. Read-only mount paths and prompt text alone are insufficient runtime proof.
+7. Trigger cancellation and timeout; after stop confirmation, hash the workspace, wait beyond the attempted command's write interval, and confirm the hash remains unchanged.
+8. Attempt a write to the read-only authoritative-suite mount and require a filesystem denial.
+9. Inspect the source base ref and output branch before and after; require no base-ref change or automatic merge.
+10. Retain the unedited first-run report even if it fails. Any deliberate rerun receives a new run ID.
 
-Until all nine observations exist in `.runs/<run-id>/`, Phase 0 and all real-model proof cases are **blocked**, not passed.
+Until all ten observations exist in `.runs/<run-id>/`, Phase 0 and all real-model proof cases are **blocked**, not passed.

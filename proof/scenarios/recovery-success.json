@@ -5,5 +5,5 @@
   "standards": ["standards/skills/inventory-api"],
   "evaluator": "proof/evaluators/feature.sh",
   "expectedSolution": "proof/expected/feature",
-  "faults": [{"stage": "implementation", "attempt": 1, "point": "after-agent-files-changed", "outcome": "execution-failure"}]
+  "faults": [{"operation": "implementation", "attempt": 1, "point": "after-agent-files-changed", "outcome": "execution-failure"}]
 }

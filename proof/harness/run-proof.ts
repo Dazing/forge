@@ -14,7 +14,7 @@ import { loadConfiguration } from "../../apps/factory-cli/src/configuration.js";
 import { FaultInjectingBackend } from "./fault-injecting-backend.js";
 import { materializeFixture } from "./materialize-fixture.js";
 import { proofScenarioSchema } from "./scenario.js";
-import { superviseProcess } from "./process-supervisor.js";
+import { superviseProcess } from "@factory/orchestration-supervisor";
 
 const execFileAsync = promisify(execFile);
 
@@ -44,13 +44,16 @@ async function runProof(
       outputBranch: branch,
       profilePath: configuration.repositoryProfile,
     },
-    model: { provider: "vllm", modelId: configuration.modelId, endpoint: configuration.endpoint },
+    model: { provider: "openai-subscription", modelId: configuration.modelId },
     attemptTimeoutMs: configuration.attemptTimeoutMs,
     orchestrationTimeoutMs: configuration.orchestrationTimeoutMs,
-    standards: [...new Set([
-      ...configuration.standards,
-      ...scenario.standards.map((path) => resolve(repositoryRoot, path)),
-    ])],
+    skills: {
+      shared: [...new Set([
+        ...configuration.skills.shared,
+        ...scenario.standards.map((path) => resolve(repositoryRoot, path)),
+      ])],
+      byRole: configuration.skills.byRole,
+    },
   };
   const artifacts = new FileRunArtifacts({
     rootDirectory: evidenceRoot,
@@ -59,9 +62,10 @@ async function runProof(
   });
   const realBackend = createExecutionBackend({
     imageName: configuration.sandboxImage,
-    endpoint: configuration.endpoint,
+    authFile: configuration.authFile,
     modelId: configuration.modelId,
     artifactsPath: artifacts.runDirectory,
+    attemptShutdownGraceMs: configuration.attemptShutdownGraceMs,
     ...(configuration.sandboxNetwork === undefined ? {} : { network: configuration.sandboxNetwork }),
   });
   const backend = new FaultInjectingBackend(realBackend, scenario.faults);
@@ -72,11 +76,7 @@ async function runProof(
     artifacts,
     progress(event) {
       process.stderr.write(`FACTORY_PROGRESS=${JSON.stringify(event)}\n`);
-      process.send?.({
-        type: "progress",
-        event,
-        timeoutMs: progressTimeoutMs(event, request),
-      });
+      process.send?.({ type: "progress", event });
     },
   }, signal);
   backend.assertAllFaultsRealized();
@@ -124,13 +124,3 @@ if (process.env.FACTORY_PROOF_WORKER === "1") {
   process.exitCode = result.exitCode;
 }
 
-function progressTimeoutMs(event: { readonly type: string; readonly details: Readonly<Record<string, unknown>> }, request: RunRequest): number {
-  const graceMs = 5_000;
-  if (event.type === "workspace-snapshot-started" || event.type === "stage-checkpoint-started") {
-    return (request.orchestrationTimeoutMs ?? 60_000) + graceMs;
-  }
-  if (event.type === "attempt-execution-started" && typeof event.details.deadline === "number") {
-    return Math.max(graceMs, event.details.deadline - Date.now() + graceMs);
-  }
-  return request.attemptTimeoutMs + graceMs;
-}

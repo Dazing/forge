@@ -1,6 +1,6 @@
 # Orchestrator observability and stall containment — implementation plan
 
-Status: proposed; based on the current factory, execution-backend, run-artifacts, CLI, and proof-supervisor implementations.
+Status: implemented and verified. `npm run check` passes; the supervised non-cooperative-runner smoke recorded early transcript creation, status observations, absolute deadline, abort request, `attempt-shutdown-stalled`, `SIGINT`, and no later stage.
 
 ## 1. Outcome
 
@@ -153,7 +153,7 @@ Initial event catalog:
 
 | Event | Class | Required details |
 |---|---|---|
-| `run-started` | transition | ticket digest, base commit, output branch, model identity |
+| `run-preparing` / `run-started` | transition | repository/base/output identity; resolved base commit on start |
 | `preflight-started` / `preflight-finished` | transition | operation ID; result and check count on finish |
 | `workspace-snapshot-started` / `workspace-snapshot-finished` | transition | label, deadline; snapshot/tree identity on finish |
 | `attempt-preparing` | transition | attempt/session identity and deadline |
@@ -169,6 +169,7 @@ Initial event catalog:
 | `attempt-report-accepted` / `attempt-report-rejected` | transition | report status or validation problems |
 | `gate-started` / `gate-finished` | transition | gate name, deadline when applicable, result/check count |
 | `stage-finished` | transition | accepted or exhausted, suite version where applicable |
+| `analysis-workspace-started` / `analysis-workspace-ready` / `analysis-workspace-finished` | transition | source snapshot, materialized tree, and confirmed disposal |
 | `run-finalizing` / `run-finished` | transition | terminal status and reason |
 
 Avoid duplicate aliases such as both `stage-checkpoint-completed` and `stage-report-accepted`. One name must represent one state transition.
