@@ -9,3 +9,4 @@ config/factory.local.json
 !.env.example
 samples/**/bin/
 samples/**/obj/
+obj/

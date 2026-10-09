@@ -1,8 +1,8 @@
 # VSA API proof scenario — implementation plan
 
-Status: proposed, repository-grounded design. This document plans the scenario; no fixture, ticket, evaluator, or proof-run configuration described below has been implemented.
+Status: implemented deterministically on 2026-10-09. The fixture, ticket, oracle, scenario binding, trusted preflight, evaluator, and documentation described below are present; the real-model proof remains blocked by the recorded Docker/vLLM prerequisites.
 
-Authority: [Software Factory POC brief](software-factory-poc-brief.md), [factory implementation plan](software-factory-poc-implementation-plan.md), and the current executable proof harness. Where this document proposes new behavior, it labels that behavior **Proposal**.
+Authority: [Software Factory POC brief](software-factory-poc-brief.md), [factory implementation plan](software-factory-poc-implementation-plan.md), and the current executable proof harness.
 
 ## 1. Outcome and boundaries
 
@@ -58,7 +58,7 @@ Concrete ownership and behavior:
 
 ### Chosen: add a sixth, independent `vsa-feature` scenario
 
-**Proposal.** Add `samples/vsa-feature`, `samples/tickets/vsa-feature.md`, `proof/scenarios/vsa-feature.json`, `proof/expected/vsa-feature`, and `proof/evaluators/vsa-feature.sh`. Extend the existing API evaluator with a `vsa-feature` mode rather than adding another process-launch implementation. Reuse the scenario schema, materializer, repository profile, protected runner, and factory orchestration unchanged.
+Implemented: `samples/vsa-feature`, `samples/tickets/vsa-feature.md`, `proof/scenarios/vsa-feature.json`, `proof/expected/vsa-feature`, and `proof/evaluators/vsa-feature.sh`. The existing API evaluator has a distinct `vsa-feature` mode; the scenario schema, materializer, repository profile, protected runner, and factory orchestration remain unchanged.
 
 Why this is the smallest useful integration:
 
@@ -130,7 +130,7 @@ These are behavior/state assertions, not route-wiring or source-layout checks. F
 
 ### 5.1 Public contract
 
-**Proposal.** Ticket title: `Adjust a pending inventory reservation`.
+Ticket title: `Adjust a pending inventory reservation`.
 
 Add `PATCH /reservations/{id:guid}` with body:
 
@@ -172,9 +172,9 @@ The route file is `Features/Reservations/AdjustReservationQuantity.cs`. It owns 
 - **Failure atomicity:** insufficient stock, invalid quantity, unknown ID, and terminal state leave both dictionaries unchanged.
 - **Concurrency:** the lookup, eligibility check, delta check, stock mutation, and reservation mutation remain in one `InventoryState` critical section. Concurrent increases therefore cannot make available stock negative.
 
-### 5.3 Proposed ticket acceptance criteria
+### 5.3 Ticket acceptance criteria
 
-The future `samples/tickets/vsa-feature.md` should use these stable IDs and observable wording:
+`samples/tickets/vsa-feature.md` uses these stable IDs and observable wording:
 
 - **INV-VSA-001:** Increasing a pending reservation reserves only the additional quantity and returns the updated pending reservation.
 - **INV-VSA-002:** Decreasing a pending reservation releases only the difference; later confirmation keeps the adjusted quantity consumed, while later cancellation restores the adjusted quantity exactly once.
@@ -185,7 +185,7 @@ The future `samples/tickets/vsa-feature.md` should use these stable IDs and obse
 
 The ticket body should explicitly require one new reservation slice, existing folder/dependency conventions, and an atomic operation. Criterion wording remains behavioral; VSA conformance is enforced by repository instructions and whole-diff review rather than a brittle source-text acceptance test.
 
-## 6. Proposed repository layout
+## 6. Repository layout
 
 ```text
 samples/

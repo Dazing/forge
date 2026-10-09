@@ -11,7 +11,7 @@ npm run check
 npm test -- --run tests/integration/preflight.test.ts
 
 PROOF_ID="$(date +%s)"
-for scenario in feature bug refactor recovery-success recovery-exhaustion; do
+for scenario in feature bug refactor recovery-success recovery-exhaustion vsa-feature vsa-allocation-feature; do
   RUN_ID="$PROOF_ID-$scenario"
   npx tsx proof/harness/run-proof.ts config/factory.local.json \
     "proof/scenarios/$scenario.json" \
@@ -45,8 +45,9 @@ Do not reuse or overwrite a stalled run ID. Preserve its workspace, report, even
 
 Expected results:
 
-- `feature`, `bug`, `refactor`, and `recovery-success`: `succeeded` with a new output branch and host-owned `artifacts/PR.md`.
+- `feature`, `bug`, `refactor`, `recovery-success`, `vsa-feature`, and `vsa-allocation-feature`: `succeeded` with a new output branch and host-owned `artifacts/PR.md`.
 - `recovery-exhaustion`: bounded failure accepted by its independent evaluator; no success branch or `PR.md`.
 - The base branch remains unchanged in every source repository, and `PR.md` is not committed into an output branch.
+
 
 Failure evidence is under `.runs/evidence/<run-id>/`; preserved workspaces are under `.runs/workspaces/`.

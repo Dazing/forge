@@ -1,0 +1,9 @@
+{
+  "id": "inventory-vsa-feature",
+  "fixture": "samples/vsa-feature",
+  "ticket": "samples/tickets/vsa-feature.md",
+  "standards": ["standards/inventory-api-skill.md"],
+  "evaluator": "proof/evaluators/vsa-feature.sh",
+  "expectedSolution": "proof/expected/vsa-feature",
+  "faults": []
+}

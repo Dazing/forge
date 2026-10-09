@@ -7,11 +7,11 @@ Evidence recorded 2026-10-09. `PASS` means the cited command was observed in thi
 | Phase | Status | Concrete evidence |
 |---|---|---|
 | 0 — runtime compatibility | **BLOCKED** | `docs/runtime-compatibility.md`. Sandcastle/OpenCode API and versions inspected; no vLLM configuration and no Docker/Podman. No real tool-calling claim. |
-| 1 — boundaries and fixtures | **PASS** | `npm run typecheck`; `npm run check:dependencies`; ticket parser tests; five .NET 10 fixtures; real sample `/health` returned `{"status":"ok"}` and `/inventory` returned WIDGET quantity 10. |
+| 1 — boundaries and fixtures | **PASS** | `npm run check`; ticket parser tests; the original five .NET 10 fixtures plus additive `vsa-feature` and `vsa-allocation-feature`; all seven fixture builds/tests pass. The allocation baseline exposes six working business slices and intentionally omits reallocation. |
 | 2 — workspace, evidence, verification | **PASS for local mechanisms; container enforcement BLOCKED** | Git adapter real-repository tests, artifact tests, verifier tests, and `tests/integration/preflight.test.ts`. Docker read-only mount denial and verifier/application container separation remain blocked. |
 | 3 — real happy path | **BLOCKED for the current pipeline** | Four coding stages plus isolated pull-request drafting are implemented and pass deterministic tests. No actual vLLM run has exercised the new pull-request step, so no model-produced `PR.md` or current-pipeline success is claimed. |
 | 4 — recovery/correction | **PASS deterministically; real agent recovery BLOCKED** | Focused tests cover coding-stage and pull-request recovery/exhaustion, invalid reports, correction, timeout/stop, suite tampering, analysis-copy isolation, publication hardening, and branch preservation. Fault decorator is `proof/harness/fault-injecting-backend.ts`. |
-| 5 — proof suite | **BLOCKED for real model** | All independent fixtures and evaluators exist. Expected solutions pass and baselines fail their independent evaluators. No results are represented as model-produced. |
+| 5 — proof suite | **BLOCKED for real model; deterministic VSA paths PASS** | All independent fixtures and evaluators exist. Expected solutions pass and baselines fail their independent evaluators. The allocation baseline fails at the missing PUT only after all six baseline-slice checks; its oracle passes calculation, mapping, upstream failure, timeout, stale-snapshot, and concurrent-conservation checks. No results are represented as model-produced. |
 
 ## Brief definition of done
 
@@ -41,20 +41,14 @@ Evidence recorded 2026-10-09. `PASS` means the cited command was observed in thi
 | Bounded recovery/correction | **PASS** | Two attempts per coding stage and pull-request draft, one correction, cancellation terminal, malformed/timeout consume budget, workspace snapshots have orchestration deadlines, and proof workers have an external no-progress supervisor. |
 | Final checks match publishable content | **PASS deterministically** | Verifier hashes the exact tree before/after final checks; pull-request agents receive disposable analysis clones whose mutations cannot reach publication; publication derives verification, copying, and materialized-commit comparison from one Git publishable-file set. |
 | New branch only/base unchanged | **PASS** | real Git adapter tests |
-| Five proof cases exercised | **BLOCKED for complete suite** | Real feature runs reached all four stages; run `1791552358-feature` created its output branch and that branch passes the independent evaluator, but the run report remained failed because post-publication cleanup could not remove the protected suite. Cleanup is now covered; bug, refactor, and recovery model proofs remain outstanding. |
+| Seven proof cases exercised | **BLOCKED for complete real-model suite; deterministic VSA cases PASS** | The original five-case matrix remains historically unchanged. A real feature run reached all four stages and created an output branch that passes its independent evaluator, but its report failed during post-publication cleanup. Both additive VSA fixtures, trusted RED preflights, oracles, and evaluators are exercised; the remaining real-model runs are blocked by Docker/vLLM prerequisites. |
 | Operations/replacement boundaries documented | **PASS** | `README.md`, `docs/runtime-compatibility.md` |
 
 ## Observed commands and outcomes
 
 ```text
-npm run typecheck
-  PASS, no diagnostics
-
-npm run check:dependencies
-  PASS, no forbidden/deep imports
-
-npm test
-  PASS: 13 files, 54 tests, including pull-request schema separation, bounded drafting recovery, analysis-copy isolation, deterministic PR.md rendering, native OpenCode skill discovery, exact-tree verification, and real .NET preflight integration
+npm run check
+  PASS: typecheck and dependency checks; 14 test files, 59 tests, including pull-request schema separation, bounded drafting recovery, analysis-copy isolation, deterministic PR.md rendering, native OpenCode skill discovery, exact-tree verification, all three real .NET preflight cases, and protected routing-stub/list-path checks
 
 npm test -- --run packages/factory/src/execute-ticket/execute-ticket.test.ts packages/factory/src/pull-request.test.ts packages/execution-backend/src/execution-backend.test.ts packages/git-workspace/src/git-workspace.test.ts packages/run-artifacts/src/file-run-artifacts.test.ts packages/verification/src/trusted-verification.test.ts proof/harness/fault-injecting-backend.test.ts
   PASS: 7 files, 45 tests
@@ -62,8 +56,8 @@ npm test -- --run packages/factory/src/execute-ticket/execute-ticket.test.ts pac
 npm test -- --run packages/execution-backend/src/execution-backend.test.ts
   PASS: pull-request and coding-stage contracts remain distinct; read-only explanation prompts, protected mounts, fresh runtime sessions, timeout, cancellation, and malformed-output handling are green
 
-npm test -- tests/integration/preflight.test.ts packages/verification/src/directory-integrity.test.ts
-  PASS: copied executable retains launch permission; trusted acceptance runs against the read-only baseline and classifies missing behavior as assertion RED
+npm test -- --run tests/integration/preflight.test.ts
+  PASS: 1 file, 3 tests; feature, VSA quantity, and VSA allocation fixtures materialize, pass baseline checks, and classify their missing HTTP contracts as assertion RED
 
 npm test -- packages/factory/src/execute-ticket/execute-ticket.test.ts proof/harness/process-supervisor.test.ts tests/integration/configuration.test.ts
   PASS: 3 files, 11 tests; durable snapshot boundaries, timeout failure report, external worker termination/diagnostic, and timeout configuration
@@ -84,10 +78,31 @@ npx tsx proof/harness/run-proof.ts config/factory.local.json proof/scenarios/fea
   BLOCKED before agent execution: local Docker CLI/image software-factory-agent:0.1.0 unavailable
 
 proof/evaluators/{feature,bug,refactor}.sh proof/expected/<case>
-  PASS: independent HTTP outcomes; refactor additionally passes reflection-based structural criterion
+  PASS: existing independent HTTP outcomes; refactor additionally passes reflection-based structural criterion
 
-proof/evaluators/{feature,bug,refactor}.sh samples/<case>
-  expected nonzero: feature 404, bug repeated cancellation 204, refactor lacks one shared Transition operation
+proof/evaluators/vsa-feature.sh samples/vsa-feature
+  expected nonzero after readiness, receipt, create, confirm, cancel, and inventory checks: PATCH returned 404
+
+proof/evaluators/vsa-feature.sh proof/expected/vsa-feature
+  PASS: adjustment delta, same-value, rollback, invalid, terminal, unknown, preservation, and concurrent conservation checks
+
+proof/evaluators/vsa-allocation-feature.sh samples/vsa-allocation-feature
+  expected nonzero after inventory, receipt, create, lookup, confirm, and cancel checks: PUT returned 404
+
+proof/evaluators/vsa-allocation-feature.sh proof/expected/vsa-allocation-feature
+  PASS: route mapping, allocation ordering, rollback, upstream 503/malformed/timeout translation, stale-snapshot rejection, and concurrent conservation checks
+
+npm test -- --run proof/harness/trusted-acceptance.test.ts
+  PASS: 1 file, 3 tests; dotted list indices, routing-stub lifecycle, and chunked .NET request-body handling
+
+for fixture in feature bug refactor recovery-success recovery-exhaustion vsa-feature vsa-allocation-feature; do dotnet build ... && dotnet run ...; done
+  PASS: all seven fixture APIs build with zero warnings and all seven local behavior executables pass
+
+npx tsx proof/harness/materialize-fixture.ts proof/scenarios/vsa-allocation-feature.json /tmp/factory-vsa-allocation-feature
+  PASS: clean main branch, no reallocation subfolder, materialized build and eight baseline behavior checks pass
+
+npx tsx proof/harness/materialize-fixture.ts proof/scenarios/vsa-feature.json /tmp/factory-vsa-feature
+  PASS: clean main branch, no adjustment slice, materialized build and local behavior checks pass
 
 npx tsx proof/harness/materialize-fixture.ts proof/scenarios/recovery-exhaustion.json /tmp/factory-recovery-exhaustion
   PASS: nullable expected solution and strict bounded-failure fault scenario validated/materialized
@@ -97,6 +112,8 @@ npm run factory -- run --config config/factory.example.json --ticket samples/tic
 ```
 
 A trusted-runner smoke initially failed because the temporary assertion expected string enum/`quantity`; the expected sample contract emits numeric status/`available`. The corrected declarative case passed. Both observations were retained here rather than silently rerun.
+
+The first allocation-oracle evaluator run reached the routing stub but returned `502`: .NET `PostAsJsonAsync` used chunked transfer encoding while the initial host stub read only `Content-Length`. The stub was corrected to decode chunked request bodies, a regression test was added, and the evaluator then passed. The failing and passing observations are both retained.
 
 ## Proof reports and branches
 
