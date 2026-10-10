@@ -1,0 +1,23 @@
+{
+  "providers": {
+    "local-vllm": {
+      "baseUrl": "https://openai.taila49adb.ts.net/v1",
+      "api": "openai-completions",
+      "apiKey": "local-vllm",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false
+      },
+      "models": [
+        {
+          "id": "vllm-qwen38-27b",
+          "name": "vllm-qwen38-27b",
+          "samplingParams": {
+            "max_tokens": 16384,
+            "reasoning_budget_tokens": 12288
+          }
+        }
+      ]
+    }
+  }
+}
