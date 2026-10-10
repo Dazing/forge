@@ -2,8 +2,7 @@
   "id": "inventory-feature",
   "fixture": "samples/feature",
   "ticket": "samples/tickets/feature.md",
-  "standards": ["standards/skills/inventory-api"],
+  "skills": ["standards/skills/inventory-api"],
   "evaluator": "proof/evaluators/feature.sh",
-  "expectedSolution": "proof/expected/feature",
-  "faults": []
+  "expectedSolution": "proof/expected/feature"
 }

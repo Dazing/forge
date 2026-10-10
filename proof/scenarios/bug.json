@@ -2,8 +2,7 @@
   "id": "inventory-double-restock-bug",
   "fixture": "samples/bug",
   "ticket": "samples/tickets/bug.md",
-  "standards": ["standards/skills/inventory-api"],
+  "skills": ["standards/skills/inventory-api"],
   "evaluator": "proof/evaluators/bug.sh",
-  "expectedSolution": "proof/expected/bug",
-  "faults": []
+  "expectedSolution": "proof/expected/bug"
 }

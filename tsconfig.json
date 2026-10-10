@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["apps/**/*.ts", "packages/**/*.ts", "proof/**/*.ts", "tests/**/*.ts", "tools/**/*.ts"]
+  "include": [".sandcastle/**/*.ts", "proof/**/*.ts"]
 }
