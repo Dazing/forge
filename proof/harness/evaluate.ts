@@ -1,23 +1,17 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { requireDirectory } from "../../factory/shared/paths.js";
 import { proofScenarioSchema } from "./scenario.js";
-
-async function requireDirectory(path: string): Promise<void> {
-  const details = await stat(path);
-  if (!details.isDirectory()) {
-    throw new Error(`Candidate repository is not a directory: ${path}`);
-  }
-}
 
 export async function evaluate(repositoryRoot: string, scenarioPath: string, candidateRepository: string): Promise<number> {
   const root = resolve(repositoryRoot);
   const scenario = proofScenarioSchema.parse(JSON.parse(await readFile(resolve(root, scenarioPath), "utf8")));
   const evaluator = resolve(root, scenario.evaluator);
   const candidate = resolve(candidateRepository);
-  await requireDirectory(candidate);
+  await requireDirectory(candidate, "Candidate repository");
 
   return await new Promise<number>((resolveExitCode, reject) => {
     const child = spawn(evaluator, [candidate], { stdio: "inherit" });

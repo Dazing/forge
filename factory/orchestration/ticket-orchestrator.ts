@@ -1,0 +1,7 @@
+
+function solveTickets() {
+}
+
+function solveTicket() {
+
+}

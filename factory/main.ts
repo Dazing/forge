@@ -1,216 +1,19 @@
-import { execFile as execFileCallback } from "node:child_process";
-import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
-import { promisify } from "node:util";
-import * as sandcastle from "@ai-hero/sandcastle";
-import { ohMyPi } from "./harness/oh-my-pi.js";
-import { dockerfilePath, IMAGE_NAME, preflightSandbox, sandboxProvider, type AgentHarness } from "./sandbox/sandbox.js";
-import { formatTickets, loadTickets, planSchema, validatePlan } from "./tickets/tickets.js";
+import { createSandbox } from "@ai-hero/sandcastle";
+import { parseArgs } from "./cli/cli.js";
+import { runImplementationAgent, runMergeAgent, runPlanAgent, runReviewAgent } from "./harness/harness-agents.js";
+import { preflightSandbox, requireCleanSandbox, sandboxProvider } from "./sandbox/sandbox.js";
+import { runGit } from "./shared/git.js";
+import { requireDirectory } from "./shared/paths.js";
+import { loadTickets, validatePlan } from "./tickets/tickets.js";
+
+// Composition root for the Sandcastle runner: the iteration loop and ticket bookkeeping.
+// CLI parsing lives in cli/cli.ts, git and path checks in shared/, sandbox preflight in sandbox/sandbox.ts,
+// and agent stage runs in harness/harness-agents.ts.
 // Local-ticket adaptation of upstream commit 1e15922d0a0f51d5819f3615886444d10a6aa183
 // (.sandcastle/run.ts blob 58def9aeddc8680067711fe3a5399509926d1bb0).
+
 const MAX_ITERATIONS = 10;
-const MODEL = "vllm-qwen38-27b";
-const COMPLETE = "<promise>COMPLETE</promise>";
-const promptsPath = resolve(import.meta.dirname, "prompts");
-const runLogPath = resolve(
-  import.meta.dirname,
-  "../.logs",
-  `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}`,
-);
-const execFile = promisify(execFileCallback);
-
-const TOOL_SUMMARY_KEYS = ["path", "command", "query", "url", "description"] as const;
-const MAX_TOOL_SUMMARY_LENGTH = 200;
-
-function summarizeToolArgs(args: unknown): string {
-  if (typeof args !== "object" || args === null || Array.isArray(args)) return "";
-  const values = args as Record<string, unknown>;
-  for (const key of TOOL_SUMMARY_KEYS) {
-    const value = values[key];
-    if (typeof value !== "string") continue;
-    const summary = value.replaceAll(/\s+/g, " ").trim();
-    if (summary.length <= MAX_TOOL_SUMMARY_LENGTH) return summary;
-    return `${summary.slice(0, MAX_TOOL_SUMMARY_LENGTH - 3)}...`;
-  }
-  return Object.keys(values).join(", ");
-}
-
-const MCP_TOOL_RULES = `# Required MCP tool workflow
-
-The sandbox provides native MCP tools from roslyn and microsoft-learn.
-The pinned RoslynMcp 1.2.3 exposes load_solution, load_project, load_type,
-load_member, search_type, search_member, find_references, diagnose_file, and
-run_tests. Read their declared schemas before calling them. For C# analysis,
-call load_solution first, then load_project and the semantic navigation,
-reference, and diagnostic tools rather than shell/text substitutes. If the repo
-has only .csproj files, create a disposable .slnx under /tmp referencing the real
-projects by absolute path, load it, and remove it before completion. Never commit
-this analysis-only solution. Use run_tests
-for supported tests. This server has no build tool: use dotnet build for compilation.
-An executable custom test harness may require dotnet run; state why run_tests
-does not apply. Do not assume APIs from another Roslyn MCP server or version.
-For C#/.NET implementation or review, make a targeted Microsoft Learn
-microsoft_docs_search call to ground the framework behavior relevant to the
-ticket; fetch the document when the search excerpt is insufficient.
-Do not silently fall back when a required MCP call fails: report the exact error.
-Include the consequential MCP calls and their results in verification evidence.
-`;
-
-function ticketAgent(harness: AgentHarness) {
-  const agent = harness === "oh-my-pi"
-    ? ohMyPi(MODEL, { thinking: "medium" })
-    : sandcastle.pi(MODEL, { thinking: "medium" });
-  return {
-    ...agent,
-    buildPrintCommand(options: sandcastle.AgentCommandOptions) {
-      const invocation = agent.buildPrintCommand({
-        ...options,
-        prompt: `${MCP_TOOL_RULES}\n${options.prompt}`,
-      });
-      return {
-        ...invocation,
-        command: harness === "pi"
-          ? `node /home/agent/.pi/agent/check-mcp.mjs && ${invocation.command}`
-          : invocation.command,
-      };
-    },
-    parseStreamLine(line: string) {
-      const parsed = agent.parseStreamLine(line);
-      if (parsed.length > 0 || !line.startsWith("{")) return parsed;
-
-      try {
-        const event: unknown = JSON.parse(line);
-        if (
-          typeof event === "object" &&
-          event !== null &&
-          "type" in event &&
-          event.type === "tool_execution_start" &&
-          "toolName" in event &&
-          typeof event.toolName === "string"
-        ) {
-          return [
-            {
-              type: "tool_call" as const,
-              name: event.toolName,
-              args: summarizeToolArgs("args" in event ? event.args : undefined),
-            },
-          ];
-        }
-      } catch {
-        // Non-JSON output and unrelated Pi events are intentionally omitted.
-      }
-
-      return parsed;
-    },
-  };
-}
-
-function fileLogging(name: string) {
-  return {
-    type: "file",
-    path: resolve(runLogPath, `${name}.log`),
-  } as const;
-}
-
-function printHelp(): void {
-  console.log(`Usage: npm run sandcastle -- --repo <target-repository> --ticket <markdown-path> [--ticket <markdown-path> ...]
-
-Runs up to ten planning iterations against a separately materialized Git repository.
-
-Options:
-  --repo <path>     Target repository to modify and merge into (required)
-  --ticket <path>   Host Markdown ticket; repeat for multiple tickets (required)
-  --agent-harness <pi|oh-my-pi>  Agent harness for every stage (default: pi)
-  -h, --help        Show this help without requiring Docker
-
-Prerequisites for a run: Docker, an image built with
-  npx sandcastle docker build-image --image-name ${IMAGE_NAME} --dockerfile ${dockerfilePath}
-and host access to https://openai.taila49adb.ts.net/v1 through Tailscale.`);
-}
-
-function parseArgs(argv: readonly string[]): { repo: string; ticketPaths: string[]; agentHarness: AgentHarness } | undefined {
-  if (argv.includes("--help") || argv.includes("-h")) {
-    printHelp();
-    return undefined;
-  }
-
-  let repo: string | undefined;
-  let agentHarness: AgentHarness | undefined;
-  const ticketPaths: string[] = [];
-  for (let index = 0; index < argv.length; index++) {
-    const argument = argv[index];
-    if (argument !== "--repo" && argument !== "--ticket" && argument !== "--agent-harness") {
-      throw new Error(`Unknown argument: ${argument ?? "<missing>"}. Use --help for usage.`);
-    }
-
-    const value = argv[++index];
-    if (!value || value.startsWith("--")) {
-      throw new Error(`${argument} requires a ${argument === "--agent-harness" ? "harness" : "path"} value.`);
-    }
-    if (argument === "--repo") {
-      if (repo !== undefined) {
-        throw new Error("--repo may be supplied only once.");
-      }
-      repo = value;
-    } else if (argument === "--agent-harness") {
-      if (agentHarness !== undefined) throw new Error("--agent-harness may be supplied only once.");
-      if (value !== "pi" && value !== "oh-my-pi") {
-        throw new Error(`Unknown agent harness: ${value}. Expected pi or oh-my-pi.`);
-      }
-      agentHarness = value;
-    } else {
-      ticketPaths.push(value);
-    }
-  }
-
-  if (!repo) {
-    throw new Error("Missing required --repo <target-repository>. Use --help for usage.");
-  }
-  if (ticketPaths.length === 0) {
-    throw new Error("Supply at least one --ticket <markdown-path>. Use --help for usage.");
-  }
-  return { repo, ticketPaths, agentHarness: agentHarness ?? "pi" };
-}
-
-async function requireDirectory(path: string, label: string): Promise<void> {
-  let details;
-  try {
-    details = await stat(path);
-  } catch (error) {
-    throw new Error(`${label} does not exist: ${path}`, { cause: error });
-  }
-  if (!details.isDirectory()) {
-    throw new Error(`${label} is not a directory: ${path}`);
-  }
-}
-
-async function runGit(repo: string, args: readonly string[], operation: string): Promise<string> {
-  try {
-    const result = await execFile("git", ["-C", repo, ...args]);
-    return result.stdout;
-  } catch (error) {
-    throw new Error(`Git failed while ${operation} in target repository ${repo}.`, { cause: error });
-  }
-}
-
-async function requireCleanSandbox(
-  sandbox: { exec(command: string): Promise<{ exitCode: number; stdout: string; stderr: string }> },
-  stage: string,
-): Promise<void> {
-  const status = await sandbox.exec("git status --porcelain");
-  if (status.exitCode !== 0) {
-    throw new Error(`${stage} could not inspect the worktree: ${status.stderr.trim()}`);
-  }
-  if (status.stdout.trim().length > 0) {
-    throw new Error(`${stage} left uncommitted changes in the branch worktree.`);
-  }
-}
-
-function requireCompletion(stage: string, result: { completionSignal?: string }): void {
-  if (result.completionSignal !== COMPLETE) {
-    throw new Error(`${stage} did not report successful completion with ${COMPLETE}.`);
-  }
-}
 
 async function run(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
@@ -233,24 +36,7 @@ async function run(): Promise<void> {
     if (pending.length === 0) break;
     console.log(`\n=== [planning] Iteration ${iteration}/${MAX_ITERATIONS} ===\n`);
 
-    const planResult = await sandcastle.run({
-      cwd: repo,
-      sandbox: sandboxProvider(options.agentHarness),
-      branchStrategy: { type: "head" },
-      name: "Planner",
-      agent: ticketAgent(options.agentHarness),
-      logging: fileLogging(`planner-${iteration}`),
-      promptFile: resolve(promptsPath, "plan-prompt.md"),
-      promptArgs: {
-        TICKETS: formatTickets(pending),
-        COMPLETED_TICKET_IDS: completed.size === 0 ? "(none)" : [...completed].join(", "),
-      },
-      completionSignal: "</plan>",
-      output: sandcastle.Output.object({ tag: "plan", schema: planSchema }),
-    });
-    if (planResult.completionSignal !== "</plan>") {
-      throw new Error("Planner stopped without producing a complete <plan> response.");
-    }
+    const planResult = await runPlanAgent(repo, options.agentHarness, iteration, pending, [...completed]);
     if (planResult.commits.length > 0) {
       throw new Error("Planner modified the target repository; planning must be read-only.");
     }
@@ -273,25 +59,13 @@ async function run(): Promise<void> {
         if (!ticket) throw new Error(`Internal error: missing ticket ${plannedTicket.id}.`);
 
         console.log(`[${ticket.id}] Starting implementation: ${ticket.title}`);
-        await using sandbox = await sandcastle.createSandbox({
+        await using sandbox = await createSandbox({
           cwd: repo,
           sandbox: sandboxProvider(options.agentHarness),
           branch: ticket.branch,
         });
 
-        const implementation = await sandbox.run({
-          name: `Implementer ${ticket.id}`,
-          agent: ticketAgent(options.agentHarness),
-          logging: fileLogging(`implementer-${ticket.id}`),
-          promptFile: resolve(promptsPath, "implement-prompt.md"),
-          promptArgs: {
-            TICKET_ID: ticket.id,
-            TICKET_TITLE: ticket.title,
-            TICKET_CONTENT: ticket.content,
-            BRANCH: ticket.branch,
-          },
-        });
-        requireCompletion(`Implementation for ticket ${ticket.id}`, implementation);
+        const implementation = await runImplementationAgent(sandbox, ticket, options.agentHarness);
         if (implementation.commits.length === 0) {
           throw new Error(`Implementation for ticket ${ticket.id} completed without a commit.`);
         }
@@ -299,19 +73,7 @@ async function run(): Promise<void> {
           `[${ticket.id}] Implementation complete (${implementation.commits.length} commit(s)); starting review.`,
         );
 
-        const review = await sandbox.run({
-          name: `Reviewer ${ticket.id}`,
-          agent: ticketAgent(options.agentHarness),
-          logging: fileLogging(`reviewer-${ticket.id}`),
-          promptFile: resolve(promptsPath, "review-prompt.md"),
-          promptArgs: {
-            TICKET_ID: ticket.id,
-            TICKET_TITLE: ticket.title,
-            TICKET_CONTENT: ticket.content,
-            BRANCH: ticket.branch,
-          },
-        });
-        requireCompletion(`Review for ticket ${ticket.id}`, review);
+        await runReviewAgent(sandbox, ticket, options.agentHarness);
         await requireCleanSandbox(sandbox, `Review for ticket ${ticket.id}`);
         console.log(`[${ticket.id}] Review complete.`);
         return ticket;
@@ -335,21 +97,7 @@ async function run(): Promise<void> {
       `\n=== [merge] Merging ${implemented.length} ticket(s): ${implemented.map((ticket) => ticket.id).join(", ")} ===\n`,
     );
 
-    const mergeResult = await sandcastle.run({
-      cwd: repo,
-      sandbox: sandboxProvider(options.agentHarness),
-      branchStrategy: { type: "head" },
-      name: "Merger",
-      maxIterations: 10,
-      agent: ticketAgent(options.agentHarness),
-      logging: fileLogging(`merger-${iteration}`),
-      promptFile: resolve(promptsPath, "merge-prompt.md"),
-      promptArgs: {
-        BRANCHES: implemented.map((ticket) => `- ${ticket.branch}`).join("\n"),
-        TICKETS: formatTickets(implemented),
-      },
-    });
-    requireCompletion("Merge", mergeResult);
+    await runMergeAgent(repo, options.agentHarness, iteration, implemented);
 
     for (const ticket of implemented) {
       await runGit(repo, ["merge-base", "--is-ancestor", ticket.branch, "HEAD"], `verifying merge of ${ticket.branch}`);

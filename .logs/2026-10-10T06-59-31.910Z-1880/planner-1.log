@@ -1,0 +1,9 @@
+
+--- Run started: 2026-10-10T06:59:31.979Z ---
+Sandcastle Run
+  Agent: Planner
+  Sandbox: docker
+  Max iterations: 1
+  Branch: main
+Iteration 1/1
+Git worktree operation failed: Provider 'docker' create failed: Image 'local-sandcastle-runner:latest' not found locally. Build it first with 'sandcastle docker build-image'.
