@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { z } from "zod";
 
@@ -25,6 +25,15 @@ export type PlannedTicket = Readonly<{
 function ticketTitle(path: string, content: string): string {
   const heading = content.match(/^#\s+(.+?)\s*$/m)?.[1];
   return heading ?? basename(path, ".md");
+}
+
+/** List Markdown ticket files in a directory as sorted full paths; non-Markdown entries are ignored. */
+export async function listTicketPaths(dir: string): Promise<string[]> {
+  const entries = await readdir(dir);
+  return entries
+    .filter((name) => name.toLowerCase().endsWith(".md"))
+    .map((name) => resolve(dir, name))
+    .sort();
 }
 
 /** Load host Markdown tickets, rejecting duplicate paths, non-Markdown, empty files, and duplicate content (stable ticket IDs are content hashes). */
