@@ -18,10 +18,10 @@ Install dependencies and build the runner image:
 npm install
 npx sandcastle docker build-image \
   --image-name local-sandcastle-runner:latest \
-  --dockerfile .sandcastle/Dockerfile
+  --dockerfile factory/sandbox/Dockerfile
 ```
 
-The container uses host networking so Pi can resolve the tailnet hostname and use the host's Tailscale routes. `.sandcastle/models.json` defines the `local-vllm` provider and is mounted read-only into Pi's agent directory; no Anthropic or OpenAI API credential is required for this local service.
+The container uses host networking so Pi can resolve the tailnet hostname and use the host's Tailscale routes. `factory/harness/models.json` defines the `local-vllm` provider and is mounted read-only into the agent's directory (`models.json` for Pi, `models.yml` for oh-my-pi); no Anthropic or OpenAI API credential is required for this local service.
 
 `npm run sandcastle -- --help` prints runner help without requiring Docker.
 
@@ -37,9 +37,9 @@ npm run evaluate -- proof/scenarios/vsa-allocation-feature.json "$RUN_PATH"
 
 Repeat `--ticket <markdown-path>` to supply multiple related local tickets for the same target baseline. Never combine tickets from different proof scenarios: each scenario has its own independently materialized repository. Ticket IDs are generated from the ticket paths and contents; they are not external issue numbers.
 
-Tickets are read on the host and supplied in full to Pi. The target must already be a Git repository. During every agent stage, `standards/skills/` is mounted read-only at Pi's native global skill location, `/home/agent/.pi/agent/skills/`. Pi discovers each `SKILL.md`, and the planner, implementer, reviewer, and merger prompts require relevant skills and companion files to be read. A failed implementation, review, or merge makes the runner command fail.
+Tickets are read on the host and supplied in full to the agent. The target must already be a Git repository. During every agent stage, `standards/skills/` is mounted read-only at the harness's native global skill location (`/home/agent/.pi/agent/skills/` for Pi, `/home/agent/.omp/agent/skills/` for oh-my-pi). The agent discovers each `SKILL.md`, and the planner, implementer, reviewer, and merger prompts require relevant skills and companion files to be read. A failed implementation, review, or merge makes the runner command fail.
 
-Agent output is written under `.sandcastle/logs/<run timestamp>-<process ID>/` in this runner checkout. Each planner, implementer, reviewer, and merger stage gets a separate human-readable progress log containing assistant text and concise tool-start summaries while omitting raw Pi events such as thinking blocks and tool output. The main process prints stage progress and the path to each log.
+Agent output is written under `factory/.logs/<run timestamp>-<process ID>/` in this runner checkout. Each planner, implementer, reviewer, and merger stage gets a separate human-readable progress log containing assistant text and concise tool-start summaries while omitting raw Pi events such as thinking blocks and tool output. The main process prints stage progress and the path to each log.
 
 ## Proof scenarios
 
@@ -59,9 +59,9 @@ The recovery sample projects and recovery ticket remain as samples, but they are
 
 ## Retained surfaces
 
-- `.sandcastle/`: local-ticket runner, prompts, and Docker image
+- `factory/`: local-ticket runner, prompts, harness adapters, and the Docker sandbox image
 - `samples/`: independent .NET fixture projects and Markdown tickets
-- `standards/skills/`: read-only Pi skills and companion material
+- `standards/skills/`: read-only agent skills and companion material
 - `proof/scenarios/`: five minimal scenario mappings
 - `proof/harness/materialize-fixture.ts`: disposable repository preparation
 - `proof/harness/evaluate.ts`: standalone evaluator dispatch

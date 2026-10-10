@@ -1,23 +1,17 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
-import { basename, resolve } from "node:path";
+import { stat } from "node:fs/promises";
+import { resolve } from "node:path";
 import { promisify } from "node:util";
 import * as sandcastle from "@ai-hero/sandcastle";
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
-import { z } from "zod";
 import { ohMyPi } from "./harness/oh-my-pi.js";
-
+import { dockerfilePath, IMAGE_NAME, preflightSandbox, sandboxProvider, type AgentHarness } from "./sandbox/sandbox.js";
+import { formatTickets, loadTickets, planSchema, validatePlan } from "./tickets/tickets.js";
 // Local-ticket adaptation of upstream commit 1e15922d0a0f51d5819f3615886444d10a6aa183
 // (.sandcastle/run.ts blob 58def9aeddc8680067711fe3a5399509926d1bb0).
 const MAX_ITERATIONS = 10;
-const MAX_PARALLEL = 1;
 const MODEL = "vllm-qwen38-27b";
-const IMAGE_NAME = "local-sandcastle-runner:latest";
 const COMPLETE = "<promise>COMPLETE</promise>";
-const runnerRoot = resolve(import.meta.dirname, "..");
-const skillsPath = resolve(runnerRoot, "harness/skills");
-const modelsPath = resolve(import.meta.dirname, "harness/models.json");
+const promptsPath = resolve(import.meta.dirname, "prompts");
 const runLogPath = resolve(
   import.meta.dirname,
   "../.logs",
@@ -61,8 +55,6 @@ ticket; fetch the document when the search excerpt is insufficient.
 Do not silently fall back when a required MCP call fails: report the exact error.
 Include the consequential MCP calls and their results in verification evidence.
 `;
-
-type AgentHarness = "pi" | "oh-my-pi";
 
 function ticketAgent(harness: AgentHarness) {
   const agent = harness === "oh-my-pi"
@@ -120,20 +112,6 @@ function fileLogging(name: string) {
   } as const;
 }
 
-type Ticket = Readonly<{
-  id: string;
-  title: string;
-  path: string;
-  content: string;
-  branch: string;
-}>;
-
-type PlannedTicket = Readonly<{
-  id: string;
-  title: string;
-  branch: string;
-}>;
-
 function printHelp(): void {
   console.log(`Usage: npm run sandcastle -- --repo <target-repository> --ticket <markdown-path> [--ticket <markdown-path> ...]
 
@@ -146,7 +124,7 @@ Options:
   -h, --help        Show this help without requiring Docker
 
 Prerequisites for a run: Docker, an image built with
-  npx sandcastle docker build-image --image-name ${IMAGE_NAME} --dockerfile .sandcastle/Dockerfile
+  npx sandcastle docker build-image --image-name ${IMAGE_NAME} --dockerfile ${dockerfilePath}
 and host access to https://openai.taila49adb.ts.net/v1 through Tailscale.`);
 }
 
@@ -206,109 +184,6 @@ async function requireDirectory(path: string, label: string): Promise<void> {
   }
 }
 
-function ticketTitle(path: string, content: string): string {
-  const heading = content.match(/^#\s+(.+?)\s*$/m)?.[1];
-  return heading ?? basename(path, ".md");
-}
-
-async function loadTickets(paths: readonly string[]): Promise<Ticket[]> {
-  const seenPaths = new Set<string>();
-  const seenIds = new Set<string>();
-  const tickets: Ticket[] = [];
-
-  for (const suppliedPath of paths) {
-    const path = resolve(suppliedPath);
-    if (seenPaths.has(path)) {
-      throw new Error(`Ticket path was supplied more than once: ${path}`);
-    }
-    seenPaths.add(path);
-    if (!path.toLowerCase().endsWith(".md")) {
-      throw new Error(`Ticket must be a Markdown file: ${path}`);
-    }
-
-    let content: string;
-    try {
-      content = await readFile(path, "utf8");
-    } catch (error) {
-      throw new Error(`Could not read ticket: ${path}`, { cause: error });
-    }
-    if (content.trim().length === 0) {
-      throw new Error(`Ticket is empty: ${path}`);
-    }
-
-    const id = createHash("sha256").update(content).digest("hex").slice(0, 16);
-    if (seenIds.has(id)) {
-      throw new Error(`Tickets must have distinct content; stable ticket ID ${id} is duplicated.`);
-    }
-    seenIds.add(id);
-    tickets.push({
-      id,
-      title: ticketTitle(path, content),
-      path,
-      content,
-      branch: `sandcastle/ticket-${id}`,
-    });
-  }
-
-  return tickets;
-}
-
-function formatTickets(tickets: readonly Ticket[]): string {
-  return tickets
-    .map(
-      (ticket) =>
-        `<ticket id="${ticket.id}" title=${JSON.stringify(ticket.title)} branch="${ticket.branch}">\n` +
-        `<host-path>${ticket.path}</host-path>\n` +
-        `<content>\n${ticket.content}\n</content>\n` +
-        `</ticket>`,
-    )
-    .join("\n\n");
-}
-
-const planSchema = z
-  .object({
-    tickets: z
-      .array(
-        z
-          .object({
-            id: z.string(),
-            title: z.string(),
-            branch: z.string(),
-          })
-          .strict(),
-      )
-      .max(MAX_PARALLEL),
-  })
-  .strict();
-
-function validatePlan(
-  entries: readonly PlannedTicket[],
-  available: ReadonlyMap<string, Ticket>,
-  completed: ReadonlySet<string>,
-): PlannedTicket[] {
-  const selected = new Set<string>();
-  return entries.map((candidate) => {
-    if (completed.has(candidate.id)) {
-      throw new Error(`Planner selected already completed ticket ${candidate.id}.`);
-    }
-    const ticket = available.get(candidate.id);
-    if (!ticket) {
-      throw new Error(`Planner selected unknown ticket ${candidate.id}; only supplied pending tickets are allowed.`);
-    }
-    if (selected.has(candidate.id)) {
-      throw new Error(`Planner selected ticket ${candidate.id} more than once.`);
-    }
-    selected.add(candidate.id);
-    if (candidate.title !== ticket.title) {
-      throw new Error(`Planner changed title for ticket ${candidate.id}.`);
-    }
-    if (candidate.branch !== ticket.branch) {
-      throw new Error(`Planner branch for ${candidate.id} must be ${ticket.branch}.`);
-    }
-    return { id: ticket.id, title: ticket.title, branch: ticket.branch };
-  });
-}
-
 async function runGit(repo: string, args: readonly string[], operation: string): Promise<string> {
   try {
     const result = await execFile("git", ["-C", repo, ...args]);
@@ -331,21 +206,6 @@ async function requireCleanSandbox(
   }
 }
 
-function dockerRuntime(harness: AgentHarness) {
-  const agentDirectory = `/home/agent/.${harness === "pi" ? "pi" : "omp"}/agent`;
-  return docker({
-    imageName: IMAGE_NAME,
-    network: "host",
-    mounts: [
-      { hostPath: skillsPath, sandboxPath: `${agentDirectory}/skills`, readonly: true },
-      { hostPath: modelsPath, sandboxPath: `${agentDirectory}/${harness === "pi" ? "models.json" : "models.yml"}`, readonly: true },
-      ...(harness === "pi" ? [
-        { hostPath: resolve(import.meta.dirname, "check-mcp.mjs"), sandboxPath: `${agentDirectory}/check-mcp.mjs`, readonly: true },
-      ] : []),
-    ],
-  });
-}
-
 function requireCompletion(stage: string, result: { completionSignal?: string }): void {
   if (result.completionSignal !== COMPLETE) {
     throw new Error(`${stage} did not report successful completion with ${COMPLETE}.`);
@@ -359,8 +219,7 @@ async function run(): Promise<void> {
   const repo = resolve(options.repo);
   await requireDirectory(repo, "Target repository");
   await runGit(repo, ["rev-parse", "--git-dir"], "validating --repo");
-  await requireDirectory(skillsPath, "Skills source");
-  await stat(modelsPath);
+  await preflightSandbox(options.agentHarness);
   const initialStatus = await runGit(repo, ["status", "--porcelain"], "checking initial worktree cleanliness");
   if (initialStatus.trim().length > 0) {
     throw new Error("Target repository must have a clean worktree before Sandcastle starts.");
@@ -376,12 +235,12 @@ async function run(): Promise<void> {
 
     const planResult = await sandcastle.run({
       cwd: repo,
-      sandbox: dockerRuntime(options.agentHarness),
+      sandbox: sandboxProvider(options.agentHarness),
       branchStrategy: { type: "head" },
       name: "Planner",
       agent: ticketAgent(options.agentHarness),
       logging: fileLogging(`planner-${iteration}`),
-      promptFile: resolve(import.meta.dirname, "plan-prompt.md"),
+      promptFile: resolve(promptsPath, "plan-prompt.md"),
       promptArgs: {
         TICKETS: formatTickets(pending),
         COMPLETED_TICKET_IDS: completed.size === 0 ? "(none)" : [...completed].join(", "),
@@ -413,11 +272,10 @@ async function run(): Promise<void> {
         const ticket = allTickets.get(plannedTicket.id);
         if (!ticket) throw new Error(`Internal error: missing ticket ${plannedTicket.id}.`);
 
-
         console.log(`[${ticket.id}] Starting implementation: ${ticket.title}`);
         await using sandbox = await sandcastle.createSandbox({
           cwd: repo,
-          sandbox: dockerRuntime(options.agentHarness),
+          sandbox: sandboxProvider(options.agentHarness),
           branch: ticket.branch,
         });
 
@@ -425,7 +283,7 @@ async function run(): Promise<void> {
           name: `Implementer ${ticket.id}`,
           agent: ticketAgent(options.agentHarness),
           logging: fileLogging(`implementer-${ticket.id}`),
-          promptFile: resolve(import.meta.dirname, "implement-prompt.md"),
+          promptFile: resolve(promptsPath, "implement-prompt.md"),
           promptArgs: {
             TICKET_ID: ticket.id,
             TICKET_TITLE: ticket.title,
@@ -445,7 +303,7 @@ async function run(): Promise<void> {
           name: `Reviewer ${ticket.id}`,
           agent: ticketAgent(options.agentHarness),
           logging: fileLogging(`reviewer-${ticket.id}`),
-          promptFile: resolve(import.meta.dirname, "review-prompt.md"),
+          promptFile: resolve(promptsPath, "review-prompt.md"),
           promptArgs: {
             TICKET_ID: ticket.id,
             TICKET_TITLE: ticket.title,
@@ -479,13 +337,13 @@ async function run(): Promise<void> {
 
     const mergeResult = await sandcastle.run({
       cwd: repo,
-      sandbox: dockerRuntime(options.agentHarness),
+      sandbox: sandboxProvider(options.agentHarness),
       branchStrategy: { type: "head" },
       name: "Merger",
       maxIterations: 10,
       agent: ticketAgent(options.agentHarness),
       logging: fileLogging(`merger-${iteration}`),
-      promptFile: resolve(import.meta.dirname, "merge-prompt.md"),
+      promptFile: resolve(promptsPath, "merge-prompt.md"),
       promptArgs: {
         BRANCHES: implemented.map((ticket) => `- ${ticket.branch}`).join("\n"),
         TICKETS: formatTickets(implemented),
