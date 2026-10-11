@@ -16,7 +16,19 @@ Inspect the committed change set: `git log origin/{{BASE_BRANCH}}..HEAD`, `git d
 Produce content only:
 
 - `title`: a short pull-request title for the change set.
-- `body`: a Markdown summary of what changed and why, the verification performed, and any known limitations.
+- `body`: Markdown with the following sections in order: `### ELI5`, `### Play-by-play`, `### Verification`, and `### Known limitations`.
+
+Body requirements:
+
+- Start with `### ELI5`: in 2–4 short sentences, explain what changed, why it was needed, and what users or developers can now do or observe. Use everyday language, avoid jargon and syntax details, and keep simplifications accurate.
+- Follow with `### Play-by-play`: explain the codebase changes in concise numbered steps. Start with the entry point or trigger and follow the important calls, branches, transformations, and state changes through to the result. For declarative code, explain how the changed parts are interpreted or connected instead.
+- Explain what changed relative to the base branch and why it matters, not just what each line says. Cover every consequential change, grouping repetitive operations and boilerplate rather than listing every file or line. For documentation or configuration changes without an execution flow, explain their effects in a logical order.
+- Name relevant symbols and cite `path:line` references from the current source where available. Read surrounding code, callers, dependencies, and tests only as needed to establish the changed behavior; do not expand into an unrelated repository tour.
+- Attach consequential error paths, side effects, async behavior, and edge cases to the relevant step. Keep each step to 1–3 short sentences and define unfamiliar terms briefly on first use.
+- Distinguish code-established behavior from inferred intent. Do not invent guarantees, runtime results, or reasons unsupported by the ticket or change set.
+- In `### Verification`, report only checks actually performed and their observed results; distinguish inspected test coverage from executed tests. State when verification was not run.
+- In `### Known limitations`, state known limitations or missing evidence that matters; if none were identified, say so without implying exhaustive proof.
+- Keep the explanation focused on this change set. Do not reproduce large code blocks, narrate the inspection process, or add unrelated refactoring advice.
 
 You have no authority to execute anything remote. Do not run `git push`, create, delete, merge, or switch branches, stage, commit, modify, delete, or create any file, run `gh`, or call the GitHub API. The runner performs every Git and GitHub operation deterministically from your output.
 
