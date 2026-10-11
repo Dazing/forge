@@ -116,3 +116,31 @@ test("the GitHub payload never carries a merge-method field that the REST API ig
 test("secrets reports the GitHub token", () => {
   assert.deepEqual(new GitHubProvider("gh_secret_abc").secrets(), ["gh_secret_abc"]);
 });
+
+test("reads and safely updates the exact unchanged open draft pull request", async () => {
+  const calls: { url: string; init: RequestInit }[] = [];
+  const details = {
+    number: 7,
+    html_url: "https://github.com/acme/app/pull/7",
+    state: "open",
+    draft: true,
+    merged_at: null,
+    merge_commit_sha: null,
+    title: request.title,
+    body: request.body,
+    head: { ref: request.head, sha: "a".repeat(40) },
+    base: { ref: request.base },
+  };
+  const fetch: Fetch = async (url, init) => {
+    calls.push({ url, init });
+    return init.method === "PATCH"
+      ? new Response(JSON.stringify({ number: 7, html_url: details.html_url }), { status: 200 })
+      : new Response(JSON.stringify(details), { status: 200 });
+  };
+  const configured = new GitHubProvider("gh_secret_abc", fetch);
+  const read = await configured.getPullRequest(request.repositoryUrl, 7);
+  assert.equal(read?.sourceSha, "a".repeat(40));
+  await configured.updateDraftPullRequest({ ...request, number: 7, expectedSourceSha: "a".repeat(40), expectedTitle: request.title, expectedBody: request.body, title: "Updated", body: "Updated body" });
+  assert.deepEqual(calls.map((call) => call.init.method), ["GET", "GET", "PATCH"]);
+  assert.deepEqual(JSON.parse(calls[2]!.init.body as string), { title: "Updated", body: "Updated body", base: "main" });
+});

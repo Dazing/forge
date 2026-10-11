@@ -1,2 +1,2 @@
-export { planTickets, type PlanTicketsInput } from "./plan-tickets.js";
-export type { PlannedTicket } from "./plan-schema.js";
+export { planGroups, type PlanGroupsInput } from "./plan-tickets.js";
+export { groupPlanSchema, validateGroupPlan, type PlannedGroup } from "./group-plan-schema.js";

@@ -1,4 +1,4 @@
-import { appendFile, mkdir, rename, stat } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, stat } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { redactSecret } from "../../shared/redact-secret.js";
 import type { SquashPreference } from "../../infrastructure/git-provider/git-provider.js";
@@ -33,6 +33,29 @@ export type FailureAnnotation = Readonly<{
   stderr: string;
   secret: string;
 }>;
+export type ProgressAnnotation = Readonly<{
+  timestamp: string;
+  cycle: number;
+  attemptCount: number;
+  reason: string;
+  blockedBy?: readonly string[];
+}>;
+
+export type PublicationAnnotation = Readonly<{
+  timestamp: string;
+  groupId: string;
+  includedTicketIds: readonly string[];
+  finalSha: string;
+  pullRequestUrl: string;
+}>;
+
+export type TicketLifecycleEvidence = Readonly<{
+  hasAttempt: boolean;
+  hasCheckpoint: boolean;
+  hasPublication: boolean;
+  artifactReferences: readonly string[];
+}>;
+
 
 function fence(text: string): string {
   const longestRun = Math.max(0, ...[...text.matchAll(/`+/g)].map((match) => match[0].length));
@@ -128,6 +151,50 @@ export async function annotateFailure(ticketPath: string, failure: FailureAnnota
     ].join("\n"),
   );
 }
+export async function annotateRetryable(ticketPath: string, progress: ProgressAnnotation): Promise<void> {
+  await appendSection(ticketPath, [
+    `## Retryable (${progress.timestamp})`,
+    "",
+    `- Cycle: ${progress.cycle}`,
+    `- Complete attempts: ${progress.attemptCount}`,
+    `- Reason: ${progress.reason}`,
+  ].join("\n"));
+}
+
+export async function annotateBlocked(ticketPath: string, progress: ProgressAnnotation): Promise<void> {
+  await appendSection(ticketPath, [
+    `## Blocked (${progress.timestamp})`,
+    "",
+    `- Cycle: ${progress.cycle}`,
+    `- Blocked by: ${(progress.blockedBy ?? []).map((id) => `\`${id}\``).join(", ") || "none"}`,
+    `- Reason: ${progress.reason}`,
+  ].join("\n"));
+}
+
+export async function annotatePublication(ticketPath: string, publication: PublicationAnnotation): Promise<void> {
+  await appendSection(ticketPath, [
+    `## Group publication (${publication.timestamp})`,
+    "",
+    `- Group: \`${publication.groupId}\``,
+    `- Included tickets: ${publication.includedTicketIds.map((id) => `\`${id}\``).join(", ")}`,
+    `- Final commit: \`${publication.finalSha}\``,
+    `- Draft PR: ${publication.pullRequestUrl}`,
+  ].join("\n"));
+}
+
+export async function inspectTicketLifecycle(ticketPath: string): Promise<TicketLifecycleEvidence> {
+  const source = await readFile(ticketPath, "utf8");
+  const references = [...source.matchAll(/^- (?:Workspace|Agent log|Draft PR): (?:`([^`]+)`|(\S+))$/gm)]
+    .map((match) => match[1] ?? match[2]!)
+    .filter((value, index, all) => all.indexOf(value) === index);
+  return {
+    hasAttempt: /^## Attempt \S+ \([^)]+\)$/m.test(source),
+    hasCheckpoint: /^## Stage checkpoint (?:implement|review) \([^)]+\)$/m.test(source),
+    hasPublication: /^## (?:Completed \S+|Group publication) \([^)]+\)$/m.test(source),
+    artifactReferences: references,
+  };
+}
+
 
 /** Move a ticket into a lifecycle directory, preserving its filename and appending the attempt ID on collision. */
 export async function moveTicket(ticketPath: string, destinationDir: string, attemptId: string): Promise<string> {

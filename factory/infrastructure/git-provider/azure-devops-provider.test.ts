@@ -241,3 +241,34 @@ for (const scenario of [
     assert.equal(calls, 2);
   });
 }
+
+test("reads and safely updates the exact unchanged Azure draft with squash preserved", async () => {
+  const calls: { url: string; init: RequestInit }[] = [];
+  const details = {
+    pullRequestId: 22,
+    status: "active",
+    isDraft: true,
+    sourceRefName: `refs/heads/${request.head}`,
+    targetRefName: `refs/heads/${request.base}`,
+    title: request.title,
+    description: request.body,
+    lastMergeSourceCommit: { commitId: "a".repeat(40) },
+    completionOptions: { mergeStrategy: "squash" },
+  };
+  const fetch: Fetch = async (url, init) => {
+    calls.push({ url, init });
+    return init.method === "PATCH"
+      ? new Response(JSON.stringify({ pullRequestId: 22, isDraft: true, completionOptions: { mergeStrategy: "squash" } }), { status: 200 })
+      : new Response(JSON.stringify(details), { status: 200 });
+  };
+  const provider = new AzureDevOpsProvider(pat, fetch);
+  assert.equal((await provider.getPullRequest(request.repositoryUrl, 22))?.sourceSha, "a".repeat(40));
+  await provider.updateDraftPullRequest({ ...request, number: 22, expectedSourceSha: "a".repeat(40), expectedTitle: request.title, expectedBody: request.body, title: "Updated", body: "Updated body" });
+  assert.deepEqual(calls.map((call) => call.init.method), ["GET", "GET", "PATCH"]);
+  assert.deepEqual(JSON.parse(calls[2]!.init.body as string), {
+    title: "Updated",
+    description: "Updated body",
+    isDraft: true,
+    completionOptions: { mergeStrategy: "squash", deleteSourceBranch: false, bypassPolicy: false },
+  });
+});

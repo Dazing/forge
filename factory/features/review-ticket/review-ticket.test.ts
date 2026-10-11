@@ -14,6 +14,9 @@ const COMPLETE = "<promise>COMPLETE</promise>";
 
 const ticket: Ticket = {
   id: "0123456789abcdef",
+  sourceHash: "source",
+  requirementsHash: "requirements",
+  dependsOnTickets: [],
   name: "Fix Login",
   slug: "fix-login",
   title: "Fix login",

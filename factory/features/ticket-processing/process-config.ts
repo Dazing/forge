@@ -2,9 +2,8 @@ import type { GitProvider } from "../../infrastructure/git-provider/git-provider
 import type { InvocationLogger } from "../../infrastructure/logging/invocation-log.js";
 import type { AgentRunner } from "../../infrastructure/agent-runtime/agent-runtime.js";
 import { type AgentHarness } from "../../infrastructure/sandbox/sandbox.js";
-import type { CommandFailure } from "../../infrastructure/git-provider/git.js";
 
-// Workflow-owned configuration and outcome data; stage features never see these.
+// Workflow-owned configuration; stage features never see coordinator state.
 
 export interface ProcessConfig {
   readonly ticketsDir: string;
@@ -13,12 +12,7 @@ export interface ProcessConfig {
   readonly logger: InvocationLogger;
   readonly gitProvider: GitProvider;
   readonly runAgent: AgentRunner;
+  readonly maxParallel: number;
+  readonly ticketAttemptsPerCycle: number;
 }
 
-export interface TicketOutcome {
-  readonly ticketId: string;
-  readonly attemptId: string;
-  readonly completed: boolean;
-  readonly destination: string;
-  readonly failure?: CommandFailure;
-}

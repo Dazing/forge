@@ -28,7 +28,16 @@ async function run(): Promise<void> {
   await preflightSandbox(options.agentHarness, factoryRoot);
   const runAgent = createAgentRunner(logger, factoryRoot);
 
-  await processTickets({ ticketsDir, factoryRoot, harness: options.agentHarness, logger, gitProvider, runAgent });
+  await processTickets({
+    ticketsDir,
+    factoryRoot,
+    harness: options.agentHarness,
+    logger,
+    gitProvider,
+    runAgent,
+    maxParallel: options.maxParallel,
+    ticketAttemptsPerCycle: options.ticketAttemptsPerCycle,
+  });
 }
 
 await run();

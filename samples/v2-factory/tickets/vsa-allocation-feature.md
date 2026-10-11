@@ -1,6 +1,8 @@
 ---
+id: vsa-allocation-feature
 name: vsa-allocation-feature
 repository: git@github.com:Dazing/forge-test-repo.git
+dependsOnTickets: []
 baseBranch: main
 ---
 

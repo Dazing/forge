@@ -1,8 +1,8 @@
-# Local Sandcastle runner
+# Forge - A software development factory
 
-This repository adapts Matt Pocock's Sandcastle runner for local Markdown tickets. Each selected ticket owns one fresh, retained Git workspace: the runner clones the ticket's own repository, the agents implement and review inside that workspace and report structured stage messages without ever committing, and TypeScript creates the runner-owned checkpoint commits, the commit-count and change-set checks, the push, and the draft pull request on the configured provider. Tickets, skills, evaluators, and expected solutions remain in this source checkout. The runner is implemented in `factory/`; the earlier `.sandcastle/` monolith is not part of this runner.
+This repository adapts Matt Pocock's Sandcastle runner for dependency-aware local Markdown tickets. Tickets execute in fresh retained Git workspaces; agents implement, review, and resolve integrations without committing. TypeScript owns implementation/review checkpoints, reviewed multi-parent integration commits, safe pushes, and draft pull-request creation or extension. Connected dependency groups normally produce one combined reviewed draft, while failed combinations fall back to dependency-closed reviewed subsets.
 
-The runner uses `@ai-hero/sandcastle@0.12.0`, Pi `1.1.0`, oh-my-pi `18.8.4`, and the OpenAI-compatible model ID `vllm-qwen38-27b` at `https://openai.taila49adb.ts.net/v1`. It runs continuously as a daemon, sleeps 10 seconds when no tickets are pending, and selects at most `MAX_PARALLEL = 1` ticket per planning iteration.
+The runner uses `@ai-hero/sandcastle@0.12.0`, Pi `1.1.0`, oh-my-pi `18.8.4`, and the OpenAI-compatible model ID `vllm-qwen38-27b` at `https://openai.taila49adb.ts.net/v1`. It runs continuously, sleeps 10 seconds only when no tickets are pending, and bounds all agent jobs with `--max-parallel` (default `1`).
 
 ## Prerequisites
 
@@ -48,8 +48,10 @@ Every ticket must start with strict YAML front matter:
 
 ```markdown
 ---
+id: ticket-login-redirect
 name: fix-login-redirect
 repository: git@github.com:acme/app.git
+dependsOnTickets: []
 baseBranch: main
 ---
 
@@ -62,51 +64,46 @@ For `GIT_PROVIDER=azure-devops`, the repository is the Azure SSH form:
 
 ```markdown
 ---
+id: ticket-login-redirect
 name: fix-login-redirect
 repository: git@ssh.dev.azure.com:v3/Contoso Team/Web App/fix-login
+dependsOnTickets: []
 baseBranch: release/2.1
 ---
 ```
 
 - `name` is normalized once into a lowercase ASCII kebab-case slug. The slug must not be empty.
 - `repository` must be the canonical SSH URL of the selected provider: `git@github.com:<owner>/<repository>.git` for GitHub, `git@ssh.dev.azure.com:v3/<organization>/<project>/<repository>` for Azure DevOps. HTTPS, local-path, legacy `ssh.visualstudio.com`, GitHub Enterprise, and cross-provider URLs are rejected.
-- `baseBranch` is optional and defaults to `main`. The branch must exist in the remote repository.
-- The ticket ID is the first 16 hexadecimal characters of the SHA-256 hash of the complete ticket source. The title is the first Markdown H1 in the body, falling back to the slug. IDs are not provider issue numbers; the runner never queries or closes external issues.
+- `id` is required, stable, case-sensitive, and must not contain whitespace or control characters. `dependsOnTickets` defaults to `[]`; duplicate/self references are rejected. Missing references remain blocked until the ticket arrives. Cycles and repository/base-branch mismatches reject graph execution.
+- `baseBranch` is optional and defaults to `main`. Every connected dependency group uses one canonical repository and base branch.
+- `sourceHash` covers the complete source. `requirementsHash` deterministically covers authored front matter/body while excluding only structurally recognized factory records. Annotation-only changes preserve reusable checkpoints; authored changes after a successful checkpoint block the ID and descendants until the author supplies a new ID.
 
 Start the daemon from this repository:
 
 ```bash
-npm run sandcastle -- --tickets-dir ./ticket-queue
+npm run factory -- --tickets-dir ./.ticket-queue \
+  --max-parallel 1 \
+  --ticket-attempts-per-cycle 3
 ```
 
-Pi is the default agent harness. Select oh-my-pi explicitly when needed:
+Pi is the default harness; pass `--agent-harness oh-my-pi` when required. Both numeric options require positive integers and are validated before environment, credential, or sandbox work. `--max-parallel` is invocation-global across implementation, review, integration, and pull-request content jobs. `--ticket-attempts-per-cycle` controls fresh complete attempts; the default is `3`.
 
-```bash
-npm run sandcastle -- --tickets-dir ./ticket-queue --agent-harness oh-my-pi
-```
+The daemon scans sorted root-level Markdown files and plans at most one validated connected delivery group per cycle. Within that group, every dependency-ready ticket can run concurrently within the global limit. Planning remains serialized. Empty planner selections and retryable pending work add no backoff; only an empty active queue sleeps for 10 seconds.
 
-The ticket directory must already exist. The selected harness is used for every stage, including planning. The daemon scans root-level `*.md` files in sorted order and plans at most one ticket per iteration. It sleeps 10 seconds only when no tickets are pending; an empty planner selection with pending tickets does not add a delay. It runs until interrupted. Files under the lifecycle subdirectories are not polled.
+### Dependency-group lifecycle
 
-Tickets with missing or invalid front matter receive a metadata failure annotation and move to `<tickets-dir>/failed/`; the daemon continues polling.
+1. Validate declared IDs, references, cycles, and repository/base compatibility. Missing references and descendants of unsuccessful work remain nonterminally blocked.
+2. Run dependency-ready tickets in isolated fresh workspaces. Roots start at the refreshed canonical base; a one-parent ticket imports the parent's clean review checkpoint; multi-parent tickets wait for a runner-owned reviewed integration baseline. Siblings never see one another's ticket-specific changes.
+3. Each complete attempt runs implementation and review through their existing three single-iteration stage loops. Every successful stage receives exactly one runner-owned checkpoint, including an empty review checkpoint. A failed complete attempt is retained and retried in a fresh workspace from the same pinned dependency baseline, up to the cycle budget.
+4. Exhausted tickets remain retryable for the next cycle. Descendants stay blocked; successful ancestors and independent siblings remain reusable and publishable.
+5. After runnable work settles, reviewed leaf candidates are merged in stable ticket-ID order in a fresh integration workspace. The integration agent resolves conflicts and reviews the combined behavior but never commits; the runner validates parents, conflict dispositions, index/tree cleanliness, and creates the merge commit. Combined review runs even for clean Git merges.
+6. Publish only dependency-closed reviewed candidates. A failed combined review never publishes its tree; independently reviewed subsets may publish separately. Pull-request content lists included, retryable, blocked, integration-excluded tickets, and every conflict disposition.
+7. A tracked unchanged open draft may be extended only after provider identity, refs, source SHA, title/body, draft state, and squash preference match invocation memory. The push is non-force and the provider is reread after an uncertain update. Closed, non-draft, missing, or externally changed drafts are untouched; reviewed work uses a fresh draft.
+8. Store publication facts before guarded completion annotation/movement, so settlement failures never republish. Only included tickets move to `done/`; retryable/blocked source tickets remain active.
 
-### Per-ticket lifecycle
+Fresh workspaces and failed integrations are retained. The runner never resets, cleans, amends, rebases, force-pushes, merges a pull request, enables auto-merge, bypasses policy, deletes branches, or rewrites repository settings.
 
-For every planned ticket the runner:
-
-1. Generates a six-hex attempt ID, reserves `.workspaces/<slug>-<attempt-id>/`, and appends the workspace, branch, repository, and base branch to the ticket.
-2. Validates `baseBranch`, performs a fresh non-shallow `--single-branch` clone of that branch, and checks out `agent-tickets/<slug>-<attempt-id>`. It does not run repository-specific install, restore, build, or bootstrap commands before the agents start.
-3. Runs the implementer in that workspace for up to three single-iteration runs. The agent may inspect Git and leave uncommitted work, but must never create a commit, and cannot push, mutate remote branches, invoke `gh` or `az repos`, or call the GitHub or Azure DevOps API. It completes by emitting one structured `<implementation>` message (a Conventional-Commits-style prose summary, at most 4000 characters, no `Factory-*:` trailer, no credential material) plus `<promise>COMPLETE</promise>`.
-4. The runner then creates the implementation checkpoint commit: it rechecks the expected branch and the HEAD captured at stage entry, rejects unresolved merge entries, stages all non-ignored work with `git add --all`, computes `Factory-Changes` from the staged tree, appends the runner-owned trailers, commits with `--allow-empty`, and requires exactly one new single-parent commit whose parent is the captured HEAD, on the expected branch, with a completely clean index and worktree including untracked files. The checkpoint writes one `main.log` trace record (parent SHA, checkpoint SHA, changes, agent-log basename) and appends the same record to the ticket.
-5. Runs the reviewer from that clean checkpoint under the same contract, producing the review checkpoint. A stage that changed no files gets an empty `unchanged` checkpoint; a failed or incomplete stage gets no checkpoint, and its dirty workspace and last successful checkpoint are retained.
-6. Runs the read-only pull-request agent to produce a title and body. The runner rejects any commit or worktree mutation made during this stage and records the content success at the workspace SHA it started from, before commit-count/change-set checks or remote operations. A content trace-write failure stops publication at `pull-request content`, before push or provider HTTP.
-7. Requires at least one commit ahead of `origin/<baseBranch>`, requires a nonempty net tree diff between `origin/<baseBranch>` and HEAD (so checkpoint-only history cannot publish), records the final SHA, pushes `agent-tickets/<slug>-<attempt-id>` through SSH, and creates a draft pull request against `baseBranch` through the selected provider's REST API. The full stage history is pushed; the runner never squashes locally.
-8. Appends the retained workspace, branch, base branch, final commit SHA, draft PR URL, and persisted merge method to the ticket, then moves it to `<tickets-dir>/done/`.
-
-Every workspace is retained on success and failure. If push succeeds but draft-PR creation fails, the remote branch is also retained; the runner performs no rollback or remote deletion. A checkpoint failure stops the attempt at stage `implementation commit` or `review commit` and never resets, retries, or cleans the workspace; a checkpoint annotation failure is its own stage and never repeats the commit.
-
-Checkpoint postconditions compare the committed tree with the parent tree to verify the recorded `Factory-Changes` value after hooks run. If a hook turns an empty checkpoint into a changed commit, or removes all staged changes, the checkpoint fails and the resulting commit is retained without amendment or retry.
-
-A ticket-level setup, agent, checkpoint, finalization, push, or pull-request failure is written once to `main.log`, appended to the ticket with its stage, sanitized operation, exit code or HTTP status, stdout, and stderr, and moved to `<tickets-dir>/failed/`. If settlement cannot write `main.log`, it emits credential-redacted diagnostics to stderr and still attempts annotation and movement; logging failure does not stop other attempts. Once draft publication succeeds, later annotation, movement, or settlement-logging failures preserve a completed outcome and never republish. A failed movement after publication returns an empty destination. Startup, ticket-directory read, and planner failures remain invocation-fatal.
+Continuation is invocation-only. Startup inspects active and lifecycle ticket evidence; prior attempts/checkpoints/publications block affected IDs for operator reconciliation instead of reconstructing or republishing old state. Unrelated fresh groups continue. When a tracked partial PR is merged, the runner refreshes the base, requires a provider merge-result SHA reachable from it, applies the exact recorded published delta to the merge result's first parent in a disposable worktree, and compares trees. Verified IDs become satisfied on the refreshed base; inconclusive evidence blocks affected descendants without replaying retained history.
 
 The provider credential is passed explicitly to the logger, ticket annotations, and provider, and every literal occurrence is replaced with `[redacted-token]` before it reaches a log, ticket file, or command display. For Azure DevOps the encoded Basic authorization value derived from the PAT is redacted as well. The credential never appears in Git arguments, URLs, logs, ticket diagnostics, or agent environments.
 
@@ -139,20 +136,20 @@ cat .logs/<run timestamp>-<process ID>/review-<ticket-id>-<attempt-id>.log  # th
 The runner is the `factory/` tree, split by responsibility:
 
 - `factory/main.ts` — thin composition root: parse flags, load the repository-root `.env`, select the provider from `GIT_PROVIDER` and its credential, validate the ticket directory, create the invocation logger, run the sandbox preflight, build the agent runner, and start the ticket-processing daemon.
-- `factory/cli/cli.ts` — flag parsing for `--tickets-dir`, `--agent-harness` (`pi` default, `pi`/`oh-my-pi`), and `--help`.
-- `factory/features/tickets/` — `ticket.ts` (front-matter parsing, slug/ID/title derivation, provider repository validation), `ticket-files.ts` (ticket-directory scanning), and `ticket-lifecycle.ts` (attempt, stage-checkpoint, completion, and failure annotations plus terminal movement into `done/`/`failed/`). Cross-feature entry is `index.ts`.
-- `factory/features/plan-tickets/` — one planning iteration: `plan-schema.ts` (`MAX_PARALLEL = 1`, `validatePlan`), `plan-tickets.ts` (planner run and the factory-checkout snapshot check that rejects planner commits/worktree changes), and `plan-prompt.md`.
-- `factory/features/implement-ticket/` — the runner-owned loop of up to three single-iteration implementer runs, the clean stage-entry precondition, the structured `<implementation>` message contract (`implement-schema.ts`: trimmed nonblank prose, 4000-character bound, no control characters other than line feed, no runner-reserved `Factory-*:` trailer), and `implement-prompt.md`. The stage returns its validated message plus the HEAD its work started from; it never commits.
-- `factory/features/review-ticket/` — the same bounded loop and structured `<review>` message contract for the reviewer, and `review-prompt.md`. Cleanliness is enforced at the checkpoint, not inside the stage.
-- `factory/features/publish-pull-request/` — read-only pull-request content stage, commit-count check, change-set check, final SHA, push, and draft pull-request creation; `PublicationError` carries the failing substage (`pull-request content`, `commit count`, `change set`, `final SHA`, `push`, `draft pull request`) for settlement, and `pull-request-schema.ts` bounds the title/body.
-- `factory/features/ticket-processing/` — the daemon loop (10-second sleep when nothing is pending), one bounded iteration (discovery, planning, attempts, terminal bookkeeping), per-attempt execution (reserve, workspace, implement, implementation checkpoint, review, review checkpoint, publish, terminal transition), `stage-commit.ts` (the runner-owned checkpoint commit with trailers and postconditions), and failure settlement into `failed/`.
-- `factory/infrastructure/git-provider/` — `git-provider.ts` (the provider contract: credential, repository validation, draft pull-request creation, merge-method support, and credential values that must never reach a Git message), `create-git-provider.ts` (provider selection from `GIT_PROVIDER`), `github-provider.ts` and `azure-devops-provider.ts` (REST publication with structured HTTP failures, no Octokit, no `gh`, no `az`), and `git.ts` (argv-based command runner with structured `CommandFailure`, repository and HEAD/branch snapshots, cleanliness, and unmerged-entry checks).
+- `factory/cli/cli.ts` — `--tickets-dir`, harness selection, `--max-parallel`, `--ticket-attempts-per-cycle`, validation, and help-first startup behavior.
+- `factory/features/tickets/` — declared identity/dependencies, source and authored-requirements fingerprints, active/lifecycle discovery, append-only attempt/checkpoint/retryable/blocked/publication/completion/failure records, evidence inspection, and guarded movement.
+- `factory/features/plan-tickets/` — immutable factory-checkout planning for exact validated delivery-group IDs and member ID/title records. Execution capacity remains coordinator policy.
+- `factory/features/implement-ticket/` and `review-ticket/` — stage-owned loops of up to three single-iteration agent runs, structured messages, branch/HEAD contracts, and no agent commits. Implementation receives the pinned reviewed dependency context.
+- `factory/features/integrate-tickets/` — conflict resolution and combined review for pending runner-created merges, with three repair runs, structured conflict dispositions, branch/HEAD protection, unresolved-entry checks, and conflict-marker rejection.
+- `factory/features/publish-pull-request/` — read-only grouped content, immutable entry trace, commit-count/net-change gates, final SHA, safe non-force create/extension push, draft creation/update, uncertain-update reread, included/retryable/blocked/excluded/conflict evidence, and bounded GitHub squash note.
+- `factory/features/ticket-processing/` — invocation graph/component state, global agent leases, dependency-ready scheduling, fresh complete retries, dependency checkpoint import, multi-parent integration, reviewed-subset fallback, publication/settlement separation, startup evidence blocks, requirements guards, and merged-delta reconciliation.
+- `factory/infrastructure/git-provider/` — provider-neutral create/read/update contracts and Git mechanisms. GitHub and Azure DevOps return canonical PR state, refs, source SHA, title/body, draft status, squash capability, and merge-result SHA while preserving structured credential-redacted failures.
 - `factory/infrastructure/logging/` — `invocation-log.ts` (run directory, agent log paths, redacted `main.log`).
 - `factory/infrastructure/sandbox/` — `sandbox.ts` (host-network Docker provider, native read-only skill/model mounts, factory credential masking, preflight), `masked.env` (empty credential overlay), `Dockerfile` (Pi 1.1.0, oh-my-pi 18.8.4, RoslynMcp 1.2.3, .NET 10 runtime), and `check-mcp.mjs` (Pi MCP preflight).
 - `factory/infrastructure/agent-runtime/` — `agent-runtime.ts` (generic configured agent execution: sandbox provider, file logging, prompt file, completion signal, structured output, iteration limits), `create-agent.ts`, `stream-events.ts`, `oh-my-pi.ts`, `models.json` with `models-path.ts`, and the read-only `skills/` catalog.
 - `factory/shared/` — `paths.ts`, `sleep.ts`, and `redact-secret.ts`.
 
-The planner is read-only and returns a `<plan>` JSON selection by ticket ID/title only; it must complete with `</plan>`. The implementer and reviewer may continue for up to three single-iteration runs, must emit one structured stage message plus `<promise>COMPLETE</promise>`, and must never commit; the runner creates the checkpoint after each successful stage and independently rejects any uncommitted tracked, generated, or untracked files at that boundary. The pull-request agent returns content in `<pull-request>` tags and must also emit `<promise>COMPLETE</promise>`. Planner failures are invocation-fatal. Implementation, checkpoint, review, and publication failures settle the ticket attempt; publication snapshot failures retain the `pull-request content` substage and original Git diagnostics.
+The planner returns at most one exact validated delivery group and cannot bypass graph readiness. Implement, review, and integration own their structured single-iteration repair loops; agents never commit. The runner owns every checkpoint and integration commit. Planning/graph contract failures are invocation-fatal; unsuccessful complete attempts remain retryable, while durable-boundary failures require reconciliation.
 
 ## Tests
 
@@ -166,14 +163,14 @@ npm run verify    # typecheck + tests + architecture check
 The architecture is enforced by dependency-cruiser rules in `.dependency-cruiser.cjs`:
 
 - A feature may enter another feature only through its `index.ts`; deep imports of internal modules are rejected.
-- The stage features (`plan-tickets`, `implement-ticket`, `review-ticket`, `publish-pull-request`) never import `ticket-processing` or each other; `ticket-processing` composes them.
+- The stage features (`plan-tickets`, `implement-ticket`, `review-ticket`, `integrate-tickets`, `publish-pull-request`) never import `ticket-processing` or each other; `ticket-processing` composes them.
 - `tickets` is a leaf: it imports no other feature.
 - Infrastructure (`agent-runtime`, `sandbox`, `git-provider`, `logging`) never imports features, `main.ts`, or `cli/`; `shared/` never imports features or infrastructure; features never import `main.ts` or `cli/`.
 - Unresolvable local imports and circular dependencies are rejected.
 
 The skills catalog under `factory/infrastructure/agent-runtime/skills/` is excluded from the cruise: its files are read-only agent material, not production modules.
 
-Ticket parsing, provider selection, provider repository validation, provider request construction, provider failure and redaction behavior, lifecycle annotations (attempt, stage checkpoint, completion, failure), structured stage-message validation, runner-owned checkpoint commits (trailers, tree-change flag, credential rejection, wrong-branch, agent-created commits, unresolved merges, post-commit untracked output, empty `unchanged` checkpoints), the change-set publication gate, merge-method support and validation, workspace creation (real Git fixtures), and the fetch seam are covered. The live publication paths (GitHub SSH push plus REST draft pull request, Azure DevOps SSH push plus REST draft pull request) are not exercised by automated tests: they require disposable provider credentials, so end-to-end publication is verified by running the daemon against a real repository.
+Automated coverage includes identity/fingerprint boundaries, graph chains/diamonds/missing references/invalid edges, numeric configuration, real-Git dependency baselines and sibling isolation, bounded sibling overlap, fresh retry isolation, next-cycle continuation with safe draft extension, conflict resolution evidence, reviewed-subset fallback, included-only settlement, squash-equivalent merged-delta verification and mismatch rejection, lifecycle records, runner-owned checkpoints, provider create/read/update requests, credential redaction, publication gates, and architecture boundaries. Provider HTTP is exercised through controlled fetch seams; live SSH/provider writes still require an authorized disposable remote.
 
 ## Proof scenarios
 

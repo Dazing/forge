@@ -1,18 +1,17 @@
 import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
-import { annotateAttempt, annotateCompletion, annotateStageCheckpoint, moveTicket, type Ticket } from "../tickets/index.js";
+import { annotateAttempt, annotateFailure, annotateStageCheckpoint, type Ticket } from "../tickets/index.js";
 import { implementTicket } from "../implement-ticket/index.js";
 import { reviewTicket } from "../review-ticket/index.js";
-import { publishPullRequest } from "../publish-pull-request/index.js";
+import { toCommandFailure, type CommandFailure } from "../../infrastructure/git-provider/git.js";
 import { commitStage, type StageCommitResult, type StageName } from "./stage-commit.js";
-import { createWorkspace, reserveAttempt } from "./workspace.js";
-import { logSettlementFailure, settleAttemptFailure } from "./settle-attempt.js";
-import type { ProcessConfig, TicketOutcome } from "./process-config.js";
+import { createWorkspace, reserveAttempt, type WorkspaceBaseline } from "./workspace.js";
+import { logSettlementFailure } from "./settle-attempt.js";
+import type { ProcessConfig } from "./process-config.js";
 
-// One complete ticket attempt: reserve, attempt annotation, workspace, implementation, implementation
-// checkpoint, review, review checkpoint, publication, then guarded completion annotation and movement.
-// The runner owns every checkpoint commit; agents never commit. A failed boundary preserves the
-// workspace, index, and prior commits, and every failure settles to `failed/` without stopping siblings.
+// One fresh complete ticket attempt: reserve, annotate, create a dependency-based workspace, then
+// implement and review with runner-owned checkpoint/trace/annotation boundaries. Publication is
+// group-owned. Failed workspaces remain retained; only reviewed checkpoints enter workflow state.
 
 interface Attempt {
   readonly workspacePath: string;
@@ -30,6 +29,21 @@ function stageLogBasename(config: ProcessConfig, ticket: Ticket, attempt: Attemp
 
 /** One stage's validated message plus the HEAD its work started from. */
 type StageOutcome = Readonly<{ message: string; head: string }>;
+export type ReviewedCheckpoint = Readonly<{
+  ticket: Ticket;
+  attemptId: string;
+  workspacePath: string;
+  branch: string;
+  implementationCheckpoint: StageCommitResult;
+  reviewCheckpoint: StageCommitResult;
+  baselineSha: string;
+  requirementsHash: string;
+}>;
+
+export type ReviewedAttemptResult =
+  | Readonly<{ status: "reviewed"; checkpoint: ReviewedCheckpoint }>
+  | Readonly<{ status: "failed"; ticketId: string; attemptId: string; stage: string; retryable: boolean; failure: CommandFailure }>;
+
 
 /** One successful mutating stage: checkpoint commit, then its main.log trace record. */
 async function commitBoundary(config: ProcessConfig, ticket: Ticket, attempt: Attempt, stage: StageName, outcome: StageOutcome): Promise<StageCommitResult> {
@@ -86,7 +100,8 @@ async function annotateBoundary(config: ProcessConfig, ticket: Ticket, attempt: 
   }
 }
 
-export async function executeAttempt(ticket: Ticket, config: ProcessConfig): Promise<TicketOutcome> {
+/** Run one fresh complete attempt and retain its reviewed checkpoint for graph integration/publication. */
+export async function executeReviewedAttempt(ticket: Ticket, config: ProcessConfig, baseline?: WorkspaceBaseline): Promise<ReviewedAttemptResult> {
   const workspacesRoot = resolve(config.factoryRoot, ".workspaces");
   let attemptId = randomBytes(3).toString("hex");
   let stage = "reserve";
@@ -96,84 +111,54 @@ export async function executeAttempt(ticket: Ticket, config: ProcessConfig): Pro
     stage = "attempt annotation";
     await annotateAttempt(ticket.path, {
       timestamp: new Date().toISOString(),
-      attemptId: workspace.attemptId,
+      attemptId,
       workspacePath: workspace.workspacePath,
       branch: workspace.branch,
       repository: ticket.repository,
       baseBranch: ticket.baseBranch,
     });
-
     stage = "workspace";
-    const attempt = await createWorkspace(ticket, workspace);
-
+    const attempt = await createWorkspace(ticket, workspace, baseline);
     stage = "implement";
-    const implementation = await implementTicket({ ticket, workspacePath: attempt.workspacePath, branch: attempt.branch, attemptId: attempt.attemptId, harness: config.harness, runAgent: config.runAgent });
-
+    const implementation = await implementTicket({ ticket, workspacePath: attempt.workspacePath, branch: attempt.branch, attemptId, harness: config.harness, runAgent: config.runAgent });
     stage = commitStages.implement;
     const implementationCheckpoint = await commitBoundary(config, ticket, attempt, "implement", implementation);
-
     stage = annotationStages.implement;
     await annotateBoundary(config, ticket, attempt, "implement", implementationCheckpoint);
-
-    // The reviewer starts from the clean implementation checkpoint.
     stage = "review";
-    const review = await reviewTicket({ ticket, workspacePath: attempt.workspacePath, branch: attempt.branch, attemptId: attempt.attemptId, harness: config.harness, runAgent: config.runAgent });
-
+    const review = await reviewTicket({ ticket, workspacePath: attempt.workspacePath, branch: attempt.branch, attemptId, harness: config.harness, runAgent: config.runAgent });
     stage = commitStages.review;
     const reviewCheckpoint = await commitBoundary(config, ticket, attempt, "review", review);
-
     stage = annotationStages.review;
     await annotateBoundary(config, ticket, attempt, "review", reviewCheckpoint);
-
-    // Publication is read-only: it starts from the clean review checkpoint and pushes the full stage history.
-    stage = "publish";
-    const { finalSha, pullRequest, squashPreference } = await publishPullRequest({
-      ticket,
-      workspacePath: attempt.workspacePath,
-      branch: attempt.branch,
-      attemptId: attempt.attemptId,
-      harness: config.harness,
-      runAgent: config.runAgent,
-      gitProvider: config.gitProvider,
-      onContentComplete: (head) => config.logger.record({
-        timestamp: new Date().toISOString(),
-        ticketId: ticket.id,
-        attemptId: attempt.attemptId,
-        stage: "pull-request content",
-        operation: "generating pull-request content",
-        status: "completed",
-        checkpointSha: head,
-        changes: "unchanged",
-        agentLogBasename: config.logger.agentLogBasename(`pull-request-${ticket.id}-${attempt.attemptId}`),
-      }),
-    });
-
-
-    stage = "completion annotation";
-    try {
-      await annotateCompletion(ticket.path, {
-        timestamp: new Date().toISOString(),
-        attemptId: workspace.attemptId,
-        workspacePath: attempt.workspacePath,
-        branch: attempt.branch,
-        baseBranch: ticket.baseBranch,
-        finalSha,
-        pullRequestUrl: pullRequest.url,
-        squashPreference,
-      });
-    } catch (error) {
-      await logSettlementFailure(config, ticket, workspace.attemptId, "completion annotation", error);
-    }
-
-    stage = "terminal movement";
-    try {
-      const destination = await moveTicket(ticket.path, resolve(config.ticketsDir, "done"), workspace.attemptId);
-      return { ticketId: ticket.id, attemptId: workspace.attemptId, completed: true, destination };
-    } catch (error) {
-      await logSettlementFailure(config, ticket, workspace.attemptId, "terminal movement", error);
-      return { ticketId: ticket.id, attemptId: workspace.attemptId, completed: true, destination: "" };
-    }
+    return {
+      status: "reviewed",
+      checkpoint: { ticket, attemptId, workspacePath: attempt.workspacePath, branch: attempt.branch, implementationCheckpoint, reviewCheckpoint, baselineSha: implementationCheckpoint.parentSha, requirementsHash: ticket.requirementsHash },
+    };
   } catch (error) {
-    return settleAttemptFailure(ticket, attemptId, stage, error, config);
+    const failure = toCommandFailure(error, stage);
+    try {
+      await annotateFailure(ticket.path, {
+        timestamp: new Date().toISOString(),
+        attemptId,
+        stage,
+        command: failure.command,
+        exitCode: failure.exitCode,
+        stdout: failure.stdout,
+        stderr: failure.stderr,
+        secret: config.gitProvider.credential,
+      });
+    } catch (annotationError) {
+      await logSettlementFailure(config, ticket, attemptId, "failure annotation", annotationError);
+    }
+    return {
+      status: "failed",
+      ticketId: ticket.id,
+      attemptId,
+      stage,
+      retryable: !stage.includes("commit") && !stage.includes("checkpoint annotation"),
+      failure,
+    };
   }
 }
+

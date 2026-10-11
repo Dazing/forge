@@ -1,6 +1,8 @@
 ---
+id: vsa-feature
 name: vsa-feature
 repository: git@github.com:acme/app.git
+dependsOnTickets: []
 baseBranch: main
 ---
 

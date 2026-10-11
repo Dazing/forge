@@ -11,6 +11,12 @@ Implement the single supplied local ticket in its freshly cloned ticket workspac
 {{TICKET_CONTENT}}
 </ticket>
 
+<completed-dependencies>
+{{DEPENDENCIES}}
+</completed-dependencies>
+
+The workspace starts at the reviewed dependency baseline described above. Those dependency changes are context, not work to recreate or rewrite.
+
 Execute this workflow directly. Work only on this ticket, preserve unrelated behavior, and complete the requested outcome rather than stopping at the first passing increment. This is a local ticket: do not query, update, or close an external issue tracker.
 
 ## Operating rules

@@ -1,6 +1,8 @@
 ---
+id: transfer-stock-between-locations
 name: transfer-stock-between-locations
 repository: git@github.com:Dazing/forge-test-repo.git
+dependsOnTickets: []
 baseBranch: main
 ---
 

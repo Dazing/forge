@@ -1,6 +1,8 @@
 ---
+id: low-stock-report
 name: low-stock-report
 repository: git@github.com:Dazing/forge-test-repo.git
+dependsOnTickets: []
 baseBranch: main
 ---
 

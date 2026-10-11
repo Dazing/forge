@@ -1,18 +1,20 @@
 import { sleep } from "../../shared/sleep.js";
-import type { Ticket } from "../tickets/index.js";
-import { processIteration } from "./process-iteration.js";
+import { listTicketPaths } from "../tickets/index.js";
+import { createDependencyWorkflowState, processDependencyCycle } from "./dependency-cycle.js";
+import { JobLimiter } from "./job-limiter.js";
 import type { ProcessConfig } from "./process-config.js";
 
-// Daemon loop: poll the ticket directory every 10 seconds when nothing is pending; in-memory known/terminal bookkeeping.
+// Daemon loop: dependency workflow state remains invocation-local; poll for 10 seconds only when the active queue is empty.
 
 const TICKET_POLL_MS = 10_000;
 
 export async function processTickets(config: ProcessConfig): Promise<void> {
-  const known = new Map<string, Ticket>();
-  const terminal = new Set<string>();
+  const limiter = new JobLimiter(config.maxParallel);
+  const limitedConfig: ProcessConfig = { ...config, runAgent: limiter.wrap(config.runAgent) };
+  const state = createDependencyWorkflowState();
   for (;;) {
-    const outcomes = await processIteration(config, known, terminal);
-    if (outcomes.length === 0 && known.size === 0) {
+    await processDependencyCycle(limitedConfig, state);
+    if ((await listTicketPaths(config.ticketsDir)).length === 0) {
       console.log(`[poll] No pending tickets; sleeping ${TICKET_POLL_MS / 1000} seconds.`);
       await sleep(TICKET_POLL_MS);
     }

@@ -37,12 +37,29 @@ export interface PublishPullRequestInput {
   readonly gitProvider: GitProvider;
   /** Record verified read-only content at its entry SHA before any publication side effects. */
   readonly onContentComplete: (head: string) => Promise<void>;
+  readonly delivery?: Readonly<{
+    included: readonly Readonly<{ id: string; title: string }>[];
+    retryable: readonly Readonly<{ id: string; reason: string }>[];
+    blocked: readonly Readonly<{ id: string; reason: string }>[];
+    integrationExcluded: readonly Readonly<{ id: string; reason: string }>[];
+    conflicts: readonly Readonly<{ path: string; disposition: string }>[];
+  }>;
+  readonly trackedPublication?: Readonly<{
+    number: number;
+    head: string;
+    sourceSha: string;
+    title: string;
+    body: string;
+  }>;
 }
 
 export interface PublishResult {
   readonly finalSha: string;
   readonly pullRequest: DraftPullRequest;
   readonly squashPreference: SquashPreference;
+  readonly head: string;
+  readonly title: string;
+  readonly body: string;
 }
 
 /** Publish one attempt: content, immutability, commits ahead of base, final SHA, push, draft pull request. */
@@ -94,17 +111,77 @@ export async function publishPullRequest(input: PublishPullRequestInput): Promis
   } catch (error) {
     throw new PublicationError("final SHA", error);
   }
+  let extendTracked = false;
 
   try {
-    await runGit(input.workspacePath, ["push", "--set-upstream", "origin", input.branch], "pushing ticket branch");
+    if (input.trackedPublication !== undefined && input.gitProvider.getPullRequest !== undefined && input.gitProvider.updateDraftPullRequest !== undefined) {
+      const current = await input.gitProvider.getPullRequest(input.ticket.repository, input.trackedPublication.number);
+      extendTracked = current !== undefined
+        && current.state === "open"
+        && current.draft
+        && current.head === input.trackedPublication.head
+        && current.base === input.ticket.baseBranch
+        && current.sourceSha === input.trackedPublication.sourceSha
+        && current.title === input.trackedPublication.title
+        && current.body === input.trackedPublication.body
+        && current.squashPreference === input.gitProvider.mergeStrategySupport;
+    }
+    await runGit(
+      input.workspacePath,
+      extendTracked ? ["push", "origin", `HEAD:${input.trackedPublication!.head}`] : ["push", "--set-upstream", "origin", input.branch],
+      extendTracked ? "extending tracked pull-request branch" : "pushing ticket branch",
+    );
   } catch (error) {
     throw new PublicationError("push", error);
   }
 
   try {
-    const body = input.gitProvider.mergeStrategySupport === "unsupported"
-      ? `${content.body.slice(0, MAX_BODY_CHARS - squashNote.length)}${squashNote}`
-      : content.body;
+    const evidence = input.delivery === undefined ? "" : [
+      "",
+      "## Factory delivery",
+      `Included: ${input.delivery.included.map((ticket) => `${ticket.id} (${ticket.title})`).join(", ") || "none"}`,
+      `Retryable: ${input.delivery.retryable.map((ticket) => `${ticket.id} — ${ticket.reason}`).join("; ") || "none"}`,
+      `Blocked: ${input.delivery.blocked.map((ticket) => `${ticket.id} — ${ticket.reason}`).join("; ") || "none"}`,
+      `Integration-excluded: ${input.delivery.integrationExcluded.map((ticket) => `${ticket.id} — ${ticket.reason}`).join("; ") || "none"}`,
+      "Conflict resolutions:",
+      ...(input.delivery.conflicts.length === 0 ? ["- none"] : input.delivery.conflicts.map((conflict) => `- ${conflict.path}: ${conflict.disposition}`)),
+    ].join("\n");
+    const suffix = `${evidence}${input.gitProvider.mergeStrategySupport === "unsupported" ? squashNote : ""}`;
+    if (suffix.length > MAX_BODY_CHARS) throw new Error(`Runner-owned delivery evidence exceeds the ${MAX_BODY_CHARS}-character pull-request body limit.`);
+    const body = `${content.body.slice(0, MAX_BODY_CHARS - suffix.length)}${suffix}`;
+    if (extendTracked && input.trackedPublication !== undefined && input.gitProvider.updateDraftPullRequest !== undefined && input.gitProvider.getPullRequest !== undefined) {
+      try {
+        const pullRequest = await input.gitProvider.updateDraftPullRequest({
+          repositoryUrl: input.ticket.repository,
+          number: input.trackedPublication.number,
+          head: input.trackedPublication.head,
+          base: input.ticket.baseBranch,
+          title: content.title,
+          body,
+          mergeStrategy: "squash",
+          expectedSourceSha: finalSha,
+          expectedTitle: input.trackedPublication.title,
+          expectedBody: input.trackedPublication.body,
+        });
+        return { finalSha, pullRequest, squashPreference: pullRequest.squashPreference, head: input.trackedPublication.head, title: content.title, body };
+      } catch (error) {
+        const reconciled = await input.gitProvider.getPullRequest(input.ticket.repository, input.trackedPublication.number);
+        if (reconciled?.state === "open" && reconciled.draft && reconciled.sourceSha === finalSha && reconciled.title === content.title && reconciled.body === body) {
+          const pullRequest = { number: reconciled.number, url: reconciled.url, squashPreference: reconciled.squashPreference };
+          return { finalSha, pullRequest, squashPreference: pullRequest.squashPreference, head: input.trackedPublication.head, title: content.title, body };
+        }
+        await runGit(input.workspacePath, ["push", "--set-upstream", "origin", input.branch], "pushing fresh fallback branch after pull-request update failure");
+        const fallback = await input.gitProvider.createDraftPullRequest({
+          repositoryUrl: input.ticket.repository,
+          head: input.branch,
+          base: input.ticket.baseBranch,
+          title: content.title,
+          body,
+          mergeStrategy: "squash",
+        });
+        return { finalSha, pullRequest: fallback, squashPreference: fallback.squashPreference, head: input.branch, title: content.title, body };
+      }
+    }
     const pullRequest = await input.gitProvider.createDraftPullRequest({
       repositoryUrl: input.ticket.repository,
       head: input.branch,
@@ -113,7 +190,7 @@ export async function publishPullRequest(input: PublishPullRequestInput): Promis
       body,
       mergeStrategy: "squash",
     });
-    return { finalSha, pullRequest, squashPreference: pullRequest.squashPreference };
+    return { finalSha, pullRequest, squashPreference: pullRequest.squashPreference, head: input.branch, title: content.title, body };
   } catch (error) {
     throw new PublicationError("draft pull request", error);
   }

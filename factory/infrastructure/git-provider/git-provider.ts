@@ -22,6 +22,29 @@ export type DraftPullRequest = Readonly<{
   url: string;
   squashPreference: SquashPreference;
 }>;
+export type PullRequestState = "open" | "closed" | "merged";
+
+export type PullRequestDetails = Readonly<{
+  number: number;
+  url: string;
+  state: PullRequestState;
+  draft: boolean;
+  head: string;
+  base: string;
+  sourceSha: string;
+  title: string;
+  body: string;
+  squashPreference: SquashPreference;
+  mergeResultSha?: string;
+}>;
+
+export type UpdateDraftPullRequestRequest = DraftPullRequestRequest & Readonly<{
+  number: number;
+  expectedSourceSha: string;
+  expectedTitle: string;
+  expectedBody: string;
+}>;
+
 
 /** Fetch seam so tests exercise request construction and response handling without network access. */
 export type Fetch = (url: string, init: RequestInit) => Promise<Response>;
@@ -35,6 +58,8 @@ export interface GitProvider {
 
   validateRepository(repositoryUrl: string): void;
   createDraftPullRequest(request: DraftPullRequestRequest): Promise<DraftPullRequest>;
+  getPullRequest?(repositoryUrl: string, number: number): Promise<PullRequestDetails | undefined>;
+  updateDraftPullRequest?(request: UpdateDraftPullRequestRequest): Promise<DraftPullRequest>;
   /** Raw credential plus every derived form that must never reach a log, ticket, Git message, or command display. */
   secrets(): readonly string[];
 }

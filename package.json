@@ -5,7 +5,7 @@
   "type": "module",
   "packageManager": "npm@11.19.0",
   "scripts": {
-    "sandcastle": "tsx factory/main.ts",
+    "factory": "tsx factory/main.ts",
     "prepare:scenario": "tsx proof/harness/materialize-fixture.ts",
     "evaluate": "tsx proof/harness/evaluate.ts",
     "test": "tsx --test \"factory/**/*.test.ts\"",

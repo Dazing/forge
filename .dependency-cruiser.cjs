@@ -2,7 +2,7 @@
 // Features enter other features only through index.ts; stage features stay isolated from
 // ticket-processing and each other; infrastructure and shared stay host- and feature-free.
 
-const STAGE = "plan-tickets|implement-ticket|review-ticket|publish-pull-request";
+const STAGE = "plan-tickets|implement-ticket|review-ticket|integrate-tickets|publish-pull-request";
 
 module.exports = {
   forbidden: [
@@ -17,7 +17,7 @@ module.exports = {
       name: "stage-features-isolated",
       severity: "error",
       comment: "stage features cannot import other stage features or ticket-processing, not even via index.ts",
-      from: { path: "^factory/features/(plan-tickets|implement-ticket|review-ticket|publish-pull-request)/" },
+      from: { path: `^factory/features/(${STAGE})/` },
       to: { path: "^factory/features/(?!tickets/index\\.[jt]s$)", pathNot: "^factory/features/$1/" },
     },
     {

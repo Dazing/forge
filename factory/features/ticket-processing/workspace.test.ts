@@ -1,4 +1,4 @@
-import { mkdtemp, stat } from "node:fs/promises";
+import { mkdtemp, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
@@ -22,6 +22,9 @@ async function sourceRepository(): Promise<string> {
 function ticket(repository: string, baseBranch: string): Ticket {
   return {
     id: "0123456789abcdef",
+    sourceHash: "source",
+    requirementsHash: "requirements",
+    dependsOnTickets: [],
     name: "fix-login",
     slug: "fix-login",
     title: "Fix login",
@@ -49,6 +52,25 @@ test("clones the selected base branch and checks out the ticket branch", async (
   assert.equal(Number((await runGit(attempt.workspacePath, ["rev-list", "--count", "HEAD"], "counting history")).trim()), 2);
   assert.equal((await runGit(attempt.workspacePath, ["remote", "get-url", "origin"], "reading origin")).trim(), source);
 });
+test("starts a dependency attempt from the retained reviewed checkpoint without changing origin", async () => {
+  const source = await sourceRepository();
+  const parent = await createWorkspace(ticket(source, "main"), await reserveAttempt(join(source, "../workspaces"), "parent"));
+  await writeFile(join(parent.workspacePath, "parent.txt"), "reviewed parent\n");
+  await runGit(parent.workspacePath, ["add", "parent.txt"], "staging parent");
+  await runGit(parent.workspacePath, [...commitArgs, "commit", "-m", "reviewed parent"], "committing parent");
+  const parentSha = (await runGit(parent.workspacePath, ["rev-parse", "HEAD"], "reading parent checkpoint")).trim();
+
+  const child = await createWorkspace(
+    ticket(source, "main"),
+    await reserveAttempt(join(source, "../workspaces"), "child"),
+    { sha: parentSha, repositoryPath: parent.workspacePath },
+  );
+
+  assert.equal((await runGit(child.workspacePath, ["rev-parse", "HEAD"], "reading child baseline")).trim(), parentSha);
+  assert.equal((await runGit(child.workspacePath, ["remote", "get-url", "origin"], "reading child origin")).trim(), source);
+  assert.equal((await stat(join(child.workspacePath, "parent.txt"))).isFile(), true);
+});
+
 
 test("a second attempt produces a distinct retained workspace", async () => {
   const source = await sourceRepository();

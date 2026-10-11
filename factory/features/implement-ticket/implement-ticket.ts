@@ -16,6 +16,7 @@ export interface ImplementTicketInput {
   attemptId: string;
   harness: AgentHarness;
   runAgent: AgentRunner;
+  dependencies?: readonly Readonly<{ id: string; title: string; checkpointSha: string; summary: string }>[];
 }
 
 /** Validated stage message plus the HEAD the stage started from, which the checkpoint verifies against. */
@@ -51,6 +52,7 @@ export async function implementTicket(input: ImplementTicketInput): Promise<Impl
           TICKET_ID: input.ticket.id,
           TICKET_TITLE: input.ticket.title,
           TICKET_CONTENT: input.ticket.content,
+          DEPENDENCIES: input.dependencies?.map((dependency) => `${dependency.id} (${dependency.checkpointSha}): ${dependency.summary}`).join("\n") ?? "none",
           BRANCH: input.branch,
           BASE_BRANCH: input.ticket.baseBranch,
         },

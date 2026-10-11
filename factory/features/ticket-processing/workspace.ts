@@ -11,6 +11,11 @@ type Workspace = Readonly<{
   workspacePath: string;
   branch: string;
 }>;
+export type WorkspaceBaseline = Readonly<{
+  sha: string;
+  repositoryPath: string;
+}>;
+
 
 type TicketAttempt = Readonly<{
   ticket: Ticket;
@@ -37,7 +42,7 @@ async function reserveAttempt(workspacesRoot: string, slug: string): Promise<Wor
 }
 
 /** Create the ticket workspace: base-branch validation, fresh non-shallow single-branch clone, local ticket branch, and postconditions. Partial directories stay in place on failure. */
-async function createWorkspace(ticket: Ticket, workspace: Workspace): Promise<TicketAttempt> {
+async function createWorkspace(ticket: Ticket, workspace: Workspace, baseline?: WorkspaceBaseline): Promise<TicketAttempt> {
   // check-ref-format resolves relative refs against a repository, so it runs in the fresh non-repo workspace directory.
   await runCommand("git", ["check-ref-format", "--branch", ticket.baseBranch], "validating base branch", workspace.workspacePath);
   await runCommand(
@@ -45,7 +50,12 @@ async function createWorkspace(ticket: Ticket, workspace: Workspace): Promise<Ti
     ["clone", "--origin", "origin", "--branch", ticket.baseBranch, "--single-branch", ticket.repository, workspace.workspacePath],
     "cloning ticket repository",
   );
-  await runGit(workspace.workspacePath, ["switch", "-c", workspace.branch], "creating ticket branch");
+  if (baseline !== undefined) {
+    await runGit(workspace.workspacePath, ["fetch", "--no-tags", baseline.repositoryPath, baseline.sha], "importing dependency checkpoint");
+    const imported = (await runGit(workspace.workspacePath, ["rev-parse", "FETCH_HEAD^{commit}"], "validating dependency checkpoint")).trim();
+    if (imported !== baseline.sha) throw new Error(`Imported dependency checkpoint ${imported}, expected ${baseline.sha}.`);
+  }
+  await runGit(workspace.workspacePath, ["switch", "-c", workspace.branch, baseline?.sha ?? `origin/${ticket.baseBranch}`], "creating ticket branch");
 
   const headBranch = (await runGit(workspace.workspacePath, ["rev-parse", "--abbrev-ref", "HEAD"], "verifying ticket branch checkout")).trim();
   if (headBranch !== workspace.branch) {

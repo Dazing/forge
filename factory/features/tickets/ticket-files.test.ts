@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +13,8 @@ const azure = new AzureDevOpsProvider("vso_pat_secret_123");
 async function ticketPath(frontMatter: string, body: string, name = "ticket.md"): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "sandcastle-tickets-"));
   const path = join(dir, name);
-  await writeFile(path, `---\n${frontMatter}\n---\n${body}`);
+  const declared = /^id:/m.test(frontMatter) ? frontMatter : `id: ticket-test\n${frontMatter}`;
+  await writeFile(path, `---\n${declared}\n---\n${body}`);
   return path;
 }
 
@@ -67,12 +67,42 @@ test("rejects missing required fields", async () => {
 test("rejects malformed front matter", async () => {
   await assert.rejects(loadTicket(await ticketPath("name: fix\nrepository: [unclosed", "# Fix"), github), TicketMetadataError);
 });
+test("uses declared ticket identity and dependency references instead of source hashes", async () => {
+  const path = await ticketPath("id: ticket-abc\nname: fix\nrepository: git@github.com:acme/app.git\ndependsOnTickets: [ticket-base]", "# Fix\n\nBody.");
+  const ticket = await loadTicket(path, github);
+  assert.equal(ticket.id, "ticket-abc");
+  assert.deepEqual(ticket.dependsOnTickets, ["ticket-base"]);
+});
 
-test("front matter is removed from prompt content and the ID hashes the complete source", async () => {
-  const path = await ticketPath("name: fix\nrepository: git@github.com:acme/app.git", "# Fix\n\nBody.");
+
+test("front matter is removed from prompt content and declared identity is stable", async () => {
+  const path = await ticketPath("id: ticket-stable\nname: fix\nrepository: git@github.com:acme/app.git", "# Fix\n\nBody.");
   const ticket = await loadTicket(path, github);
   assert.equal(ticket.content, "# Fix\n\nBody.");
-  assert.equal(ticket.id, createHash("sha256").update(`---\nname: fix\nrepository: git@github.com:acme/app.git\n---\n# Fix\n\nBody.`).digest("hex").slice(0, 16));
+  assert.equal(ticket.id, "ticket-stable");
+});
+test("keeps requirements fingerprints stable across factory annotations but changes them for authored edits", async () => {
+  const path = await ticketPath("id: ticket-stable\nname: fix\nrepository: git@github.com:acme/app.git", "# Fix\n\nBody.");
+  const original = await loadTicket(path, github);
+  await writeFile(path, `---\nid: ticket-stable\nname: fix\nrepository: git@github.com:acme/app.git\n---\n# Fix\n\nBody.\n## Attempt 1a2b3c (2026-10-11T07:00:00.000Z)\n\n- Attempt ID: \`1a2b3c\`\n- Workspace: \`/tmp/work\`\n- Branch: \`ticket\`\n- Repository: \`git@github.com:acme/app.git\`\n- Base branch: \`main\`\n\n## Stage checkpoint implement (2026-10-11T07:10:00.000Z)\n\n- Attempt ID: \`1a2b3c\`\n- Stage: \`implement\`\n- Parent commit: \`abc\`\n- Checkpoint commit: \`def\`\n- Changes: changed\n- Agent log: \`implement.log\`\n`);
+  const annotated = await loadTicket(path, github);
+  assert.equal(annotated.id, original.id);
+  assert.equal(annotated.sourceHash === original.sourceHash, false);
+  assert.equal(annotated.requirementsHash, original.requirementsHash);
+  await writeFile(path, `---\nid: ticket-stable\nname: fix\nrepository: git@github.com:acme/app.git\n---\n# Fix\n\nChanged authored requirement.`);
+  assert.notEqual((await loadTicket(path, github)).requirementsHash, original.requirementsHash);
+});
+test("preserves authored prose that resembles a lifecycle heading", async () => {
+  const path = await ticketPath("id: ticket-prose\nname: fix\nrepository: git@github.com:acme/app.git", "# Fix\n\nBody.\n\n## Attempt 1a2b3c (2026-10-11T07:00:00.000Z)\n\nThis is authored prose, not a factory record.");
+  const ticket = await loadTicket(path, github);
+  assert.match(ticket.requirementsHash, /^[a-f0-9]{64}$/);
+  const changedPath = await ticketPath("id: ticket-prose\nname: fix\nrepository: git@github.com:acme/app.git", "# Fix\n\nBody.");
+  assert.notEqual(ticket.requirementsHash, (await loadTicket(changedPath, github)).requirementsHash);
+});
+
+test("rejects duplicate and self dependencies", async () => {
+  await assert.rejects(loadTicket(await ticketPath("id: ticket-a\nname: fix\nrepository: git@github.com:acme/app.git\ndependsOnTickets: [ticket-a]", "# Fix"), github), /must not depend on itself/);
+  await assert.rejects(loadTicket(await ticketPath("id: ticket-a\nname: fix\nrepository: git@github.com:acme/app.git\ndependsOnTickets: [ticket-b, ticket-b]", "# Fix"), github), /duplicate dependency/);
 });
 
 test("lists root-level Markdown tickets in sorted order", async () => {

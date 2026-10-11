@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { CommandFailedError } from "./git.js";
 import { redactSecret } from "../../shared/redact-secret.js";
-import type { DraftPullRequest, DraftPullRequestRequest, Fetch, GitProvider } from "./git-provider.js";
+import type { DraftPullRequest, DraftPullRequestRequest, Fetch, GitProvider, PullRequestDetails, UpdateDraftPullRequestRequest } from "./git-provider.js";
 
 // GitHub draft pull-request creation through the REST API, split from orchestration.
 
@@ -12,6 +12,19 @@ const pullResponseSchema = z.object({
   number: z.number().int(),
   html_url: z.string().url().min(1),
 });
+const pullDetailsSchema = z.object({
+  number: z.number().int(),
+  html_url: z.string().url().min(1),
+  state: z.enum(["open", "closed"]),
+  draft: z.boolean(),
+  merged_at: z.string().nullable().optional(),
+  merge_commit_sha: z.string().nullable().optional(),
+  title: z.string(),
+  body: z.string().nullable(),
+  head: z.object({ ref: z.string(), sha: z.string() }),
+  base: z.object({ ref: z.string() }),
+});
+
 
 /** GitHub provider: canonical `git@github.com:<owner>/<repository>.git` SSH URLs and the GitHub REST pulls endpoint. */
 export class GitHubProvider implements GitProvider {
@@ -102,6 +115,59 @@ export class GitHubProvider implements GitProvider {
       throw failure(response.status, new Error(`GitHub response is missing a valid number and html_url: ${error instanceof Error ? error.message : String(error)}`));
     }
 
+    return { number: parsed.number, url: parsed.html_url, squashPreference: "unsupported" };
+  }
+  async getPullRequest(repositoryUrl: string, number: number): Promise<PullRequestDetails | undefined> {
+    const ssh = githubSshUrl.exec(repositoryUrl);
+    if (!ssh) throw new Error(`Repository must be a git@github.com:<owner>/<repository>.git SSH URL; got ${repositoryUrl}.`);
+    const path = `/repos/${ssh[1]}/${ssh[2]}/pulls/${number}`;
+    const response = await this.fetchImpl(`${API_BASE}${path}`, {
+      method: "GET",
+      headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.credential}`, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "sandcastle-runner" },
+    }).catch((error: unknown) => {
+      throw new CommandFailedError({ operation: "reading pull request", command: `GET ${API_BASE}${path}`, exitCode: 1, stdout: "", stderr: redactSecret(this.credential, error instanceof Error ? error.message : String(error)) }, error instanceof Error ? error : new Error(String(error)));
+    });
+    const text = await response.text();
+    if (response.status === 404) return undefined;
+    if (!response.ok) throw new CommandFailedError({ operation: "reading pull request", command: `GET ${API_BASE}${path}`, exitCode: response.status, stdout: redactSecret(this.credential, text), stderr: `HTTP ${response.status} ${response.statusText}` }, new Error(`GitHub pull-request lookup failed with HTTP ${response.status}.`));
+    let parsed: z.infer<typeof pullDetailsSchema>;
+    try {
+      parsed = pullDetailsSchema.parse(JSON.parse(text));
+    } catch (error) {
+      throw new CommandFailedError({ operation: "reading pull request", command: `GET ${API_BASE}${path}`, exitCode: response.status, stdout: redactSecret(this.credential, text), stderr: "Malformed GitHub pull-request response." }, error instanceof Error ? error : new Error(String(error)));
+    }
+    return {
+      number: parsed.number,
+      url: parsed.html_url,
+      state: parsed.merged_at === null || parsed.merged_at === undefined ? parsed.state : "merged",
+      draft: parsed.draft,
+      head: parsed.head.ref,
+      base: parsed.base.ref,
+      sourceSha: parsed.head.sha,
+      title: parsed.title,
+      body: parsed.body ?? "",
+      squashPreference: "unsupported",
+      ...(parsed.merge_commit_sha ? { mergeResultSha: parsed.merge_commit_sha } : {}),
+    };
+  }
+
+  async updateDraftPullRequest(request: UpdateDraftPullRequestRequest): Promise<DraftPullRequest> {
+    const current = await this.getPullRequest(request.repositoryUrl, request.number);
+    if (current === undefined) throw new Error(`GitHub pull request ${request.number} no longer exists.`);
+    if (current.state !== "open" || !current.draft || current.head !== request.head || current.base !== request.base
+      || current.sourceSha !== request.expectedSourceSha || current.title !== request.expectedTitle || current.body !== request.expectedBody) {
+      throw new Error(`GitHub pull request ${request.number} changed externally and is not safe to update.`);
+    }
+    const ssh = githubSshUrl.exec(request.repositoryUrl)!;
+    const path = `/repos/${ssh[1]}/${ssh[2]}/pulls/${request.number}`;
+    const response = await this.fetchImpl(`${API_BASE}${path}`, {
+      method: "PATCH",
+      headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.credential}`, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "sandcastle-runner", "Content-Type": "application/json" },
+      body: JSON.stringify({ title: request.title, body: request.body, base: request.base }),
+    });
+    const text = await response.text();
+    if (!response.ok) throw new CommandFailedError({ operation: "updating draft pull request", command: `PATCH ${API_BASE}${path}`, exitCode: response.status, stdout: redactSecret(this.credential, text), stderr: `HTTP ${response.status} ${response.statusText}` }, new Error(`GitHub rejected pull-request update with HTTP ${response.status}.`));
+    const parsed = pullResponseSchema.parse(JSON.parse(text));
     return { number: parsed.number, url: parsed.html_url, squashPreference: "unsupported" };
   }
 }
