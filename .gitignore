@@ -14,5 +14,5 @@ obj/
 bin/
 .logs/
 .workspaces/
-ticket-queue/
+.ticket-queue/
 Im

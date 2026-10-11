@@ -1,8 +1,0 @@
-{
-  "id": "inventory-double-restock-bug",
-  "fixture": "samples/bug",
-  "ticket": "samples/tickets/bug.md",
-  "skills": ["standards/skills/inventory-api"],
-  "evaluator": "proof/evaluators/bug.sh",
-  "expectedSolution": "proof/expected/bug"
-}

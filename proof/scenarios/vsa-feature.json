@@ -1,8 +1,0 @@
-{
-  "id": "inventory-vsa-feature",
-  "fixture": "samples/vsa-feature",
-  "ticket": "samples/tickets/vsa-feature.md",
-  "skills": ["standards/skills/inventory-api", "standards/skills/vertical-slice-architecture"],
-  "evaluator": "proof/evaluators/vsa-feature.sh",
-  "expectedSolution": "proof/expected/vsa-feature"
-}

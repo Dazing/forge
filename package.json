@@ -9,10 +9,13 @@
     "prepare:scenario": "tsx proof/harness/materialize-fixture.ts",
     "evaluate": "tsx proof/harness/evaluate.ts",
     "test": "tsx --test \"factory/**/*.test.ts\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:architecture": "dependency-cruiser --config .dependency-cruiser.cjs factory",
+    "verify": "npm run typecheck && npm test && npm run check:architecture"
   },
   "devDependencies": {
     "@types/node": "25.0.10",
+    "dependency-cruiser": "18.5.0",
     "tsx": "4.21.0",
     "typescript": "6.0.3"
   },

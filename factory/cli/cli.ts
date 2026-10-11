@@ -1,4 +1,4 @@
-import { dockerfilePath, IMAGE_NAME, type AgentHarness } from "../sandbox/sandbox.js";
+import { dockerfilePath, IMAGE_NAME, type AgentHarness } from "../infrastructure/sandbox/sandbox.js";
 
 // Command-line surface of the Sandcastle runner, split from main.ts.
 // Local-ticket adaptation of upstream commit 1e15922d0a0f51d5819f3615886444d10a6aa183
@@ -19,7 +19,7 @@ Options:
 Prerequisites for a run: GIT_PROVIDER=github|azure-devops in the repository-root .env with its provider credential — GITHUB_TOKEN (fine-grained token: Metadata Read, Pull requests Write) or AZURE_DEVOPS_PAT (Code read/write, vso.code_write). One provider per invocation, so every ticket in that invocation uses that provider's canonical SSH URL:
   GitHub: git@github.com:<owner>/<repository>.git
   Azure DevOps: git@ssh.dev.azure.com:v3/<organization>/<project>/<repository>
-SSH authorization for clone and push stays independent from the REST credential. Docker, an image built with npx sandcastle docker build-image --image-name local-sandcastle-runner:latest --dockerfile factory/sandbox/Dockerfile, and host access to https://openai.taila49adb.ts.net/v1 through Tailscale.`);
+  SSH authorization for clone and push stays independent from the REST credential. Docker, an image built with npx sandcastle docker build-image --image-name local-sandcastle-runner:latest --dockerfile factory/infrastructure/sandbox/Dockerfile, and host access to https://openai.taila49adb.ts.net/v1 through Tailscale.`);
 }
 
 /** Parse the runner flags; prints help and returns undefined for --help, and rejects unknown flags, missing values, repeated --tickets-dir/--agent-harness, and unknown harnesses. */

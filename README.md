@@ -1,8 +1,8 @@
 # Local Sandcastle runner
 
-This repository adapts Matt Pocock's Sandcastle runner for local Markdown tickets. Each selected ticket owns one fresh, retained Git workspace: the runner clones the ticket's own repository, the agents implement and review inside that workspace, and TypeScript performs the commit, push, and draft pull request on the configured provider. Tickets, skills, evaluators, and expected solutions remain in this source checkout. The runner is implemented in `factory/`; the earlier `.sandcastle/` monolith is not part of this runner.
+This repository adapts Matt Pocock's Sandcastle runner for local Markdown tickets. Each selected ticket owns one fresh, retained Git workspace: the runner clones the ticket's own repository, the agents implement and review inside that workspace and create local commits, and TypeScript performs the commit-count check, push, and draft pull request on the configured provider. Tickets, skills, evaluators, and expected solutions remain in this source checkout. The runner is implemented in `factory/`; the earlier `.sandcastle/` monolith is not part of this runner.
 
-The runner uses `@ai-hero/sandcastle@0.12.0`, Pi `1.1.0`, oh-my-pi `18.8.4`, and the OpenAI-compatible model ID `vllm-qwen38-27b` at `https://openai.taila49adb.ts.net/v1`. It runs continuously as a daemon, polls the ticket directory every 10 seconds, and selects at most `MAX_PARALLEL = 1` ticket per planning iteration.
+The runner uses `@ai-hero/sandcastle@0.12.0`, Pi `1.1.0`, oh-my-pi `18.8.4`, and the OpenAI-compatible model ID `vllm-qwen38-27b` at `https://openai.taila49adb.ts.net/v1`. It runs continuously as a daemon, sleeps 10 seconds when no tickets are pending, and selects at most `MAX_PARALLEL = 1` ticket per planning iteration.
 
 ## Prerequisites
 
@@ -31,10 +31,10 @@ Install dependencies and build the runner image:
 npm install
 npx sandcastle docker build-image \
   --image-name local-sandcastle-runner:latest \
-  --dockerfile factory/sandbox/Dockerfile
+  --dockerfile factory/infrastructure/sandbox/Dockerfile
 ```
 
-The container uses host networking so the agent can resolve the tailnet hostname and use the host's Tailscale routes. `factory/harness/models.json` defines the `local-vllm` provider and is mounted read-only into the agent's directory (`models.json` for Pi, `models.yml` for oh-my-pi); no Anthropic or OpenAI API credential is required for this local service.
+The container uses host networking so the agent can resolve the tailnet hostname and use the host's Tailscale routes. `factory/infrastructure/agent-runtime/models.json` defines the `local-vllm` provider and is mounted read-only at `~/.pi/agent/models.json` for Pi or `~/.omp/agent/models.yml` for oh-my-pi (JSON is valid YAML); no Anthropic or OpenAI API credential is required for this local service. The catalog at `factory/infrastructure/agent-runtime/skills/` is mounted read-only at the selected harness's global skills directory, `~/.pi/agent/skills/` or `~/.omp/agent/skills/`.
 
 ## Running
 
@@ -85,7 +85,7 @@ Pi is the default agent harness. Select oh-my-pi explicitly when needed:
 npm run sandcastle -- --tickets-dir ./ticket-queue --agent-harness oh-my-pi
 ```
 
-The ticket directory must already exist. The daemon polls its root-level `*.md` files in sorted order every 10 seconds and plans at most one ticket per iteration. It runs until interrupted. Files under the lifecycle subdirectories are not polled.
+The ticket directory must already exist. The selected harness is used for every stage, including planning. The daemon scans root-level `*.md` files in sorted order and plans at most one ticket per iteration. It sleeps 10 seconds only when no tickets are pending; an empty planner selection with pending tickets does not add a delay. It runs until interrupted. Files under the lifecycle subdirectories are not polled.
 
 Tickets with missing or invalid front matter receive a metadata failure annotation and move to `<tickets-dir>/failed/`; the daemon continues polling.
 
@@ -106,6 +106,8 @@ A ticket-level setup, agent, finalization, push, or pull-request failure is writ
 
 The provider credential is passed explicitly to the logger, ticket annotations, and provider, and every literal occurrence is replaced with `[redacted-token]` before it reaches a log, ticket file, or command display. For Azure DevOps the encoded Basic authorization value derived from the PAT is redacted as well. The credential never appears in Git arguments, URLs, logs, ticket diagnostics, or agent environments.
 
+When an agent runs in the factory checkout, the sandbox overlays its repository-root `.env` with the read-only empty `factory/infrastructure/sandbox/masked.env` asset. This keeps the planner from reading the host's REST credentials without changing the host file or factory snapshot semantics. Agents running in ticket workspaces retain their own repositories' application configuration.
+
 ### Logs
 
 Agent output is written under `.logs/<run timestamp>-<process ID>/` at the root of this runner checkout. Each planner, implementer, reviewer, and pull-request stage gets a separate human-readable progress log containing assistant text and concise tool-start summaries while omitting raw Pi events such as thinking blocks and tool output. The same directory holds `main.log`, the append-only record of ticket attempts and failures.
@@ -114,26 +116,40 @@ Agent output is written under `.logs/<run timestamp>-<process ID>/` at the root 
 
 The runner is the `factory/` tree, split by responsibility:
 
-- `factory/main.ts` — composition root and daemon main loop: parse flags, load the repository-root `.env`, select the provider from `GIT_PROVIDER` and its credential, validate the ticket directory, create the invocation logger, run the sandbox preflight, load each ticket file (metadata failures are settled into `failed/`), then loop forever, sleeping 10 seconds when nothing is pending.
+- `factory/main.ts` — thin composition root: parse flags, load the repository-root `.env`, select the provider from `GIT_PROVIDER` and its credential, validate the ticket directory, create the invocation logger, run the sandbox preflight, build the agent runner, and start the ticket-processing daemon.
 - `factory/cli/cli.ts` — flag parsing for `--tickets-dir`, `--agent-harness` (`pi` default, `pi`/`oh-my-pi`), and `--help`.
-- `factory/orchestration/ticket-orchestrator.ts` — one planning iteration: run the planner, reject planner commits/worktree changes in the factory checkout, then run each planned ticket attempt (workspace, implement, review, pull-request content, commit, commit-count check, push, draft pull request, terminal ticket transition) with per-attempt failure settlement.
-- `factory/tickets/tickets.ts` — front-matter parsing, slug/ID/title derivation, provider repository validation, ticket-directory scanning, `formatTickets`, the `planSchema` (`MAX_PARALLEL = 1`), and `validatePlan`.
-- `factory/tickets/ticket-lifecycle.ts` — attempt, completion, and failure annotations (fenced command output, token redaction) and terminal ticket movement into `done/`/`failed/`.
-- `factory/workspace/workspace-service.ts` — attempt-ID generation, workspace reservation, base-branch validation, fresh single-branch clone, ticket branch checkout, and postcondition checks.
-- `factory/git-provider/` — `git-provider.ts` (the provider contract: credential, repository validation, draft pull-request creation), `create-git-provider.ts` (provider selection from `GIT_PROVIDER`), `github-provider.ts` and `azure-devops-provider.ts` (REST publication with structured HTTP failures, no Octokit, no `gh`, no `az`), and `git.ts` (argv-based command runner with structured `CommandFailure`).
-- `factory/shared/` — `invocation-log.ts` (run directory, agent log paths, redacted `main.log`), `paths.ts`, and `sleep.ts`.
-- `factory/sandbox/` — `sandbox.ts` (Docker provider, read-only skill/model mounts, preflight), `Dockerfile` (Pi 1.1.0, oh-my-pi 18.8.4, RoslynMcp 1.2.3, .NET 10 runtime), and `check-mcp.mjs` (Pi MCP preflight).
-- `factory/harness/` — `harness-agents.ts` (agent construction, the four stage runs, bounded three-iteration implementation/review recovery, conditional MCP guidance, tool-summary logging, completion signals, and the pull-request output schema), `oh-my-pi.ts`, and `models.json`.
-- `factory/prompts/` — the plan, implement, review, and pull-request prompts.
+- `factory/features/tickets/` — `ticket.ts` (front-matter parsing, slug/ID/title derivation, provider repository validation), `ticket-files.ts` (ticket-directory scanning), and `ticket-lifecycle.ts` (attempt, completion, and failure annotations plus terminal movement into `done/`/`failed/`). Cross-feature entry is `index.ts`.
+- `factory/features/plan-tickets/` — one planning iteration: `plan-schema.ts` (`MAX_PARALLEL = 1`, `validatePlan`), `plan-tickets.ts` (planner run and the factory-checkout snapshot check that rejects planner commits/worktree changes), and `plan-prompt.md`.
+- `factory/features/implement-ticket/` — bounded implementer run with the completion signal as the success condition, and `implement-prompt.md`.
+- `factory/features/review-ticket/` — bounded reviewer run plus the clean-workspace postcondition that gates publication, and `review-prompt.md`.
+- `factory/features/publish-pull-request/` — read-only pull-request content stage, commit-count check, final SHA, push, and draft pull-request creation; `PublicationError` carries the failing substage for settlement, and `pull-request-schema.ts` bounds the title/body.
+- `factory/features/ticket-processing/` — the daemon loop (10-second sleep when nothing is pending), one bounded iteration (discovery, planning, attempts, terminal bookkeeping), per-attempt execution (reserve, workspace, implement, review, publish, terminal transition), and failure settlement into `failed/`.
+- `factory/infrastructure/git-provider/` — `git-provider.ts` (the provider contract: credential, repository validation, draft pull-request creation), `create-git-provider.ts` (provider selection from `GIT_PROVIDER`), `github-provider.ts` and `azure-devops-provider.ts` (REST publication with structured HTTP failures, no Octokit, no `gh`, no `az`), and `git.ts` (argv-based command runner with structured `CommandFailure`, repository snapshots, and cleanliness checks).
+- `factory/infrastructure/logging/` — `invocation-log.ts` (run directory, agent log paths, redacted `main.log`).
+- `factory/infrastructure/sandbox/` — `sandbox.ts` (host-network Docker provider, native read-only skill/model mounts, factory credential masking, preflight), `masked.env` (empty credential overlay), `Dockerfile` (Pi 1.1.0, oh-my-pi 18.8.4, RoslynMcp 1.2.3, .NET 10 runtime), and `check-mcp.mjs` (Pi MCP preflight).
+- `factory/infrastructure/agent-runtime/` — `agent-runtime.ts` (generic configured agent execution: sandbox provider, file logging, prompt file, completion signal, structured output, iteration limits), `create-agent.ts`, `stream-events.ts`, `oh-my-pi.ts`, `models.json` with `models-path.ts`, and the read-only `skills/` catalog.
+- `factory/shared/` — `paths.ts`, `sleep.ts`, and `redact-secret.ts`.
 
-The planner is read-only and returns a `<plan>` JSON selection by ticket ID/title only. The implementer and reviewer may continue for up to three iterations but must emit the clean completion signal; after review, the runner independently rejects any uncommitted tracked, generated, or untracked files. The pull-request agent returns content only. Any stage that fails its completion signal, violates workspace cleanliness or read-only constraints, mutates the workspace during the content stage, or fails a Git/API check fails that ticket attempt.
+The planner is read-only and returns a `<plan>` JSON selection by ticket ID/title only; it must complete with `</plan>`. The implementer and reviewer may continue for up to three iterations but must emit `<promise>COMPLETE</promise>`; after review, the runner independently rejects any uncommitted tracked, generated, or untracked files. The pull-request agent returns content in `<pull-request>` tags and must also emit `<promise>COMPLETE</promise>`. Planner failures are invocation-fatal. Implementation, review, and publication failures settle the ticket attempt; publication snapshot failures retain the `pull-request content` substage and original Git diagnostics.
 
 ## Tests
 
 ```bash
 npm test          # tsx --test "factory/**/*.test.ts"
 npm run typecheck
+npm run check:architecture   # dependency-cruiser rules in .dependency-cruiser.cjs
+npm run verify    # typecheck + tests + architecture check
 ```
+
+The architecture is enforced by dependency-cruiser rules in `.dependency-cruiser.cjs`:
+
+- A feature may enter another feature only through its `index.ts`; deep imports of internal modules are rejected.
+- The stage features (`plan-tickets`, `implement-ticket`, `review-ticket`, `publish-pull-request`) never import `ticket-processing` or each other; `ticket-processing` composes them.
+- `tickets` is a leaf: it imports no other feature.
+- Infrastructure (`agent-runtime`, `sandbox`, `git-provider`, `logging`) never imports features, `main.ts`, or `cli/`; `shared/` never imports features or infrastructure; features never import `main.ts` or `cli/`.
+- Unresolvable local imports and circular dependencies are rejected.
+
+The skills catalog under `factory/infrastructure/agent-runtime/skills/` is excluded from the cruise: its files are read-only agent material, not production modules.
 
 Ticket parsing, provider selection, provider repository validation, provider request construction, provider failure and redaction behavior, lifecycle annotations, workspace creation (real Git fixtures), and the fetch seam are covered. The live publication paths (GitHub SSH push plus REST draft pull request, Azure DevOps SSH push plus REST draft pull request) are not exercised by automated tests: they require disposable provider credentials, so end-to-end publication is verified by running the daemon against a real repository.
 
@@ -143,11 +159,11 @@ The five retained proof modes map fixtures to host-side tickets, skills, evaluat
 
 | Mode | Scenario | Fixture | Ticket |
 |---|---|---|---|
-| Feature | `proof/scenarios/feature.json` | `samples/feature` | `samples/tickets/feature.md` |
-| Bug | `proof/scenarios/bug.json` | `samples/bug` | `samples/tickets/bug.md` |
-| Refactor | `proof/scenarios/refactor.json` | `samples/refactor` | `samples/tickets/refactor.md` |
-| VSA feature | `proof/scenarios/vsa-feature.json` | `samples/vsa-feature` | `samples/tickets/vsa-feature.md` |
-| VSA allocation | `proof/scenarios/vsa-allocation-feature.json` | `samples/vsa-allocation-feature` | `samples/tickets/vsa-allocation-feature.md` |
+| Feature | `proof/scenarios/feature.json` | `samples/v1-sandcastle/feature` | `samples/v1-sandcastle/tickets/feature.md` |
+| Bug | `proof/scenarios/bug.json` | `samples/v1-sandcastle/bug` | `samples/v1-sandcastle/tickets/bug.md` |
+| Refactor | `proof/scenarios/refactor.json` | `samples/v1-sandcastle/refactor` | `samples/v1-sandcastle/tickets/refactor.md` |
+| VSA feature | `proof/scenarios/vsa-feature.json` | `samples/v1-sandcastle/vsa-feature` | `samples/v1-sandcastle/tickets/vsa-feature.md` |
+| VSA allocation | `proof/scenarios/vsa-allocation-feature.json` | `samples/v1-sandcastle/vsa-allocation-feature` | `samples/v1-sandcastle/tickets/vsa-allocation-feature.md` |
 
 Preparation creates a timestamped repository under `.run/`, copies only the selected fixture, and initializes that copy as a new Git repository:
 
@@ -167,7 +183,7 @@ The recovery sample projects and recovery ticket remain as samples, but they are
 - `factory/`: the local-ticket runner implementation (see "Runner implementation")
 - `.env.example`: the `GIT_PROVIDER`, `GITHUB_TOKEN`, and `AZURE_DEVOPS_PAT` template at the repository root
 - `samples/`: independent .NET fixture projects and Markdown tickets
-- `standards/skills/`: read-only agent skills and companion material
+- `factory/infrastructure/agent-runtime/skills/`: read-only agent skills and companion material
 - `proof/scenarios/`: five minimal scenario mappings
 - `proof/harness/materialize-fixture.ts`: disposable repository preparation
 - `proof/harness/evaluate.ts`: standalone evaluator dispatch

@@ -1,8 +1,0 @@
-{
-  "id": "inventory-transition-refactor",
-  "fixture": "samples/refactor",
-  "ticket": "samples/tickets/refactor.md",
-  "skills": ["standards/skills/inventory-api"],
-  "evaluator": "proof/evaluators/refactor.sh",
-  "expectedSolution": "proof/expected/refactor"
-}

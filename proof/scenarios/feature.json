@@ -1,8 +1,0 @@
-{
-  "id": "inventory-feature",
-  "fixture": "samples/feature",
-  "ticket": "samples/tickets/feature.md",
-  "skills": ["standards/skills/inventory-api"],
-  "evaluator": "proof/evaluators/feature.sh",
-  "expectedSolution": "proof/expected/feature"
-}
