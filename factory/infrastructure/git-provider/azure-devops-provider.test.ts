@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CommandFailedError } from "./git.js";
+import { CommandFailedError, toCommandFailure } from "./git.js";
 import { AzureDevOpsProvider } from "./azure-devops-provider.js";
 import type { Fetch } from "./git-provider.js";
 
@@ -14,6 +14,7 @@ const request = {
   base: "release/2.1",
   title: "Fix login redirect",
   body: "Handles the expired session case.",
+  mergeStrategy: "squash" as const,
 };
 
 function recordingFetch(status: number, statusText: string, body: string): { fetch: Fetch; calls: { url: string; init: RequestInit }[] } {
@@ -47,7 +48,7 @@ for (const repository of [
 }
 
 test("creates a draft pull request with encoded path segments, Basic auth, and fully qualified refs", async () => {
-  const seam = recordingFetch(201, "Created", JSON.stringify({ pullRequestId: 22 }));
+  const seam = recordingFetch(201, "Created", JSON.stringify({ pullRequestId: 22, isDraft: true, completionOptions: { mergeStrategy: "squash" } }));
 
   const result = await new AzureDevOpsProvider(pat, seam.fetch).createDraftPullRequest(request);
 
@@ -65,19 +66,20 @@ test("creates a draft pull request with encoded path segments, Basic auth, and f
     title: "Fix login redirect",
     description: "Handles the expired session case.",
     isDraft: true,
+    completionOptions: { mergeStrategy: "squash", isDraft: true, deleteSourceBranch: false, bypassPolicy: false },
   });
 });
 
-test("returns the browser-facing PR page, not the REST resource URL from the response", async () => {
+test("returns the browser-facing PR page and the persisted squash preference", async () => {
   const seam = recordingFetch(
     201,
     "Created",
-    JSON.stringify({ pullRequestId: 22, url: "https://dev.azure.com/Contoso%20Team/_apis/git/repositories/fix-login/pullRequests/22" }),
+    JSON.stringify({ pullRequestId: 22, isDraft: true, completionOptions: { mergeStrategy: "squash" }, url: "https://dev.azure.com/Contoso%20Team/_apis/git/repositories/fix-login/pullRequests/22" }),
   );
 
   const result = await new AzureDevOpsProvider(pat, seam.fetch).createDraftPullRequest(request);
 
-  assert.deepEqual(result, { number: 22, url: "https://dev.azure.com/Contoso%20Team/Web%20App/_git/fix-login/pullrequest/22" });
+  assert.deepEqual(result, { number: 22, url: "https://dev.azure.com/Contoso%20Team/Web%20App/_git/fix-login/pullrequest/22", squashPreference: "configured" });
 });
 
 test("non-2xx responses become structured failures with the HTTP status as exit code", async () => {
@@ -102,6 +104,48 @@ test("responses without a valid integer pullRequestId are rejected", async () =>
   await assert.rejects(new AzureDevOpsProvider(pat, seam.fetch).createDraftPullRequest(request), /pullRequestId/);
 });
 
+test("the create response without completion options is verified by one read-back request", async () => {
+  const bodies = [
+    JSON.stringify({ pullRequestId: 22, isDraft: true }),
+    JSON.stringify({ pullRequestId: 22, isDraft: true, completionOptions: { mergeStrategy: "squash" } }),
+  ];
+  const calls: { url: string; init: RequestInit }[] = [];
+  const fetch: Fetch = async (url, init) => {
+    calls.push({ url, init });
+    return new Response(bodies[calls.length - 1]!, { status: 201, statusText: "Created" });
+  };
+
+  const result = await new AzureDevOpsProvider(pat, fetch).createDraftPullRequest(request);
+
+  assert.equal(result.squashPreference, "configured");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]!.init.method, "GET");
+  assert.equal(calls[1]!.url, "https://dev.azure.com/Contoso%20Team/Web%20App/_apis/git/repositories/fix-login/pullrequests/22?api-version=7.1");
+});
+
+test("a persisted merge strategy other than squash fails the draft publication and records the created PR URL", async () => {
+  const seam = recordingFetch(201, "Created", JSON.stringify({ pullRequestId: 22, isDraft: true, completionOptions: { mergeStrategy: "no-fast-forward" } }));
+
+  await assert.rejects(new AzureDevOpsProvider(pat, seam.fetch).createDraftPullRequest(request), (error: unknown) => {
+    assert.ok(error instanceof CommandFailedError);
+    const diagnostic = toCommandFailure(error, "draft pull request");
+    assert.match(diagnostic.stderr, /no-fast-forward.*squash/);
+    assert.match(diagnostic.stderr, /https:\/\/dev\.azure\.com\/Contoso%20Team\/Web%20App\/_git\/fix-login\/pullrequest\/22/);
+    return true;
+  });
+  assert.equal(seam.calls.length, 1);
+});
+
+test("a response that is not a draft fails the draft publication", async () => {
+  const seam = recordingFetch(201, "Created", JSON.stringify({ pullRequestId: 22, isDraft: false, completionOptions: { mergeStrategy: "squash" } }));
+
+  await assert.rejects(new AzureDevOpsProvider(pat, seam.fetch).createDraftPullRequest(request), /draft/);
+});
+
+test("secrets reports the raw PAT and the derived Basic value", () => {
+  assert.deepEqual(new AzureDevOpsProvider(pat).secrets(), [pat, basicAuth]);
+});
+
 test("transport failures become structured failures with redacted diagnostics", async () => {
   const failingFetch: Fetch = async () => {
     throw new Error(`getaddrinfo ENOTFOUND dev.azure.com while authenticating ${pat} as Basic ${basicAuth}`);
@@ -115,3 +159,85 @@ test("transport failures become structured failures with redacted diagnostics", 
     return true;
   });
 });
+
+test("read-back rejects a non-draft pull request even when squash is persisted", async () => {
+  let calls = 0;
+  const fetch: Fetch = async () => new Response(JSON.stringify(++calls === 1
+    ? { pullRequestId: 22, isDraft: true }
+    : { pullRequestId: 22, isDraft: false, completionOptions: { mergeStrategy: "squash" } }), { status: calls === 1 ? 201 : 200 });
+
+  await assert.rejects(new AzureDevOpsProvider(pat, fetch).createDraftPullRequest(request), (error: unknown) => {
+    assert.ok(error instanceof CommandFailedError);
+    assert.match(error.failure.command, /^GET /);
+    assert.match(error.failure.stderr, /non-draft/);
+    assert.match(error.failure.stderr, /pullrequest\/22/);
+    return true;
+  });
+  assert.equal(calls, 2);
+});
+
+test("read-back rejects an HTTP error even when its body describes a draft with squash", async () => {
+  let calls = 0;
+  const fetch: Fetch = async () => {
+    calls++;
+    return new Response(JSON.stringify(calls === 1
+      ? { pullRequestId: 22, isDraft: true }
+      : { pullRequestId: 22, isDraft: true, completionOptions: { mergeStrategy: "squash" }, diagnostic: `${pat} ${basicAuth}` }),
+    { status: calls === 1 ? 201 : 503, statusText: calls === 1 ? "Created" : "Service Unavailable" });
+  };
+
+  await assert.rejects(new AzureDevOpsProvider(pat, fetch).createDraftPullRequest(request), (error: unknown) => {
+    assert.ok(error instanceof CommandFailedError);
+    assert.equal(error.failure.exitCode, 503);
+    assert.match(error.failure.command, /^GET /);
+    assert.match(error.failure.stderr, /HTTP 503/);
+    assert.match(error.failure.stderr, /pullrequest\/22/);
+    assert.ok(!JSON.stringify(error.failure).includes(pat));
+    assert.ok(!JSON.stringify(error.failure).includes(basicAuth));
+    return true;
+  });
+  assert.equal(calls, 2);
+});
+
+test("read-back rejects a different pull-request identity", async () => {
+  let calls = 0;
+  const fetch: Fetch = async () => new Response(JSON.stringify(++calls === 1
+    ? { pullRequestId: 22, isDraft: true }
+    : { pullRequestId: 23, isDraft: true, completionOptions: { mergeStrategy: "squash" } }), { status: calls === 1 ? 201 : 200 });
+
+  await assert.rejects(new AzureDevOpsProvider(pat, fetch).createDraftPullRequest(request), (error: unknown) => {
+    assert.ok(error instanceof CommandFailedError);
+    assert.match(error.failure.stderr, /23.*22/);
+    assert.match(error.failure.stderr, /pullrequest\/22/);
+    return true;
+  });
+  assert.equal(calls, 2);
+});
+
+for (const scenario of [
+  { name: "missing preference", response: JSON.stringify({ pullRequestId: 22, isDraft: true }), reason: /merge strategy none.*squash/ },
+  { name: "malformed response", response: `invalid JSON ${pat} ${basicAuth}`, reason: /read-back response is invalid/ },
+  { name: "transport failure", response: undefined, reason: /connection lost/ },
+]) {
+  test(`read-back ${scenario.name} retains the created URL in credential-safe settlement diagnostics`, async () => {
+    let calls = 0;
+    const fetch: Fetch = async () => {
+      calls++;
+      if (calls === 1) return new Response(JSON.stringify({ pullRequestId: 22, isDraft: true }), { status: 201 });
+      if (scenario.response === undefined) throw new Error(`connection lost ${pat} ${basicAuth}`);
+      return new Response(scenario.response, { status: 200 });
+    };
+
+    await assert.rejects(new AzureDevOpsProvider(pat, fetch).createDraftPullRequest(request), (error: unknown) => {
+      assert.ok(error instanceof CommandFailedError);
+      const diagnostic = toCommandFailure(error, "draft pull request");
+      assert.match(diagnostic.command, /^GET /);
+      assert.match(diagnostic.stderr, scenario.reason);
+      assert.match(diagnostic.stderr, /https:\/\/dev\.azure\.com\/Contoso%20Team\/Web%20App\/_git\/fix-login\/pullrequest\/22/);
+      assert.ok(!JSON.stringify(diagnostic).includes(pat));
+      assert.ok(!JSON.stringify(diagnostic).includes(basicAuth));
+      return true;
+    });
+    assert.equal(calls, 2);
+  });
+}

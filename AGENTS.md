@@ -4,8 +4,6 @@
 
 These instructions apply throughout the repository unless a more specific `AGENTS.md` applies. This is a TypeScript ESM runner for local Markdown tickets using Sandcastle, Pi or oh-my-pi, retained Git workspaces, and draft pull requests on GitHub or Azure DevOps.
 
-Treat the hybrid vertical-slice architecture described in `docs/plans/factory-hybrid-vsa-refactoring-plan.md` as implemented. That document is historical design context, not a pending migration checklist. Preserve this architecture when making changes; do not restore the old orchestration, ticket, workspace, prompt, or harness runtime locations.
-
 ## Architecture and ownership
 
 `factory/main.ts` is the composition root: CLI/configuration, repository-root resolution, dependency construction, startup checks, and invocation of `processTickets`. Polling state and ticket settlement belong to the workflow, not the host.
@@ -14,12 +12,12 @@ The six flat features under `factory/features/` own:
 
 | Feature | Responsibility |
 |---|---|
-| `tickets` | Ticket identity, metadata, discovery/loading, annotations, and filesystem movement |
-| `ticket-processing` | Daemon state, bounded iterations, attempts, workspace lifetime, sequential execution, settlement, and outcomes |
+| `tickets` | Ticket identity, metadata, discovery/loading, attempt/checkpoint/completion/failure annotations, and filesystem movement |
+| `ticket-processing` | Daemon state, bounded iterations, attempts, workspace lifetime, checkpoint policy, sequential execution, settlement, and outcomes |
 | `plan-tickets` | Planner prompt/schema, validated selections, completion signal, and factory immutability |
-| `implement-ticket` | Implementation prompt/input, iteration limit, and completion enforcement |
-| `review-ticket` | Review prompt/input, iteration limit, completion enforcement, and clean-workspace postcondition |
-| `publish-pull-request` | Read-only PR content generation, validation, commits-ahead check, final SHA, push, and draft publication |
+| `implement-ticket` | Implementation prompt/input, single-iteration loop, structured stage-message contract, and completion enforcement |
+| `review-ticket` | Review prompt/input, single-iteration loop, structured stage-message contract, and completion enforcement |
+| `publish-pull-request` | Read-only PR content generation, validation, commits-ahead and change-set checks, final SHA, push, and draft publication |
 
 - Enter another feature only through its narrow `index.ts`, including type-only imports. Same-feature helpers and tests may use their own internals.
 - `ticket-processing` may call public ticket and stage APIs. Stage features must not import each other or the coordinator, even through public APIs. `tickets` must not import processing or stages.
@@ -51,12 +49,18 @@ Preserve these unless explicitly changing the corresponding behavior:
 - Sleep 10 seconds when no tickets are pending. Do not add sleep/backoff when the planner selects nothing while tickets remain pending.
 - Planning uses the configured harness and selects at most one ticket by ID/title. Reject terminal, unknown, duplicate, title-mutated, excess, and incomplete selections. Planning/validation failures are invocation-fatal. Preserve factory HEAD/porcelain snapshot comparison semantics.
 - Attempts reserve fresh retained directories and `agent-tickets/<slug>-<attempt-id>` branches. Preserve clone validation/postconditions and retain workspaces on failure.
-- Preserve order: reserve → attempt annotation → workspace → implementation → review/cleanliness → PR content/immutability → commit count → final SHA → push → draft PR → completion annotation/movement.
-- Agents create commits; do not introduce a TypeScript commit stage. Implementation/review allow three iterations and require `<promise>COMPLETE</promise>`. Planning requires `</plan>` completion. PR content requires closing `<pull-request>` output tags and `<promise>COMPLETE</promise>`.
-- Review success requires a clean index/worktree, including untracked files. PR content generation must not change HEAD or porcelain status; a branch with no commits ahead cannot publish.
-- Publication returns final SHA and provider-neutral PR data, not a terminal ticket outcome. Preserve failure substages: `pull-request content`, `commit count`, `final SHA`, `push`, and `draft pull request`. Unwrap publication errors before converting command diagnostics. The coordinator alone owns terminal reporting/settlement.
-- Attempt failures receive guarded diagnostic annotation/movement without stopping other attempts. Settlement failures must not recursively retry settlement.
-- After successful publication, annotation/movement failure remains a settlement failure with a completed outcome; movement failure yields an empty destination. Never republish or reclassify that attempt.
+- Preserve order: reserve → attempt annotation → workspace → implementation → implementation checkpoint → implementation annotation → review → review checkpoint → review annotation → PR content/immutability → commit count → change set → final SHA → push → draft PR → completion annotation/movement.
+- Agents never create commits; the runner owns every checkpoint commit in `ticket-processing/stage-commit.ts`. Implementation/review allow three single-iteration runs and require one structured stage message (`<implementation>`/`<review>`) plus `<promise>COMPLETE</promise>`; Sandcastle supports structured output only for single-iteration runs, so the stage feature owns the loop. Planning requires `</plan>` completion. PR content requires closing `<pull-request>` output tags and `<promise>COMPLETE</promise>`.
+- Each successful mutating stage produces exactly one checkpoint commit. Preserve the checkpoint contract: recheck the expected branch and the HEAD captured at stage entry, require no unmerged porcelain entries, `git add --all` without force-adding ignored files, compute `Factory-Changes` from the staged tree, append the runner-owned trailers (`Factory-Ticket`, `Factory-Attempt`, `Factory-Stage`, `Factory-Outcome`, `Factory-Changes`, `Factory-Agent-Log`), reject provider credential material (including Azure's derived Basic value) before writing the message, commit with `--allow-empty` as argv, then require exactly one new single-parent commit whose parent is the captured HEAD, on the expected branch, with a completely clean index/worktree including untracked files. Return `{ sha, parent, changes }` and advance only after the postconditions.
+- After hooks run, compare the checkpoint's actual tree-change outcome against its recorded `Factory-Changes` trailer. A mismatch fails the checkpoint and retains the commit without reset, amendment, or retry.
+- An empty checkpoint is required when a successful stage changes no files, and its message states that outcome. Failed/incomplete stages get no checkpoint: retain the dirty workspace and the last successful checkpoint, and never reset, retry, clean, amend, or rebase. A checkpoint failure settles with stage `implementation commit` or `review commit`; a checkpoint annotation failure is a distinct stage that stops further stages without repeating the commit. Preserve the original `CommandFailedError` when checkpoint commands fail.
+- Each checkpoint writes one `main.log` trace record (parent SHA, checkpoint SHA, changes, agent-log basename) and appends the same record to the ticket. The agent-log value is a run-relative basename, never an absolute `.logs` path.
+- Review success requires a clean index/worktree, including untracked files, enforced at the checkpoint. PR content generation must not change HEAD or porcelain status; record its success at the workspace SHA it started from immediately after immutability validation and before publication checks or remote operations. A content trace-write failure is a `pull-request content` failure before push/provider HTTP. A branch with no commits ahead cannot publish, and the net tree diff between `origin/<baseBranch>` and HEAD must be nonempty, so checkpoint-only history cannot publish.
+- Publication returns final SHA, provider-neutral PR data, and the persisted merge-method preference, not a terminal ticket outcome. Preserve failure substages: `pull-request content`, `commit count`, `change set`, `final SHA`, `push`, and `draft pull request`. Unwrap publication errors before converting command diagnostics. The coordinator alone owns terminal reporting/settlement.
+- Squash-on-merge is a preference, never permission to merge: pull requests stay draft, no auto-complete, no policy bypass, no source-branch deletion, no repository-settings rewrite, and no local squash. Azure DevOps create requests carry `completionOptions` with `mergeStrategy: "squash"`, `isDraft: true`, `deleteSourceBranch: false`, and `bypassPolicy: false`, with no `autoCompleteSetBy` and no deprecated `squashMerge`; validate the returned draft state and persisted strategy, using one read-back GET when the create response omits it, and treat absence, non-draft, or a mismatched strategy as a structured draft-publication failure that records the created PR URL. GitHub's REST API has no per-PR merge-method field: create the draft normally, report `unsupported`, append a short runner-owned PR-body note requesting squash merge within the existing 5000-character body limit, and record the limitation in the completion annotation. Never use GraphQL auto-merge, ready-to-merge, a merge endpoint, or repository settings.
+- Azure read-back must succeed at HTTP level and match the created PR ID, draft state, and requested squash strategy. Keep validation reasons and the known browser-facing created PR URL in structured command diagnostics consumed by settlement, including read-back transport and malformed-response failures; redact raw and derived credentials.
+- Attempt failures receive guarded diagnostic annotation/movement without stopping other attempts. Guard settlement log writes independently: if `main.log` is unavailable, emit credential-redacted diagnostics to stderr and still attempt terminal settlement. Settlement failures must not recursively retry settlement.
+- After successful publication, annotation/movement failure remains a settlement failure with a completed outcome, even if settlement logging also fails; movement failure yields an empty destination. Never republish or reclassify that attempt.
 
 ## Editing and verification
 
@@ -78,7 +82,9 @@ npm run sandcastle -- --help       # real CLI/import smoke; no credentials or Do
 
 ## Documentation and repository safety
 
-When changing the codebase, review and maintain both `README.md` and `AGENTS.md` in the same change so they stay aligned with the implementation. Update affected runtime ownership, commands, configuration, behavior, and contributor instructions; leave unaffected content unchanged. Keep historical plans historical. Do not propagate stale claims that TypeScript creates agent commits or that the daemon loop lives in `main.ts`.
+When changing the codebase, review and maintain both `README.md` and `AGENTS.md` in the same change so they stay aligned with the implementation. Update affected runtime ownership, commands, configuration, behavior, and contributor instructions; leave unaffected content unchanged. Keep historical plans historical. Do not propagate stale claims that agents create commits, that the runner performs no checkpoint commits, or that the daemon loop lives in `main.ts`.
+
+Planning-only changes belong in `docs/plans/`. Do not add proposed-plan links, summaries, future behavior, or plan-specific instructions to `README.md`, `AGENTS.md`, or other operational documentation before implementation. Update those documents only when the corresponding behavior is implemented and verified; describe actual behavior, not intended behavior.
 
 Preserve unrelated skill catalogs, samples, proof scenarios/evaluators/expected solutions, and historical runners unless the requested change requires touching them. Do not relocate or delete skill assets solely to match the runtime tree; use actual consumers to establish mount sources. Proof scenarios are independent local evaluator workflows, not live remote-publication evidence.
 

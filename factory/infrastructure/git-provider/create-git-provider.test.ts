@@ -33,7 +33,7 @@ test("the injected fetch seam reaches provider requests without network access",
   const calls: string[] = [];
   const provider = createGitProvider({ GIT_PROVIDER: "azure-devops", AZURE_DEVOPS_PAT: "vso_pat_secret_123" }, async (url, init) => {
     calls.push(`${init.method} ${url}`);
-    return new Response(JSON.stringify({ pullRequestId: 22 }), { status: 201 });
+    return new Response(JSON.stringify({ pullRequestId: 22, isDraft: true, completionOptions: { mergeStrategy: "squash" } }), { status: 201 });
   });
 
   const result = await provider.createDraftPullRequest({
@@ -42,8 +42,9 @@ test("the injected fetch seam reaches provider requests without network access",
     base: "main",
     title: "Fix login redirect",
     body: "Body.",
+    mergeStrategy: "squash",
   });
 
   assert.deepEqual(calls, ["POST https://dev.azure.com/contoso/web/_apis/git/repositories/fix-login/pullrequests?api-version=7.1"]);
-  assert.deepEqual(result, { number: 22, url: "https://dev.azure.com/contoso/web/_git/fix-login/pullrequest/22" });
+  assert.deepEqual(result, { number: 22, url: "https://dev.azure.com/contoso/web/_git/fix-login/pullrequest/22", squashPreference: "configured" });
 });

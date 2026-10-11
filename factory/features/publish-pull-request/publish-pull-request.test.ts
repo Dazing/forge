@@ -47,8 +47,8 @@ function git(cwd: string, args: string[]): Promise<string> {
   return runCommand("git", ["-C", cwd, "-c", "user.email=publish@test", "-c", "user.name=Publish", ...args], `running git ${args[0]}`);
 }
 
-/** Real workspace: bare remote, pushed main, ticket branch with one commit ahead. */
-async function workspaceWithRemote(): Promise<string> {
+/** Real workspace: bare remote, pushed main, ticket branch with one commit ahead, optionally only an empty checkpoint commit. */
+async function workspaceWithRemote(mode: "changed" | "empty-checkpoint" = "changed"): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "sandcastle-publish-"));
   const remote = join(root, "remote.git");
   const workspace = join(root, "workspace");
@@ -60,26 +60,31 @@ async function workspaceWithRemote(): Promise<string> {
   await git(workspace, ["commit", "-m", "init"]);
   await git(workspace, ["push", "origin", "main"]);
   await git(workspace, ["checkout", "-b", BRANCH]);
-  await writeFile(join(workspace, "login.ts"), "export const redirect = true;\n");
-  await git(workspace, ["add", "login.ts"]);
-  await git(workspace, ["commit", "-m", "fix login redirect"]);
+  if (mode === "changed") {
+    await writeFile(join(workspace, "login.ts"), "export const redirect = true;\n");
+    await git(workspace, ["add", "login.ts"]);
+    await git(workspace, ["commit", "-m", "fix login redirect"]);
+  } else {
+    await git(workspace, ["commit", "--allow-empty", "-m", "chore: stage checkpoint"]);
+  }
   return workspace;
 }
 
-function contentAgent(mutate?: () => Promise<void>): AgentRunner {
+function contentAgent(body = "Verified with curl.", mutate?: () => Promise<void>): AgentRunner {
   return async <TOutput>(request: AgentRunRequest<TOutput>) => {
     if (mutate) {
       await mutate();
     }
-    return { iterations: [], commits: [], stdout: "", branch: BRANCH, completionSignal: "<promise>COMPLETE</promise>", output: { title: "Fix login redirect", body: "Verified with curl." } as TOutput };
+    return { iterations: [], commits: [], stdout: "", branch: BRANCH, completionSignal: "<promise>COMPLETE</promise>", output: { title: "Fix login redirect", body } as TOutput };
   };
 }
 
-function providerStub(outcome: "ok" | "http-failure"): { provider: GitProvider; requests: DraftPullRequestRequest[] } {
+function providerStub(outcome: "ok" | "http-failure", support: "configured" | "unsupported" = "unsupported"): { provider: GitProvider; requests: DraftPullRequestRequest[] } {
   const requests: DraftPullRequestRequest[] = [];
   const provider: GitProvider = {
     name: "github",
     credential: "gh_secret_abc",
+    mergeStrategySupport: support,
     validateRepository: () => undefined,
     createDraftPullRequest: async (request) => {
       requests.push(request);
@@ -89,33 +94,70 @@ function providerStub(outcome: "ok" | "http-failure"): { provider: GitProvider; 
           undefined,
         );
       }
-      return { number: 7, url: "https://github.com/acme/app/pull/7" } satisfies DraftPullRequest;
+      return { number: 7, url: "https://github.com/acme/app/pull/7", squashPreference: support } satisfies DraftPullRequest;
     },
+    secrets: () => ["gh_secret_abc"],
   };
   return { provider, requests };
 }
 
 function input(workspacePath: string, runAgent: AgentRunner, gitProvider: GitProvider): PublishPullRequestInput {
-  return { ticket, workspacePath, branch: BRANCH, attemptId: "1", harness: "pi", runAgent, gitProvider };
+  return { ticket, workspacePath, branch: BRANCH, attemptId: "1", harness: "pi", runAgent, gitProvider, onContentComplete: async () => {} };
 }
 
-test("publication pushes the branch and returns the final SHA and draft pull request", async () => {
+test("publication pushes the branch and returns the final SHA, draft pull request, and squash preference", async () => {
   const workspace = await workspaceWithRemote();
   const { provider, requests } = providerStub("ok");
   const result = await publishPullRequest(input(workspace, contentAgent(), provider));
   const expectedSha = (await git(workspace, ["rev-parse", "HEAD"])).trim();
   assert.equal(result.finalSha, expectedSha);
   assert.equal(result.pullRequest.url, "https://github.com/acme/app/pull/7");
-  assert.deepEqual(requests[0], { repositoryUrl: ticket.repository, head: BRANCH, base: "main", title: "Fix login redirect", body: "Verified with curl." });
+  assert.equal(result.squashPreference, "unsupported");
+  assert.equal(requests[0]!.mergeStrategy, "squash");
   const remote = join(workspace, "..", "remote.git");
   const pushed = (await runCommand("git", ["-C", remote, "rev-parse", `refs/heads/${BRANCH}`], "reading pushed branch")).trim();
   assert.equal(pushed, expectedSha);
 });
 
+test("a branch whose commits change no files fails the change set before push and provider calls", async () => {
+  const workspace = await workspaceWithRemote("empty-checkpoint");
+  const { provider, requests } = providerStub("ok");
+
+  await assert.rejects(publishPullRequest(input(workspace, contentAgent(), provider)), (error: unknown) => {
+    assert.ok(error instanceof PublicationError);
+    assert.equal(error.substage, "change set");
+    return true;
+  });
+  assert.equal(requests.length, 0);
+  const remote = join(workspace, "..", "remote.git");
+  await assert.rejects(runCommand("git", ["-C", remote, "rev-parse", `refs/heads/${BRANCH}`], "reading pushed branch"));
+});
+
+test("an unsupported provider appends the runner's squash note inside the body limit", async () => {
+  const workspace = await workspaceWithRemote();
+  const { provider, requests } = providerStub("ok", "unsupported");
+
+  await publishPullRequest(input(workspace, contentAgent("y".repeat(5000)), provider));
+
+  const body = requests[0]!.body;
+  assert.ok(body.length <= 5000, `the published body stays within the provider limit, got ${body.length}`);
+  assert.match(body, /squash/);
+  assert.match(body, /^y+/, "the agent prose is preserved at the start");
+});
+
+test("a configured provider publishes the agent body unchanged", async () => {
+  const workspace = await workspaceWithRemote();
+  const { provider, requests } = providerStub("ok", "configured");
+
+  await publishPullRequest(input(workspace, contentAgent("Verified with curl."), provider));
+
+  assert.equal(requests[0]!.body, "Verified with curl.");
+});
+
 test("content stage mutations reject publication before any provider call", async () => {
   const workspace = await workspaceWithRemote();
   const { provider, requests } = providerStub("ok");
-  const runAgent = contentAgent(async () => writeFile(join(workspace, "scratch.md"), "uncommitted\n"));
+  const runAgent = contentAgent("Verified with curl.", async () => writeFile(join(workspace, "scratch.md"), "uncommitted\n"));
   const error = await publishPullRequest(input(workspace, runAgent, provider)).catch((e) => e as PublicationError);
   assert.ok(error instanceof PublicationError);
   assert.equal(error.substage, "pull-request content");
@@ -170,7 +212,7 @@ test("an initial repository snapshot failure keeps the content substage and Git 
   t.after(() => rm(workspace, { recursive: true, force: true }));
   const { provider, requests } = providerStub("ok");
   let agentStarted = false;
-  const runAgent = contentAgent(async () => { agentStarted = true; });
+  const runAgent = contentAgent("Verified with curl.", async () => { agentStarted = true; });
   await assert.rejects(publishPullRequest(input(workspace, runAgent, provider)), (error: unknown) => {
     assert.ok(error instanceof PublicationError);
     assert.equal(error.substage, "pull-request content");

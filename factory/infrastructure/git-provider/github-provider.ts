@@ -16,11 +16,18 @@ const pullResponseSchema = z.object({
 /** GitHub provider: canonical `git@github.com:<owner>/<repository>.git` SSH URLs and the GitHub REST pulls endpoint. */
 export class GitHubProvider implements GitProvider {
   readonly name = "github" as const;
+  // GitHub's REST pull-request endpoints have no per-pull-request merge-method field; repository-level merge settings are never rewritten.
+  readonly mergeStrategySupport = "unsupported" as const;
 
   constructor(
     readonly credential: string,
     private readonly fetchImpl: Fetch = globalThis.fetch,
   ) {}
+
+  /** Raw token; GitHub has no derived credential form. */
+  secrets(): readonly string[] {
+    return [this.credential];
+  }
 
   /** Require the exact GitHub SSH form; HTTPS, GitHub Enterprise, ssh://, and missing `.git` are rejected. */
   validateRepository(repositoryUrl: string): void {
@@ -95,6 +102,6 @@ export class GitHubProvider implements GitProvider {
       throw failure(response.status, new Error(`GitHub response is missing a valid number and html_url: ${error instanceof Error ? error.message : String(error)}`));
     }
 
-    return { number: parsed.number, url: parsed.html_url };
+    return { number: parsed.number, url: parsed.html_url, squashPreference: "unsupported" };
   }
 }

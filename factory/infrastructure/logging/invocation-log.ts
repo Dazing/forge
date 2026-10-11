@@ -4,7 +4,7 @@ import { redactSecret } from "../../shared/redact-secret.js";
 
 // Invocation run directory: agent log paths and the append-only main.log.
 
-/** Structured record appended to the invocation main.log. */
+/** Structured record appended to the invocation main.log. Checkpoint fields are generic; ticket-aware assembly stays with the caller. */
 export type MainLogRecord = Readonly<{
   timestamp: string;
   ticketId?: string;
@@ -12,6 +12,10 @@ export type MainLogRecord = Readonly<{
   stage: string;
   operation: string;
   status: string;
+  parentSha?: string;
+  checkpointSha?: string;
+  changes?: "changed" | "unchanged";
+  agentLogBasename?: string;
   stdout?: string;
   stderr?: string;
 }>;
@@ -36,14 +40,25 @@ export class InvocationLogger {
     return resolve(this.runDir, `${name}.log`);
   }
 
+  /** Basename of one stage's agent log, the form recorded in checkpoint trailers. */
+  agentLogBasename(name: string): string {
+    return `${name}.log`;
+  }
+
   /** Append one redacted, human-readable record to main.log. */
   async record(record: MainLogRecord): Promise<void> {
     const identity = [
       ...(record.ticketId === undefined ? [] : [`ticket=${record.ticketId}`]),
       ...(record.attemptId === undefined ? [] : [`attempt=${record.attemptId}`]),
     ].join(" ");
+    const boundaries = [
+      ...(record.parentSha === undefined ? [] : [`parent=${record.parentSha}`]),
+      ...(record.checkpointSha === undefined ? [] : [`checkpoint=${record.checkpointSha}`]),
+      ...(record.changes === undefined ? [] : [`changes=${record.changes}`]),
+      ...(record.agentLogBasename === undefined ? [] : [`agent-log=${record.agentLogBasename}`]),
+    ].join(" ");
     const lines = [
-      [record.timestamp, identity, `stage=${record.stage}`, `operation=${record.operation}`, `status=${record.status}`]
+      [record.timestamp, identity, `stage=${record.stage}`, `operation=${record.operation}`, `status=${record.status}`, boundaries]
         .filter((part) => part.length > 0)
         .join(" "),
     ];

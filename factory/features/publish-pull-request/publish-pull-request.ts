@@ -1,18 +1,20 @@
 import { Output } from "@ai-hero/sandcastle";
 import { resolve } from "node:path";
 import { requireUnchanged, runGit, snapshotRepository } from "../../infrastructure/git-provider/git.js";
-import type { DraftPullRequest, GitProvider } from "../../infrastructure/git-provider/git-provider.js";
+import type { DraftPullRequest, GitProvider, SquashPreference } from "../../infrastructure/git-provider/git-provider.js";
 import type { AgentRunner } from "../../infrastructure/agent-runtime/agent-runtime.js";
 import { type AgentHarness } from "../../infrastructure/sandbox/sandbox.js";
 import type { Ticket } from "../tickets/index.js";
-import { pullRequestSchema } from "./pull-request-schema.js";
+import { MAX_BODY_CHARS, pullRequestSchema } from "./pull-request-schema.js";
 
 // Publication: read-only content stage, commits-ahead validation, final SHA, push, and draft pull-request creation.
 // Each substage failure carries its name so settlement records the correct stage with the original diagnostics.
 
 const COMPLETE = "<promise>COMPLETE</promise>";
+// Runner-owned note appended when the provider cannot persist a per-pull-request merge method.
+const squashNote = "\n\nMerge method: squash. This provider cannot record a merge method on a draft pull request; select squash when merging.";
 
-export type PublicationSubstage = "pull-request content" | "commit count" | "final SHA" | "push" | "draft pull request";
+export type PublicationSubstage = "pull-request content" | "commit count" | "change set" | "final SHA" | "push" | "draft pull request";
 
 /** Publication failure carrying the failing substage and the original cause; the coordinator unwraps it before building command diagnostics. */
 export class PublicationError extends Error {
@@ -33,11 +35,14 @@ export interface PublishPullRequestInput {
   readonly harness: AgentHarness;
   readonly runAgent: AgentRunner;
   readonly gitProvider: GitProvider;
+  /** Record verified read-only content at its entry SHA before any publication side effects. */
+  readonly onContentComplete: (head: string) => Promise<void>;
 }
 
 export interface PublishResult {
   readonly finalSha: string;
   readonly pullRequest: DraftPullRequest;
+  readonly squashPreference: SquashPreference;
 }
 
 /** Publish one attempt: content, immutability, commits ahead of base, final SHA, push, draft pull request. */
@@ -60,6 +65,7 @@ export async function publishPullRequest(input: PublishPullRequestInput): Promis
     }
     content = result.output;
     requireUnchanged("pull-request content stage", "ticket workspace", beforeContent, await snapshotRepository(input.workspacePath));
+    await input.onContentComplete(beforeContent.head);
   } catch (error) {
     throw new PublicationError("pull-request content", error);
   }
@@ -71,6 +77,15 @@ export async function publishPullRequest(input: PublishPullRequestInput): Promis
     }
   } catch (error) {
     throw new PublicationError("commit count", error);
+  }
+
+  try {
+    const changed = (await runGit(input.workspacePath, ["diff", "--name-only", `origin/${input.ticket.baseBranch}`, "HEAD"], "comparing the net tree diff against the base branch")).trim();
+    if (changed.length === 0) {
+      throw new Error(`Ticket branch ${input.branch} has no net file changes against origin/${input.ticket.baseBranch}.`);
+    }
+  } catch (error) {
+    throw new PublicationError("change set", error);
   }
 
   let finalSha: string;
@@ -87,14 +102,18 @@ export async function publishPullRequest(input: PublishPullRequestInput): Promis
   }
 
   try {
+    const body = input.gitProvider.mergeStrategySupport === "unsupported"
+      ? `${content.body.slice(0, MAX_BODY_CHARS - squashNote.length)}${squashNote}`
+      : content.body;
     const pullRequest = await input.gitProvider.createDraftPullRequest({
       repositoryUrl: input.ticket.repository,
       head: input.branch,
       base: input.ticket.baseBranch,
       title: content.title,
-      body: content.body,
+      body,
+      mergeStrategy: "squash",
     });
-    return { finalSha, pullRequest };
+    return { finalSha, pullRequest, squashPreference: pullRequest.squashPreference };
   } catch (error) {
     throw new PublicationError("draft pull request", error);
   }

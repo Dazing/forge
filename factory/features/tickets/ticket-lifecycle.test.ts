@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { annotateAttempt, annotateCompletion, annotateFailure, moveTicket } from "./ticket-lifecycle.js";
+import { annotateAttempt, annotateCompletion, annotateFailure, annotateStageCheckpoint, moveTicket } from "./ticket-lifecycle.js";
 
 async function ticketFile(body: string, name = "fix-login.md"): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "sandcastle-lifecycle-"));
@@ -41,12 +41,31 @@ test("completion section records workspace, branch, base branch, final SHA, and 
     baseBranch: "release/2.1",
     finalSha: "9f3ab12c5d6e7f8091a2b3c4d5e6f70819203040",
     pullRequestUrl: "https://github.com/acme/app/pull/7",
+    squashPreference: "configured",
   });
   const final = await readFile(path, "utf8");
   assert.match(final, /## Completed 1a2b3c \(2026-10-11T08:00:00\.000Z\)/);
   assert.match(final, /- Base branch: `release\/2\.1`/);
   assert.match(final, /- Final commit: `9f3ab12c5d6e7f8091a2b3c4d5e6f70819203040`/);
   assert.match(final, /- Draft PR: https:\/\/github\.com\/acme\/app\/pull\/7/);
+});
+
+test("completion section records the persisted merge method", async () => {
+  const path = await ticketFile("# Fix login\nBody.");
+
+  await annotateCompletion(path, {
+    timestamp: "2026-10-11T08:00:00.000Z",
+    attemptId: "1a2b3c",
+    workspacePath: "/factory/.workspaces/fix-login-1a2b3c",
+    branch: "agent-tickets/fix-login-1a2b3c",
+    baseBranch: "main",
+    finalSha: "9".repeat(40),
+    pullRequestUrl: "https://github.com/acme/app/pull/7",
+    squashPreference: "unsupported",
+  });
+
+  const final = await readFile(path, "utf8");
+  assert.match(final, /- Merge method: squash \(unsupported\)/);
 });
 
 test("failure section records stage, sanitized command, exit status, and fenced output", async () => {
@@ -130,4 +149,41 @@ test("collision on the attempt-suffixed destination refuses to overwrite", async
   await writeFile(join(doneDir, "fix-login-1a2b3c.md"), "# Existing attempt\n");
   await assert.rejects(moveTicket(path, doneDir, "1a2b3c"), /already exists/);
   assert.equal(await readFile(join(doneDir, "fix-login-1a2b3c.md"), "utf8"), "# Existing attempt\n");
+});
+
+test("stage checkpoint section records attempt, stage, commits, changes, and the agent log basename", async () => {
+  const path = await ticketFile("# Fix login\nBody.");
+
+  await annotateStageCheckpoint(path, {
+    timestamp: "2026-10-11T07:30:00.000Z",
+    attemptId: "1a2b3c",
+    stage: "implement",
+    parentSha: "1111111111111111111111111111111111111111",
+    checkpointSha: "2222222222222222222222222222222222222222",
+    changes: "changed",
+    agentLogBasename: "implement-0123456789abcdef-1a2b3c.log",
+  });
+
+  const final = await readFile(path, "utf8");
+  assert.ok(final.startsWith("# Fix login\nBody."));
+  assert.match(final, /## Stage checkpoint implement \(2026-10-11T07:30:00\.000Z\)/);
+  assert.match(final, /- Attempt ID: `1a2b3c`/);
+  assert.match(final, /- Stage: `implement`/);
+  assert.match(final, /- Parent commit: `1{40}`/);
+  assert.match(final, /- Checkpoint commit: `2{40}`/);
+  assert.match(final, /- Changes: changed/);
+  assert.match(final, /- Agent log: `implement-0123456789abcdef-1a2b3c\.log`/);
+});
+
+test("stage checkpoint annotations append in order without rewriting earlier sections", async () => {
+  const path = await ticketFile("# Fix login\nBody.");
+
+  await annotateStageCheckpoint(path, { timestamp: "2026-10-11T07:30:00.000Z", attemptId: "1a2b3c", stage: "implement", parentSha: "1".repeat(40), checkpointSha: "2".repeat(40), changes: "changed", agentLogBasename: "implement-1a2b3c.log" });
+  await annotateStageCheckpoint(path, { timestamp: "2026-10-11T07:40:00.000Z", attemptId: "1a2b3c", stage: "review", parentSha: "2".repeat(40), checkpointSha: "3".repeat(40), changes: "unchanged", agentLogBasename: "review-1a2b3c.log" });
+
+  const final = await readFile(path, "utf8");
+  const implementAt = final.indexOf("## Stage checkpoint implement");
+  const reviewAt = final.indexOf("## Stage checkpoint review");
+  assert.ok(implementAt > 0 && reviewAt > implementAt);
+  assert.match(final, /- Changes: unchanged/);
 });

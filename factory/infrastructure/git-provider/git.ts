@@ -66,6 +66,18 @@ export async function requireCleanRepository(repository: string, stage: string):
   throw new Error(`${stage} left uncommitted changes in the branch worktree: ${status.replaceAll("\n", ", ")}`);
 }
 
+/** Porcelain status codes for index entries with unresolved merge conflicts. */
+const unmergedStatusCodes = new Set(["AA", "AU", "DD", "DU", "UD", "UU"]);
+
+/** Require no unresolved merge conflicts in a repository index, so a checkpoint never records conflicted content. */
+export async function requireNoUnmergedEntries(repository: string, stage: string): Promise<void> {
+  const status = await runGit(repository, ["status", "--porcelain"], "inspecting branch worktree");
+  const conflicts = status.split("\n").filter((line) => line.length > 0 && unmergedStatusCodes.has(line.slice(0, 2)));
+  if (conflicts.length === 0) return;
+
+  throw new Error(`${stage} found unresolved merge conflicts in the branch worktree: ${conflicts.join(", ")}.`);
+}
+
 /** Normalize any stage failure to the structured command-failure shape used for ticket and log diagnostics. */
 export function toCommandFailure(error: unknown, stage: string): CommandFailure {
   if (error instanceof CommandFailedError) return error.failure;
@@ -99,4 +111,21 @@ export function requireUnchanged(stage: string, label: string, before: Repositor
   if (after.status !== before.status) {
     throw new Error(`${stage} changed ${label} worktree status.`);
   }
+}
+
+/** Read the symbolic branch checked out in a repository; detached HEAD reports `HEAD`. */
+export async function currentBranch(repository: string): Promise<string> {
+  return (await runGit(repository, ["rev-parse", "--abbrev-ref", "HEAD"], "reading HEAD branch")).trim();
+}
+
+/** Immutable HEAD commit and symbolic branch pair for stage-boundary comparison; worktree status is deliberately excluded. */
+export type HeadAndBranch = Readonly<{
+  head: string;
+  branch: string;
+}>;
+
+/** Snapshot a repository's HEAD commit and symbolic branch. */
+export async function snapshotHeadAndBranch(repository: string): Promise<HeadAndBranch> {
+  const head = (await runGit(repository, ["rev-parse", "HEAD"], "reading HEAD commit")).trim();
+  return { head, branch: await currentBranch(repository) };
 }

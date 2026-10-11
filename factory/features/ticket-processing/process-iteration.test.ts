@@ -13,6 +13,11 @@ import { processTickets } from "./process-tickets.js";
 import type { ProcessConfig } from "./process-config.js";
 
 const COMPLETE = "<promise>COMPLETE</promise>";
+// Runner-owned checkpoint commits use the ambient identity; fixtures have none.
+process.env.GIT_AUTHOR_NAME = "Iteration Test";
+process.env.GIT_AUTHOR_EMAIL = "iteration@test.example";
+process.env.GIT_COMMITTER_NAME = "Iteration Test";
+process.env.GIT_COMMITTER_EMAIL = "iteration@test.example";
 
 function git(cwd: string, args: string[]): Promise<string> {
   return runCommand("git", ["-C", cwd, "-c", "user.email=iteration@test", "-c", "user.name=Iteration", ...args], `running git ${args[0]}`);
@@ -43,14 +48,16 @@ function localProvider(remote: string): GitProvider {
   return {
     name: "github",
     credential: "gh_secret_abc",
+    mergeStrategySupport: "unsupported",
     validateRepository: (url) => {
       if (url !== remote) throw new Error(`Unsupported repository URL: ${url}`);
     },
-    createDraftPullRequest: async () => ({ number: 1, url: "https://example.invalid/pull/1" }),
+    createDraftPullRequest: async () => ({ number: 1, url: "https://example.invalid/pull/1", squashPreference: "unsupported" }),
+    secrets: () => ["gh_secret_abc"],
   };
 }
 
-/** Fake workflow: the planner selects `ticketId`; implement/review complete silently; content returns schema output. */
+/** Fake workflow: the planner selects `ticketId`; implement/review leave uncommitted work and return structured messages; content returns schema output. */
 function fakeWorkflow(ticketId: string, failStage?: "implement"): AgentRunner {
   return async <TOutput>(request: AgentRunRequest<TOutput>) => {
     const base = { iterations: [], commits: [], stdout: "", branch: "" };
@@ -59,13 +66,16 @@ function fakeWorkflow(ticketId: string, failStage?: "implement"): AgentRunner {
     }
     if (request.name.startsWith("implement-")) {
       await writeFile(join(request.cwd, "login.ts"), "export const redirect = true;\n");
-      await git(request.cwd, ["add", "login.ts"]);
-      await git(request.cwd, ["commit", "-m", "fix login redirect"]);
+    }
+    if (request.name.startsWith("review-")) {
+      await writeFile(join(request.cwd, "review-note.md"), "reviewed\n");
     }
     if (failStage !== undefined && request.name.startsWith(failStage)) {
       return { ...base, output: undefined } as unknown as AgentRunResult<TOutput>;
     }
-    const output = request.name.startsWith("pull-request") ? { title: "Fix login redirect", body: "Verified with curl." } : undefined;
+    const output = request.name.startsWith("pull-request")
+      ? { title: "Fix login redirect", body: "Verified with curl." }
+      : { message: request.name.startsWith("implement-") ? "Add redirect after auth." : "Reviewed; no findings." };
     return { ...base, completionSignal: COMPLETE, output } as unknown as AgentRunResult<TOutput>;
   };
 }

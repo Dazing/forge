@@ -4,8 +4,10 @@ export {
   annotateAttempt,
   annotateCompletion,
   annotateFailure,
+  annotateStageCheckpoint,
   moveTicket,
   type AttemptAnnotation,
   type CompletionAnnotation,
   type FailureAnnotation,
+  type StageCheckpointAnnotation,
 } from "./ticket-lifecycle.js";

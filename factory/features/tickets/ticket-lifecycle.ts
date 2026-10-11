@@ -1,8 +1,7 @@
 import { appendFile, mkdir, rename, stat } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { redactSecret } from "../../shared/redact-secret.js";
-
-// Append-only ticket annotations and collision-safe movement into done/ and failed/, split from orchestration.
+import type { SquashPreference } from "../../infrastructure/git-provider/git-provider.js";
 
 export type AttemptAnnotation = Readonly<{
   timestamp: string;
@@ -21,6 +20,7 @@ export type CompletionAnnotation = Readonly<{
   baseBranch: string;
   finalSha: string;
   pullRequestUrl: string;
+  squashPreference: SquashPreference;
 }>;
 
 export type FailureAnnotation = Readonly<{
@@ -60,6 +60,33 @@ export async function annotateAttempt(ticketPath: string, attempt: AttemptAnnota
   );
 }
 
+export type StageCheckpointAnnotation = Readonly<{
+  timestamp: string;
+  attemptId: string;
+  stage: string;
+  parentSha: string;
+  checkpointSha: string;
+  changes: "changed" | "unchanged";
+  agentLogBasename: string;
+}>;
+
+/** Append the stage checkpoint section recording the runner-owned commit boundary. */
+export async function annotateStageCheckpoint(ticketPath: string, checkpoint: StageCheckpointAnnotation): Promise<void> {
+  await appendSection(
+    ticketPath,
+    [
+      `## Stage checkpoint ${checkpoint.stage} (${checkpoint.timestamp})`,
+      "",
+      `- Attempt ID: \`${checkpoint.attemptId}\``,
+      `- Stage: \`${checkpoint.stage}\``,
+      `- Parent commit: \`${checkpoint.parentSha}\``,
+      `- Checkpoint commit: \`${checkpoint.checkpointSha}\``,
+      `- Changes: ${checkpoint.changes}`,
+      `- Agent log: \`${checkpoint.agentLogBasename}\``,
+    ].join("\n"),
+  );
+}
+
 /** Append the completion section recording timestamp, attempt, workspace, branch, base branch, final SHA, and draft PR URL. */
 export async function annotateCompletion(ticketPath: string, completion: CompletionAnnotation): Promise<void> {
   await appendSection(
@@ -73,6 +100,7 @@ export async function annotateCompletion(ticketPath: string, completion: Complet
       `- Base branch: \`${completion.baseBranch}\``,
       `- Final commit: \`${completion.finalSha}\``,
       `- Draft PR: ${completion.pullRequestUrl}`,
+      `- Merge method: squash (${completion.squashPreference})`,
     ].join("\n"),
   );
 }

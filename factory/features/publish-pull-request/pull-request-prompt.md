@@ -11,7 +11,7 @@ Produce the content of a draft pull request for this single supplied local ticke
 {{TICKET_CONTENT}}
 </ticket>
 
-Inspect the committed change set: `git log origin/{{BASE_BRANCH}}..HEAD`, `git diff origin/{{BASE_BRANCH}}...HEAD`, and `git status --porcelain`. The status must be clean after review. The selected agent exposes the supplied skill catalog from its global skills directory (`~/.pi/agent/skills/` for Pi, `~/.omp/agent/skills/` for oh-my-pi); read relevant `SKILL.md` files only when the repository's language conventions matter to the content.
+Inspect the committed change set: `git log origin/{{BASE_BRANCH}}..HEAD`, `git diff origin/{{BASE_BRANCH}}...HEAD`, and `git status --porcelain`. The status must be clean after review. Each commit in that range is a runner-created stage checkpoint carrying `Factory-Ticket`, `Factory-Attempt`, `Factory-Stage`, `Factory-Outcome`, `Factory-Changes`, and `Factory-Agent-Log` trailers; use the stage messages and trailer values as the source of the change narrative, and never invent commits the log does not show. The selected agent exposes the supplied skill catalog from its global skills directory (`~/.pi/agent/skills/` for Pi, `~/.omp/agent/skills/` for oh-my-pi); read relevant `SKILL.md` files only when the repository's language conventions matter to the content.
 
 Produce content only:
 

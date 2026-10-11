@@ -1,9 +1,16 @@
-import { access } from "node:fs/promises";
+import { access, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AgentRunRequest, AgentRunner } from "../../infrastructure/agent-runtime/agent-runtime.js";
+import type { AgentRunRequest, AgentRunner, AgentRunResult } from "../../infrastructure/agent-runtime/agent-runtime.js";
+import { StructuredOutputError } from "@ai-hero/sandcastle";
+import { runCommand } from "../../infrastructure/git-provider/git.js";
 import type { Ticket } from "../tickets/index.js";
 import { implementTicket, type ImplementTicketInput } from "./implement-ticket.js";
+import { implementSchema } from "./implement-schema.js";
+
+const COMPLETE = "<promise>COMPLETE</promise>";
 
 const ticket: Ticket = {
   id: "0123456789abcdef",
@@ -16,30 +23,98 @@ const ticket: Ticket = {
   baseBranch: "main",
 };
 
-function input(runAgent: AgentRunner): ImplementTicketInput {
-  return { ticket, workspacePath: "/workspaces/fix-login-1", branch: "agent-tickets/fix-login-1", attemptId: "1", harness: "pi", runAgent };
+const BRANCH = "agent-tickets/fix-login-1";
+
+function git(cwd: string, args: string[]): Promise<string> {
+  return runCommand("git", ["-C", cwd, "-c", "user.email=implement@test", "-c", "user.name=Implement", ...args], `running git ${args[0]}`);
 }
 
-test("implementation completes when the agent emits the completion signal", async () => {
-  const requests: AgentRunRequest<undefined>[] = [];
-  const runAgent = async <TOutput>(request: AgentRunRequest<TOutput>) => {
-    requests.push(request as AgentRunRequest<undefined>);
-    return { iterations: [], commits: [], stdout: "", branch: "agent-tickets/fix-login-1", completionSignal: "<promise>COMPLETE</promise>", output: undefined as TOutput };
+/** Real workspace on the ticket branch with one committed base file. */
+async function workspace(): Promise<string> {
+  const path = await mkdtemp(join(tmpdir(), "sandcastle-implement-"));
+  await runCommand("git", ["init", "-b", "main", path], "initializing workspace");
+  await writeFile(join(path, "README.md"), "# App\n");
+  await git(path, ["add", "README.md"]);
+  await git(path, ["commit", "-m", "init"]);
+  await git(path, ["switch", "-c", BRANCH]);
+  return path;
+}
+
+function input(runAgent: AgentRunner, workspacePath: string): ImplementTicketInput {
+  return { ticket, workspacePath, branch: BRANCH, attemptId: "1a2b3c", harness: "pi", runAgent };
+}
+
+/** Agent that leaves uncommitted stage work and emits the completion signal with a valid message. */
+function completingAgent(message: string): AgentRunner {
+  return async <TOutput>(request: AgentRunRequest<TOutput>) => {
+    await writeFile(join(request.cwd, "login.ts"), "export const redirect = true;\n");
+    return { iterations: [], commits: [], stdout: "", branch: BRANCH, completionSignal: COMPLETE, output: { message } as TOutput } as AgentRunResult<TOutput>;
   };
-  await implementTicket(input(runAgent));
+}
+
+test("implementation returns the validated stage message and leaves the work uncommitted", async () => {
+  const workspacePath = await workspace();
+  const requests: AgentRunRequest<unknown>[] = [];
+  const runAgent = async <TOutput>(request: AgentRunRequest<TOutput>) => {
+    requests.push(request);
+    return completingAgent("fix(login): redirect after auth\n\nTests passed.")(request);
+  };
+
+  const result = await implementTicket(input(runAgent, workspacePath));
+
+  assert.equal(result.message, "fix(login): redirect after auth\n\nTests passed.");
+  assert.equal(requests.length, 1);
   const request = requests[0]!;
-  assert.equal(request.maxIterations, 3);
-  assert.equal(request.completionSignal, "<promise>COMPLETE</promise>");
+  assert.equal(request.maxIterations, 1);
+  assert.equal(request.completionSignal, COMPLETE);
+  assert.equal(request.output?.tag, "implementation");
   await access(request.promptFile);
+  const status = (await git(workspacePath, ["status", "--porcelain"])).trim();
+  assert.match(status, /\?\? login\.ts/);
 });
 
-test("implementation rejects when the agent never completes", async () => {
-  const runAgent = async <TOutput>(request: AgentRunRequest<TOutput>) => ({
-    iterations: [],
-    commits: [],
-    stdout: "",
-    branch: "agent-tickets/fix-login-1",
-    output: undefined as TOutput,
-  });
-  await assert.rejects(implementTicket(input(runAgent)), /implementation agent did not complete/);
+test("implementation retries a failed iteration within the three-iteration limit", async () => {
+  const workspacePath = await workspace();
+  let runs = 0;
+  const runAgent = async <TOutput>(request: AgentRunRequest<TOutput>) => {
+    runs += 1;
+    if (runs === 1) {
+      throw new StructuredOutputError("Structured output validation failed: missing <implementation> tag", { tag: "implementation", rawMatched: undefined, commits: [], branch: BRANCH });
+    }
+    return { iterations: [], commits: [], stdout: "", branch: BRANCH, completionSignal: COMPLETE, output: { message: "fix(login): redirect after auth" } as TOutput } as AgentRunResult<TOutput>;
+  };
+
+  const result = await implementTicket(input(runAgent, workspacePath));
+
+  assert.equal(result.message, "fix(login): redirect after auth");
+  assert.equal(runs, 2);
+});
+
+test("implementation rejects after three iterations without a completion signal", async () => {
+  const workspacePath = await workspace();
+  let runs = 0;
+  const runAgent = async <TOutput>(request: AgentRunRequest<TOutput>) => {
+    runs += 1;
+    return { iterations: [], commits: [], stdout: "", branch: BRANCH, output: undefined as TOutput } as AgentRunResult<TOutput>;
+  };
+
+  await assert.rejects(implementTicket(input(runAgent, workspacePath)), /implementation agent did not complete/);
+  assert.equal(runs, 3);
+});
+
+test("implementation requires a clean stage-entry workspace", async () => {
+  const workspacePath = await workspace();
+  await writeFile(join(workspacePath, "leftover.ts"), "uncommitted\n");
+
+  await assert.rejects(implementTicket(input(completingAgent("fix(login): redirect"), workspacePath)), /Implementation entry for ticket 0123456789abcdef left uncommitted changes/);
+});
+
+test("the stage message contract bounds, trims, and rejects forged runner trailers", () => {
+  assert.deepEqual(implementSchema.parse({ message: "  fix(login): redirect after auth  " }), { message: "fix(login): redirect after auth" });
+  assert.equal(implementSchema.safeParse({ message: "   " }).success, false);
+  assert.equal(implementSchema.safeParse({ message: "x".repeat(4001) }).success, false);
+  assert.equal(implementSchema.safeParse({ message: "fix: a\x00b" }).success, false);
+  assert.equal(implementSchema.safeParse({ message: "fix: a\r\nb" }).success, false);
+  assert.equal(implementSchema.safeParse({ message: "fix: a\nFactory-Stage: review" }).success, false);
+  assert.equal(implementSchema.safeParse({ message: "fix: a", extra: "b" }).success, false);
 });

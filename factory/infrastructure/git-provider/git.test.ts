@@ -3,7 +3,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { requireCleanRepository, runCommand, runGit } from "./git.js";
+import { currentBranch, requireCleanRepository, runCommand, runGit, snapshotRepository } from "./git.js";
 
 const commitArgs = ["-c", "user.email=test@example.com", "-c", "user.name=Sandcastle Test"];
 
@@ -30,4 +30,14 @@ test("tracked and untracked changes fail stage cleanliness enforcement", async (
     requireCleanRepository(path, "Review for ticket abc"),
     /Review for ticket abc left uncommitted changes in the branch worktree: M tracked\.txt, \?\? untracked\.txt/,
   );
+});
+
+test("currentBranch reports the symbolic branch, not a detached commit", async () => {
+  const path = await repository();
+  assert.equal(await currentBranch(path), "main");
+  await runGit(path, ["switch", "-c", "feature/login"], "switching to a feature branch");
+  assert.equal(await currentBranch(path), "feature/login");
+  const head = (await runGit(path, ["rev-parse", "HEAD"], "reading HEAD commit")).trim();
+  await runGit(path, ["checkout", head], "detaching HEAD");
+  assert.equal(await currentBranch(path), "HEAD");
 });

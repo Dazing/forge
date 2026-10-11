@@ -2,11 +2,11 @@
 
 ## Status and outcome
 
-Proposed; not implemented. This plan addresses the stage-traceability item in `docs/roadmap.md`. The hybrid vertical-slice architecture is already implemented and remains unchanged.
+Implemented and verified; this plan is now historical design context. It addresses the stage-traceability item in `docs/roadmap.md`. The hybrid vertical-slice architecture is already implemented and remains unchanged.
 
 Create deterministic Git checkpoints in each retained ticket workspace after implementation and review. Each checkpoint identifies the ticket, attempt, stage, and reported outcome so engineers can isolate stage diffs, inspect review corrections, and correlate them with verification evidence in agent logs. Request squash-on-merge where the provider supports a per-PR preference without merging or enabling auto-merge.
 
-This deliberately changes current commit ownership: agents currently create local commits; after this cutover, agents modify and verify files, return a structured `message`, and the runner creates stage commits. No production changes are part of this planning change.
+This deliberately changed commit ownership: agents previously created local commits; after this cutover, agents modify and verify files, return a structured `message`, and the runner creates stage commits.
 
 ## Decisions
 

@@ -12,6 +12,7 @@ const request = {
   base: "main",
   title: "Fix login redirect",
   body: "Handles the expired session case.",
+  mergeStrategy: "squash" as const,
 };
 
 function recordingFetch(status: number, statusText: string, body: string): { fetch: Fetch; calls: { url: string; init: RequestInit }[] } {
@@ -47,7 +48,7 @@ test("creates a draft pull request with GitHub REST headers and payload", async 
 
   const result = await new GitHubProvider("gh_secret_abc", seam.fetch).createDraftPullRequest(request);
 
-  assert.deepEqual(result, { number: 7, url: "https://github.com/acme/app/pull/7" });
+  assert.deepEqual(result, { number: 7, url: "https://github.com/acme/app/pull/7", squashPreference: "unsupported" });
   assert.equal(seam.calls.length, 1);
   const { url, init } = seam.calls[0]!;
   assert.equal(url, "https://api.github.com/repos/acme/app/pulls");
@@ -97,4 +98,21 @@ test("transport failures become structured failures with transport diagnostics",
     assert.match(error.failure.stderr, /ENOTFOUND/);
     return true;
   });
+});
+
+test("GitHub reports that a per-pull-request merge method is unsupported", () => {
+  assert.equal(new GitHubProvider("gh_secret_abc").mergeStrategySupport, "unsupported");
+});
+
+test("the GitHub payload never carries a merge-method field that the REST API ignores", async () => {
+  const seam = recordingFetch(201, "Created", JSON.stringify({ number: 7, html_url: "https://github.com/acme/app/pull/7" }));
+
+  await new GitHubProvider("gh_secret_abc", seam.fetch).createDraftPullRequest(request);
+
+  const body = JSON.parse(seam.calls[0]!.init.body as string);
+  assert.deepEqual(Object.keys(body).sort(), ["base", "body", "draft", "head", "title"]);
+});
+
+test("secrets reports the GitHub token", () => {
+  assert.deepEqual(new GitHubProvider("gh_secret_abc").secrets(), ["gh_secret_abc"]);
 });

@@ -7,3 +7,5 @@
 - Commit in the workspace between coding/review/etc
 - Provide some commit message (output 'message' from stage agent?)
 - Set PR to squash on merge if supported
+
+Implemented: see `docs/plans/stage-commits-and-squash-merge-implementation-plan.md` and the `Merge method preference` section of `README.md`.

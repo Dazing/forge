@@ -84,23 +84,24 @@ After known obligations are implemented and verified, review once against the or
 
 ## Git boundaries and completion
 
-You are in the ticket workspace on the branch named above, cloned from the ticket repository. Local Git reads (`git status`, `git log`, `git diff`, `git rev-parse`) and local commits are allowed. Never run `git push`, delete or mutate remote branches, run `gh` or `az repos`, or call the GitHub or Azure DevOps API: the runner owns every remote operation. Do not create or switch branches.
+You are in the ticket workspace on the branch named above, cloned from the ticket repository. Local Git reads (`git status`, `git log`, `git diff`, `git rev-parse`) are allowed.
 
-Before committing, inspect the final diff and worktree state. Load `commit-conventions` when available, then commit all completed source, test, and documentation changes with a concise conforming message.
+You must not create commits. The runner creates the single checkpoint commit for this stage after your report. Never run `git commit` (including `--amend`), `git reset`, `git rebase`, `git cherry-pick`, `git switch`, `git checkout`, `git branch`, `git push`, stash, or delete/mutate remote branches; never run `gh` or `az repos`; never call the GitHub or Azure DevOps API. The runner owns every commit and every remote operation.
+
+Leave all completed changes uncommitted in the worktree. When this is a later iteration, the earlier iterations' uncommitted work is still present in this workspace: continue from it rather than expecting prior agent commits, and do not redo completed work merely because this is a new iteration.
 
 Finish only when every explicit obligation has evidence, applicable standards are satisfied, existing applicable behavioral checks pass, every changed target compiles or type-checks, review findings are resolved, and no provisional behavior remains.
 
-Give a concise final report containing:
+Report exactly one JSON object inside an `<implementation>` tag, immediately followed by the completion signal:
 
-- delivered outcome and changed files;
-- consequential decisions or `None`;
-- exact verification commands and observed results;
-- completed RED/GREEN or IMPLEMENT/COMPILE cycles and unexpected-failure repair counts;
-- review findings and disposition;
-- remaining blockers or limitations, or `None`.
+<implementation>
+{"message": "fix(scope): imperative subject summarizing the change\n\nShort body: completed changes, the exact verification commands run and their observed results, and any limitation."}
+</implementation>
 
-Do not report success when a command failed, the ticket is incomplete, changes remain uncommitted, or an unresolved blocker exists. On failure, explain the blocker and do not emit the completion signal.
+`message` is one trimmed string of at most 4000 characters. Line feeds are allowed; other control characters are not. Use a Conventional Commit subject without the ticket ID as scope; when the stage needed no file changes, use a `chore` subject and explain that no changes were needed. Never include a `Factory-*:` trailer line (the runner owns commit trailers), and never include credentials, tokens, or secrets.
 
-Only after the ticket is fully implemented, relevant checks pass, and local commits exist, end with:
+Do not report success when a command failed, the ticket is incomplete, or an unresolved blocker exists. On failure, explain the blocker in prose and emit neither the `<implementation>` block nor the completion signal.
+
+Only after the ticket is fully implemented and every requirement above holds, end with:
 
 <promise>COMPLETE</promise>
