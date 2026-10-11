@@ -137,6 +137,8 @@ export async function executeReviewedAttempt(ticket: Ticket, config: ProcessConf
     };
   } catch (error) {
     const failure = toCommandFailure(error, stage);
+    await logSettlementFailure(config, ticket, attemptId, stage, error);
+    console.error(`Ticket ${ticket.id} attempt ${attemptId} failed at ${stage}; details recorded in main.log and the ticket.`);
     try {
       await annotateFailure(ticket.path, {
         timestamp: new Date().toISOString(),

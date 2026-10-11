@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { CommandFailedError, currentBranch, requireCleanRepository, requireNoUnmergedEntries, runGit } from "../../infrastructure/git-provider/git.js";
+import { CommandFailedError, currentBranch, requireCleanRepository, requireNoUnmergedEntries, runGit, runGitAsRunner } from "../../infrastructure/git-provider/git.js";
 import { integrateTickets } from "../integrate-tickets/index.js";
 import type { ProcessConfig } from "./process-config.js";
 import { createWorkspace, reserveAttempt, type WorkspaceBaseline } from "./workspace.js";
@@ -68,7 +68,7 @@ export async function integrateCandidates(
     await runGit(workspace.workspacePath, ["add", "--all"], "staging integration result");
     const changes = (await runGit(workspace.workspacePath, ["diff", "--cached", "--name-only"], "classifying integration tree outcome")).trim().length > 0 ? "changed" : "unchanged";
     const agentLogBasename = config.logger.agentLogBasename(integrationLogName);
-    await runGit(workspace.workspacePath, ["commit", "-m", `${outcome.message}\n\nFactory-Group: ${groupId}\nFactory-Stage: integration\nFactory-Included: ${[...included, candidate.ticket.id].join(",")}\nFactory-Changes: ${changes}\nFactory-Agent-Log: ${agentLogBasename}`], "committing reviewed integration");
+    await runGitAsRunner(workspace.workspacePath, ["commit", "-m", `${outcome.message}\n\nFactory-Group: ${groupId}\nFactory-Stage: integration\nFactory-Included: ${[...included, candidate.ticket.id].join(",")}\nFactory-Changes: ${changes}\nFactory-Agent-Log: ${agentLogBasename}`], "committing reviewed integration");
     const checkpointSha = (await runGit(workspace.workspacePath, ["rev-parse", "HEAD"], "reading integration checkpoint")).trim();
     const actualParents = (await runGit(workspace.workspacePath, ["show", "-s", "--format=%P", "HEAD"], "validating integration parents")).trim().split(/\s+/);
     if (actualParents.length !== 2 || actualParents[0] !== parent || actualParents[1] !== candidate.reviewCheckpoint.checkpointSha) {

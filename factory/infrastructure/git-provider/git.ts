@@ -58,6 +58,11 @@ export async function runGit(repo: string, args: readonly string[], operation: s
   return runCommand("git", ["-C", repo, ...args], operation);
 }
 
+/** Run Git with the command-local identity used for every runner-owned commit. */
+export async function runGitAsRunner(repo: string, args: readonly string[], operation: string): Promise<string> {
+  return runGit(repo, ["-c", "user.name=Factory Runner", "-c", "user.email=factory-runner@localhost", ...args], operation);
+}
+
 /** Require a clean index and worktree, including untracked files, before advancing a stage. */
 export async function requireCleanRepository(repository: string, stage: string): Promise<void> {
   const status = (await runGit(repository, ["status", "--porcelain"], "inspecting branch worktree")).trim();

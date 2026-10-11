@@ -9,11 +9,6 @@ import { commitStage, type StageCommitInput } from "./stage-commit.js";
 const BRANCH = "agent-tickets/fix-login-1a2b3c";
 const SECRET = "ghp_supersecrettoken";
 
-// The checkpoint commit uses the ambient Git identity; the runner never injects a fake one.
-process.env.GIT_AUTHOR_NAME = "Checkpoint Test";
-process.env.GIT_AUTHOR_EMAIL = "checkpoint@test.example";
-process.env.GIT_COMMITTER_NAME = "Checkpoint Test";
-process.env.GIT_COMMITTER_EMAIL = "checkpoint@test.example";
 
 function git(cwd: string, args: string[], operation?: string): Promise<string> {
   return runCommand("git", ["-C", cwd, "-c", "user.email=runner@test", "-c", "user.name=Runner", ...args], operation ?? `running git ${args[0]}`);
@@ -45,9 +40,11 @@ function input(workspacePath: string, expectedHead: string, overrides: Partial<S
   };
 }
 
-test("checkpoint commits stage work with runner trailers and reports changed", async () => {
+test("checkpoint commits stage work with runner identity when Git identity is unconfigured", async () => {
   const path = await workspace();
   const entryHead = (await git(path, ["rev-parse", "HEAD"], "reading HEAD commit")).trim();
+  await git(path, ["config", "user.name", ""]);
+  await git(path, ["config", "user.email", ""]);
   await writeFile(join(path, "login.ts"), "export const redirect = true;\n");
 
   const result = await commitStage(input(path, entryHead));
@@ -67,6 +64,7 @@ test("checkpoint commits stage work with runner trailers and reports changed", a
     "Factory-Changes: changed",
     "Factory-Agent-Log: implement-0123456789abcdef-1a2b3c.log",
   ].join("\n"));
+  assert.equal((await git(path, ["log", "-1", "--format=%an <%ae>", result.checkpointSha], "reading checkpoint author")).trim(), "Factory Runner <factory-runner@localhost>");
   assert.equal((await git(path, ["rev-list", "--count", `${entryHead}..HEAD`], "counting commits ahead")).trim(), "1");
   assert.equal((await git(path, ["rev-parse", `${result.checkpointSha}^`], "reading the commit parent")).trim(), entryHead);
   assert.equal((await git(path, ["rev-parse", "--abbrev-ref", "HEAD"], "reading HEAD branch")).trim(), BRANCH);

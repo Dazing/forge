@@ -1,4 +1,4 @@
-import { requireCleanRepository, requireNoUnmergedEntries, runGit, snapshotHeadAndBranch } from "../../infrastructure/git-provider/git.js";
+import { requireCleanRepository, requireNoUnmergedEntries, runGit, runGitAsRunner, snapshotHeadAndBranch } from "../../infrastructure/git-provider/git.js";
 
 // Runner-owned checkpoint commit for one successful mutating stage. The agent reports prose; the
 // runner stages the work, computes the tree-change flag from Git itself, appends the runner-owned
@@ -74,7 +74,7 @@ export async function commitStage(input: StageCommitInput): Promise<StageCommitR
     throw new Error(`checkpoint message contains provider credential material for ticket ${input.ticketId} on stage ${input.stage}.`);
   }
 
-  await runGit(input.workspacePath, ["commit", "--allow-empty", "-m", message], "creating stage checkpoint commit");
+  await runGitAsRunner(input.workspacePath, ["commit", "--allow-empty", "-m", message], "creating stage checkpoint commit");
 
   const after = await snapshotHeadAndBranch(input.workspacePath);
   if (after.branch !== input.branch) {

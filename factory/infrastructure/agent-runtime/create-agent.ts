@@ -1,6 +1,6 @@
 import { pi, type AgentCommandOptions, type AgentProvider, type PrintCommand } from "@ai-hero/sandcastle";
 import { type AgentHarness } from "../sandbox/sandbox.js";
-import { summarizeToolArgs } from "./stream-events.js";
+import { parseToolExecutionStart, summarizeToolArgs } from "./stream-events.js";
 import { ohMyPi } from "./oh-my-pi.js";
 
 // Generic ticket-agent construction: model selection, MCP tool-rule injection, Pi MCP preflight,
@@ -27,7 +27,12 @@ export function ticketAgent(harness: AgentHarness): AgentProvider {
       return harness === "pi" ? { ...command, command: `node /home/agent/.pi/agent/check-mcp.mjs && ${command.command}` } : command;
     },
     parseStreamLine(line) {
-      return base.parseStreamLine(line).map((event) =>
+      const parsedEvents = base.parseStreamLine(line);
+      const fallbackToolCall = parsedEvents.some((event) => event.type === "tool_call")
+        ? undefined
+        : parseToolExecutionStart(line);
+      const events = fallbackToolCall === undefined ? parsedEvents : [...parsedEvents, fallbackToolCall];
+      return events.map((event) =>
         event.type === "tool_call" ? { type: "text", text: `Tool: ${event.name} ${summarizeToolArgs(event.name, event.args)}` } : event,
       );
     },

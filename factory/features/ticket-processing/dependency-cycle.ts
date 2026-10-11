@@ -18,7 +18,7 @@ import { buildDependencyGraph, type DependencyGraph } from "./dependency-graph.j
 import { executeReviewedAttempt, type ReviewedCheckpoint } from "./execute-attempt.js";
 import { integrateCandidates, type ReviewedCandidate } from "./integrate-candidates.js";
 import type { ProcessConfig } from "./process-config.js";
-import { logSettlementFailure, settleMetadataFailure } from "./settle-attempt.js";
+import { logSettlementFailure, reportBlocked, settleMetadataFailure } from "./settle-attempt.js";
 import { verifyMergedPublication } from "./reconcile-publication.js";
 import type { WorkspaceBaseline } from "./workspace.js";
 
@@ -399,7 +399,7 @@ async function reconcilePublications(config: ProcessConfig, state: DependencyWor
   }
 }
 
-export async function processDependencyCycle(config: ProcessConfig, state: DependencyWorkflowState): Promise<void> {
+export async function processDependencyCycle(config: ProcessConfig, state: DependencyWorkflowState): Promise<"processed" | "no-runnable"> {
   state.cycle++;
   await discover(config, state);
   await reconcilePublications(config, state);
@@ -440,6 +440,7 @@ export async function processDependencyCycle(config: ProcessConfig, state: Depen
         reason,
         blockedBy: ticket.dependsOnTickets,
       });
+      await reportBlocked(config, ticket, reason);
       state.blockedAnnotations.set(ticketId, reason);
     }
   }
@@ -448,7 +449,7 @@ export async function processDependencyCycle(config: ProcessConfig, state: Depen
   const excluded = new Set(state.blocked.keys());
   const readyIds = graph.readyTicketIds(completed, excluded);
   const groups = deliveryGroups(graph, state).filter((group) => group.memberIds.some((id) => readyIds.includes(id)));
-  if (groups.length === 0) return;
+  if (groups.length === 0) return "no-runnable" as const;
   const plannerInput: PlannedGroup[] = groups.map((group) => ({
     groupId: group.id,
     tickets: group.memberIds.filter((id) => !state.reviewed.has(id)).map((id) => ({ id, title: state.tickets.get(id)!.title })),
@@ -487,4 +488,5 @@ export async function processDependencyCycle(config: ProcessConfig, state: Depen
     await reconcilePublications(config, state);
     await publishGroup(group.id, state, config);
   }
+  return "processed" as const;
 }

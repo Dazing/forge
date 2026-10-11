@@ -13,9 +13,13 @@ export async function processTickets(config: ProcessConfig): Promise<void> {
   const limitedConfig: ProcessConfig = { ...config, runAgent: limiter.wrap(config.runAgent) };
   const state = createDependencyWorkflowState();
   for (;;) {
-    await processDependencyCycle(limitedConfig, state);
-    if ((await listTicketPaths(config.ticketsDir)).length === 0) {
+    const outcome = await processDependencyCycle(limitedConfig, state);
+    const activeTicketCount = (await listTicketPaths(config.ticketsDir)).length;
+    if (activeTicketCount === 0) {
       console.log(`[poll] No pending tickets; sleeping ${TICKET_POLL_MS / 1000} seconds.`);
+      await sleep(TICKET_POLL_MS);
+    } else if (outcome === "no-runnable") {
+      console.log(`[poll] No runnable tickets; sleeping ${TICKET_POLL_MS / 1000} seconds before checking for new or changed tickets.`);
       await sleep(TICKET_POLL_MS);
     }
   }

@@ -35,6 +35,23 @@ async function logSettlementFailure(config: ProcessConfig, ticket: Ticket, attem
   });
 }
 
+/** Record and surface one scheduling block without exposing provider credentials. */
+async function reportBlocked(config: ProcessConfig, ticket: Ticket, reason: string): Promise<void> {
+  let safeReason = reason;
+  for (const secret of config.gitProvider.secrets()) {
+    safeReason = redactSecret(secret, safeReason);
+  }
+  await recordSettlement(config, {
+    timestamp: new Date().toISOString(),
+    ticketId: ticket.id,
+    stage: "scheduling",
+    operation: "blocking ticket",
+    status: "blocked",
+    stderr: safeReason,
+  });
+  console.error(`Ticket ${ticket.id} is blocked: ${safeReason}`);
+}
+
 /** Settle one unreadable ticket: record, annotate the failure, and move it to `failed/` so the poll continues. */
 export async function settleMetadataFailure(path: string, error: unknown, config: ProcessConfig): Promise<void> {
   const timestamp = new Date().toISOString();
@@ -55,4 +72,4 @@ export async function settleMetadataFailure(path: string, error: unknown, config
 }
 
 
-export { logSettlementFailure };
+export { logSettlementFailure, reportBlocked };

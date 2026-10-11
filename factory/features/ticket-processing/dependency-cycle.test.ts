@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
@@ -264,4 +264,91 @@ test("failed combined review publishes separate reviewed subsets and leaves mult
   assert.ok(requests.some((request) => /Included: a \(a\), b \(b\)/.test(request.body)));
   assert.ok(requests.some((request) => /Included: a \(a\), c \(c\)/.test(request.body)));
   assert.equal(await readFile(join(ticketsDir, "done", "a.md"), "utf8").then((text) => (text.match(/Group publication/g) ?? []).length), 1);
+});
+
+test("checkpoint failures are written to main.log and surfaced on stderr", async (t) => {
+  const { remote, factoryRoot, ticketsDir } = await fixture();
+  await writeFile(join(ticketsDir, "a.md"), markdown("a", remote, []));
+  const runAgent: AgentRunner = async <TOutput>(request: AgentRunRequest<TOutput>) => {
+    const base = { iterations: [], commits: [], stdout: "", branch: "" };
+    if (request.name.startsWith("plan-groups-")) {
+      const groupId = /<group id="([^"]+)">/.exec(request.promptArgs.GROUPS!)![1]!;
+      return { ...base, completionSignal: "</plan>", output: { groups: [{ groupId, tickets: [{ id: "a", title: "a" }] }] } } as unknown as AgentRunResult<TOutput>;
+    }
+    if (request.name.startsWith("implement-")) {
+      await writeFile(join(request.cwd, "a.txt"), "a\n");
+      const hook = join(request.cwd, ".git", "hooks", "pre-commit");
+      await writeFile(hook, "#!/bin/sh\nexit 1\n");
+      await chmod(hook, 0o755);
+      return { ...base, completionSignal: COMPLETE, output: { message: "feat(a): implement a" } } as unknown as AgentRunResult<TOutput>;
+    }
+    throw new Error(`unexpected agent ${request.name}`);
+  };
+  const provider: GitProvider = {
+    name: "github",
+    credential: "secret",
+    mergeStrategySupport: "unsupported",
+    validateRepository: () => undefined,
+    createDraftPullRequest: async () => ({ number: 1, url: "https://example.test/pr/1", squashPreference: "unsupported" }),
+    secrets: () => ["secret"],
+  };
+  const logger = await InvocationLogger.create(factoryRoot, provider.credential);
+  const config: ProcessConfig = {
+    ticketsDir,
+    factoryRoot,
+    harness: "pi",
+    logger,
+    gitProvider: provider,
+    runAgent,
+    maxParallel: 1,
+    ticketAttemptsPerCycle: 1,
+  };
+  const errors: string[] = [];
+  t.mock.method(console, "error", (...args: unknown[]) => { errors.push(args.map(String).join(" ")); });
+
+  const state = createDependencyWorkflowState();
+  await processDependencyCycle(config, state);
+
+  assert.match(state.blocked.get("a")!, /implementation commit failed after a durable boundary/);
+  assert.match(await readFile(join(logger.runDir, "main.log"), "utf8"), /ticket=a .*stage=implementation commit .*status=failed/);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0]!, /Ticket a attempt .* failed at implementation commit/);
+});
+
+test("startup reconciliation blocks are written to main.log and surfaced on stderr", async (t) => {
+  const { remote, factoryRoot, ticketsDir } = await fixture();
+  await writeFile(
+    join(ticketsDir, "a.md"),
+    `${markdown("a", remote, [])}\n## Attempt abc123 (2026-10-11T00:00:00.000Z)\n\n- Workspace: \`/retained/a-abc123\`\n`,
+  );
+  const provider: GitProvider = {
+    name: "github",
+    credential: "secret",
+    mergeStrategySupport: "unsupported",
+    validateRepository: () => undefined,
+    createDraftPullRequest: async () => ({ number: 1, url: "https://example.test/pr/1", squashPreference: "unsupported" }),
+    secrets: () => ["secret"],
+  };
+  const logger = await InvocationLogger.create(factoryRoot, provider.credential);
+  const config: ProcessConfig = {
+    ticketsDir,
+    factoryRoot,
+    harness: "pi",
+    logger,
+    gitProvider: provider,
+    runAgent: async () => { throw new Error("planner must not run for a blocked ticket"); },
+    maxParallel: 1,
+    ticketAttemptsPerCycle: 1,
+  };
+  const errors: string[] = [];
+  t.mock.method(console, "error", (...args: unknown[]) => { errors.push(args.map(String).join(" ")); });
+
+  const state = createDependencyWorkflowState();
+  const outcome = await processDependencyCycle(config, state);
+
+  assert.equal(outcome, "no-runnable");
+  assert.match(state.blocked.get("a")!, /prior factory evidence requires operator reconciliation/);
+  assert.match(await readFile(join(logger.runDir, "main.log"), "utf8"), /ticket=a .*stage=scheduling .*status=blocked/);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0]!, /Ticket a is blocked: prior factory evidence requires operator reconciliation/);
 });
