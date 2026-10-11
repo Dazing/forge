@@ -1,6 +1,6 @@
 # Pull-request content task
 
-Produce the content of a draft GitHub pull request for this single supplied local ticket. You are in the ticket workspace, which is your current working directory.
+Produce the content of a draft pull request for this single supplied local ticket. You are in the ticket workspace, which is your current working directory.
 
 - Ticket ID: {{TICKET_ID}}
 - Title: {{TICKET_TITLE}}
@@ -30,7 +30,7 @@ Body requirements:
 - In `### Known limitations`, state known limitations or missing evidence that matters; if none were identified, say so without implying exhaustive proof.
 - Keep the explanation focused on this change set. Do not reproduce large code blocks, narrate the inspection process, or add unrelated refactoring advice.
 
-You have no authority to execute anything remote. Do not run `git push`, create, delete, merge, or switch branches, stage, commit, modify, delete, or create any file, run `gh`, or call the GitHub API. The runner performs every Git and GitHub operation deterministically from your output.
+You have no authority to execute anything remote. Do not run `git push`, create, delete, merge, or switch branches, stage, commit, modify, delete, or create any file, run `gh` or `az repos`, or call the GitHub or Azure DevOps API. The runner performs every Git and provider API operation deterministically from your output.
 
 Return exactly one JSON object wrapped in `<pull-request>` tags and no other `<pull-request>` block. Both values must be non-empty:
 

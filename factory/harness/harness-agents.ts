@@ -211,7 +211,7 @@ export const pullRequestSchema = z
 
 export type PullRequestOutput = z.infer<typeof pullRequestSchema>;
 
-/** Run the read-only pull-request content agent in the ticket workspace; returns commit, title, and body content without touching Git or GitHub. */
+/** Run the read-only pull-request content agent in the ticket workspace; returns commit, title, and body content without touching Git or the provider API. */
 export async function runPullRequestAgent(
   attempt: TicketAttempt,
   harness: AgentHarness,

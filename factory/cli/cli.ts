@@ -9,15 +9,17 @@ export type RunOptions = Readonly<{ ticketsDir: string; agentHarness: AgentHarne
 function printHelp(): void {
   console.log(`Usage: npm run sandcastle -- --tickets-dir <markdown-ticket-directory>
 
-Runs continuously as a daemon, polling the ticket directory every 10 seconds. Each selected ticket gets a fresh clone of its own repository under .workspaces/, and completed tickets become draft GitHub pull requests.
+Runs continuously as a daemon, polling the ticket directory every 10 seconds. Each selected ticket gets a fresh clone of its own repository under .workspaces/, and completed tickets become draft pull requests on the selected provider.
 
 Options:
   --tickets-dir <path>  Directory of Markdown tickets; polled every 10 seconds (required)
   --agent-harness <pi|oh-my-pi>  Agent harness for every stage (default: pi)
   -h, --help        Show this help without requiring Docker
 
-Prerequisites for a run: GITHUB_TOKEN in the repository-root .env, SSH access to GitHub.com, Docker, an image built with
-and host access to https://openai.taila49adb.ts.net/v1 through Tailscale.`);
+Prerequisites for a run: GIT_PROVIDER=github|azure-devops in the repository-root .env with its provider credential — GITHUB_TOKEN (fine-grained token: Metadata Read, Pull requests Write) or AZURE_DEVOPS_PAT (Code read/write, vso.code_write). One provider per invocation, so every ticket in that invocation uses that provider's canonical SSH URL:
+  GitHub: git@github.com:<owner>/<repository>.git
+  Azure DevOps: git@ssh.dev.azure.com:v3/<organization>/<project>/<repository>
+SSH authorization for clone and push stays independent from the REST credential. Docker, an image built with npx sandcastle docker build-image --image-name local-sandcastle-runner:latest --dockerfile factory/sandbox/Dockerfile, and host access to https://openai.taila49adb.ts.net/v1 through Tailscale.`);
 }
 
 /** Parse the runner flags; prints help and returns undefined for --help, and rejects unknown flags, missing values, repeated --tickets-dir/--agent-harness, and unknown harnesses. */

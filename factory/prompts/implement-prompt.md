@@ -84,7 +84,7 @@ After known obligations are implemented and verified, review once against the or
 
 ## Git boundaries and completion
 
-You are in the ticket workspace on the branch named above, cloned from the ticket repository. Local Git reads (`git status`, `git log`, `git diff`, `git rev-parse`) and local commits are allowed. Never run `git push`, delete or mutate remote branches, run `gh`, or call the GitHub API: the runner owns every remote operation. Do not create or switch branches.
+You are in the ticket workspace on the branch named above, cloned from the ticket repository. Local Git reads (`git status`, `git log`, `git diff`, `git rev-parse`) and local commits are allowed. Never run `git push`, delete or mutate remote branches, run `gh` or `az repos`, or call the GitHub or Azure DevOps API: the runner owns every remote operation. Do not create or switch branches.
 
 Before committing, inspect the final diff and worktree state. Load `commit-conventions` when available, then commit all completed source, test, and documentation changes with a concise conforming message.
 

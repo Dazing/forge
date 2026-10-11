@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CommandFailedError } from "../shared/git.js";
-import { createDraftPullRequest, type Fetch } from "./pull-request-service.js";
+import { CommandFailedError } from "./git.js";
+import { GitHubProvider } from "./github-provider.js";
+import type { Fetch } from "./git-provider.js";
+
+const provider = new GitHubProvider("gh_secret_abc");
 
 const request = {
-  token: "gh_secret_abc",
-  owner: "acme",
-  repository: "app",
+  repositoryUrl: "git@github.com:acme/app.git",
   head: "agent-tickets/fix-login-1a2b3c",
   base: "main",
   title: "Fix login redirect",
@@ -24,10 +25,27 @@ function recordingFetch(status: number, statusText: string, body: string): { fet
   };
 }
 
+test("accepts the canonical GitHub SSH URL", () => {
+  provider.validateRepository("git@github.com:acme/app.git");
+});
+
+for (const repository of [
+  "https://github.com/acme/app.git",
+  "git@github.acme.com:acme/app.git",
+  "/srv/repos/app.git",
+  "ssh://git@github.com/acme/app.git",
+  "git@github.com:acme/app",
+  "git@ssh.dev.azure.com:v3/acme/app/app",
+]) {
+  test(`rejects non-github.com SSH repository ${repository}`, () => {
+    assert.throws(() => provider.validateRepository(repository), /git@github\.com:<owner>\/<repository>\.git/);
+  });
+}
+
 test("creates a draft pull request with GitHub REST headers and payload", async () => {
   const seam = recordingFetch(201, "Created", JSON.stringify({ number: 7, html_url: "https://github.com/acme/app/pull/7" }));
 
-  const result = await createDraftPullRequest(request, seam.fetch);
+  const result = await new GitHubProvider("gh_secret_abc", seam.fetch).createDraftPullRequest(request);
 
   assert.deepEqual(result, { number: 7, url: "https://github.com/acme/app/pull/7" });
   assert.equal(seam.calls.length, 1);
@@ -51,7 +69,7 @@ test("creates a draft pull request with GitHub REST headers and payload", async 
 test("non-2xx responses become structured failures with the HTTP status as exit code", async () => {
   const seam = recordingFetch(422, "Unprocessable Entity", "gh_secret_abc: Validation failed: head branch is not in the repository");
 
-  await assert.rejects(createDraftPullRequest(request, seam.fetch), (error: unknown) => {
+  await assert.rejects(new GitHubProvider("gh_secret_abc", seam.fetch).createDraftPullRequest(request), (error: unknown) => {
     assert.ok(error instanceof CommandFailedError);
     assert.equal(error.failure.exitCode, 422);
     assert.equal(error.failure.operation, "creating draft pull request");
@@ -66,14 +84,14 @@ test("non-2xx responses become structured failures with the HTTP status as exit 
 
 test("responses without a valid number and html_url are rejected", async () => {
   const seam = recordingFetch(201, "Created", JSON.stringify({ number: 7 }));
-  await assert.rejects(createDraftPullRequest(request, seam.fetch), /html_url/);
+  await assert.rejects(new GitHubProvider("gh_secret_abc", seam.fetch).createDraftPullRequest(request), /html_url/);
 });
 
 test("transport failures become structured failures with transport diagnostics", async () => {
   const failingFetch: Fetch = async () => {
     throw new Error("getaddrinfo ENOTFOUND api.github.com");
   };
-  await assert.rejects(createDraftPullRequest(request, failingFetch), (error: unknown) => {
+  await assert.rejects(new GitHubProvider("gh_secret_abc", failingFetch).createDraftPullRequest(request), (error: unknown) => {
     assert.ok(error instanceof CommandFailedError);
     assert.equal(error.failure.exitCode, 1);
     assert.match(error.failure.stderr, /ENOTFOUND/);

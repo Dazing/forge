@@ -25,14 +25,14 @@ export class InvocationLogger {
   private constructor(
     readonly runDir: string,
     private readonly mainLogPath: string,
-    private readonly githubToken: string,
+    private readonly secret: string,
   ) {}
 
   /** Create the run directory for this invocation under the factory root. */
-  static async create(factoryRoot: string, githubToken: string): Promise<InvocationLogger> {
+  static async create(factoryRoot: string, secret: string): Promise<InvocationLogger> {
     const runDir = resolve(factoryRoot, ".logs", `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}`);
     await mkdir(runDir, { recursive: true });
-    return new InvocationLogger(runDir, resolve(runDir, "main.log"), githubToken);
+    return new InvocationLogger(runDir, resolve(runDir, "main.log"), secret);
   }
 
   /** Human-readable log file path for one agent stage. */
@@ -52,10 +52,10 @@ export class InvocationLogger {
         .join(" "),
     ];
     if (record.stdout !== undefined) {
-      lines.push(`stdout:\n${redactSecret(this.githubToken, record.stdout)}`);
+      lines.push(`stdout:\n${redactSecret(this.secret, record.stdout)}`);
     }
     if (record.stderr !== undefined) {
-      lines.push(`stderr:\n${redactSecret(this.githubToken, record.stderr)}`);
+      lines.push(`stderr:\n${redactSecret(this.secret, record.stderr)}`);
     }
     await appendFile(this.mainLogPath, `${lines.join("\n")}\n\n`);
   }

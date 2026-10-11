@@ -59,7 +59,7 @@ test("failure section records stage, sanitized command, exit status, and fenced 
     exitCode: 128,
     stdout: "remote: rejected\ntoken gh_secret_abc",
     stderr: "git@github.com: Permission denied (publickey). gh_secret_abc",
-    githubToken: "gh_secret_abc",
+    secret: "gh_secret_abc",
   });
   const final = await readFile(path, "utf8");
   assert.match(final, /## Failed at stage `push` \(2026-10-11T09:00:00\.000Z\)/);
@@ -67,6 +67,24 @@ test("failure section records stage, sanitized command, exit status, and fenced 
   assert.match(final, /- stdout:\n```text\nremote: rejected\ntoken \[redacted-token\]\n```/);
   assert.match(final, /- stderr:\n```text\ngit@github\.com: Permission denied \(publickey\)\. \[redacted-token\]\n```/);
   assert.ok(!final.includes("gh_secret_abc"), "the literal token never reaches the ticket file");
+});
+
+test("the provider credential is redacted from Azure DevOps failure annotations", async () => {
+  const path = await ticketFile("# Fix login\nBody.");
+  await annotateFailure(path, {
+    timestamp: "2026-10-11T09:00:00.000Z",
+    attemptId: "1a2b3c",
+    stage: "draft pull request",
+    command: "POST https://dev.azure.com/contoso/web/_apis/git/repositories/fix-login/pullrequests?api-version=7.1",
+    exitCode: 401,
+    stdout: "TF400813: Authorization failed for vso_pat_secret_123",
+    stderr: "HTTP 401 Unauthorized",
+    secret: "vso_pat_secret_123",
+  });
+  const final = await readFile(path, "utf8");
+  assert.match(final, /## Failed at stage `draft pull request`/);
+  assert.match(final, /exit code \/ HTTP status: 401/);
+  assert.ok(!final.includes("vso_pat_secret_123"), "the literal PAT never reaches the ticket file");
 });
 
 test("command output containing fences is preserved verbatim inside a longer fence", async () => {
@@ -80,7 +98,7 @@ test("command output containing fences is preserved verbatim inside a longer fen
     exitCode: 1,
     stdout: hostile,
     stderr: "",
-    githubToken: "gh_secret_abc",
+    secret: "gh_secret_abc",
   });
   const final = await readFile(path, "utf8");
   assert.match(final, /- stdout:\n````text\n```text\nfake section\n```\n````/);

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { runCommand, runGit, CommandFailedError } from "../shared/git.js";
+import { runCommand, runGit, CommandFailedError } from "../git-provider/git.js";
 import type { Ticket } from "../tickets/tickets.js";
 import { createWorkspace, reserveAttempt } from "./workspace-service.js";
 
@@ -28,8 +28,6 @@ function ticket(repository: string, baseBranch: string): Ticket {
     path: "/tmp/ticket.md",
     content: "Body.",
     repository,
-    githubOwner: "acme",
-    githubRepository: "app",
     baseBranch,
   };
 }

@@ -1,6 +1,6 @@
 # Supplied local tickets
 
-These are the only tickets available in this invocation. Each ticket includes its stable local ID, normalized name, exact title, the GitHub SSH repository it targets, its base branch, host path for identification only, and full Markdown body. The IDs are not GitHub issue numbers: do not query, update, or close an external issue tracker.
+These are the only tickets available in this invocation. Each ticket includes its stable local ID, normalized name, exact title, the canonical SSH repository URL it targets, its base branch, host path for identification only, and full Markdown body. The IDs are not provider issue numbers: do not query, update, or close an external issue tracker.
 
 <supplied-tickets>
 {{TICKETS}}

@@ -1,13 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
-import { requireCleanRepository, runGit, toCommandFailure, type CommandFailure } from "../shared/git.js";
+import { requireCleanRepository, runGit, toCommandFailure, type CommandFailure } from "../git-provider/git.js";
 import type { InvocationLogger } from "../shared/invocation-log.js";
 import { runImplementationAgent, runPlanAgent, runPullRequestAgent, runReviewAgent } from "../harness/harness-agents.js";
 import { type AgentHarness } from "../sandbox/sandbox.js";
 import { annotateAttempt, annotateCompletion, annotateFailure, moveTicket } from "../tickets/ticket-lifecycle.js";
 import { validatePlan, type Ticket } from "../tickets/tickets.js";
 import { createWorkspace, reserveAttempt } from "../workspace/workspace-service.js";
-import { createDraftPullRequest } from "../github/pull-request-service.js";
+import type { GitProvider } from "../git-provider/git-provider.js";
 
 // Ticket-scoped lifecycle: plan, workspace, implement, review, commit, push, draft pull request, terminal ticket transition.
 
@@ -19,7 +19,7 @@ export interface SolveContext {
   readonly pending: readonly Ticket[];
   readonly completed: readonly string[];
   readonly logger: InvocationLogger;
-  readonly githubToken: string;
+  readonly gitProvider: GitProvider;
 }
 
 export interface TicketOutcome {
@@ -113,10 +113,8 @@ async function solveTicket(ticket: Ticket, context: SolveContext): Promise<Ticke
     await runGit(attempt.workspacePath, ["push", "--set-upstream", "origin", attempt.branch], "pushing ticket branch");
 
     stage = "draft pull request";
-    const pullRequest = await createDraftPullRequest({
-      token: context.githubToken,
-      owner: ticket.githubOwner,
-      repository: ticket.githubRepository,
+    const pullRequest = await context.gitProvider.createDraftPullRequest({
+      repositoryUrl: ticket.repository,
       head: attempt.branch,
       base: ticket.baseBranch,
       title: content.title,
@@ -170,7 +168,7 @@ async function solveTicket(ticket: Ticket, context: SolveContext): Promise<Ticke
         exitCode: failure.exitCode,
         stdout: failure.stdout,
         stderr: failure.stderr,
-        githubToken: context.githubToken,
+        secret: context.gitProvider.credential,
       });
     } catch (error2) {
       await logSettlementFailure(context.logger, ticket, attemptId, "failure annotation", error2);

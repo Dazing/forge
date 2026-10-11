@@ -17,7 +17,7 @@ The selected agent exposes the supplied skill catalog from its global skills dir
 
 Keep the review bounded. Use existing successful evidence when it remains valid. Run each ticket-required check once against the final state, and add another targeted check only for a concrete finding or unsupported runtime claim. Do not perform broad framework research, repeat API launches, or exercise unrelated scenarios without a specific unresolved question.
 
-Local Git reads (`git status`, `git log`, `git diff`, `git rev-parse`) and local commits are allowed. Never run `git push`, delete or mutate remote branches, run `gh`, or call the GitHub API: the runner owns every remote operation. Do not create or switch branches.
+Local Git reads (`git status`, `git log`, `git diff`, `git rev-parse`) and local commits are allowed. Never run `git push`, delete or mutate remote branches, run `gh` or `az repos`, or call the GitHub or Azure DevOps API: the runner owns every remote operation. Do not create or switch branches.
 
 Fix every supported issue directly on this branch. After the final fix, run the relevant checks, inspect the complete `git status --short` output without excluding generated directories, restore unrelated generated changes, and commit all review changes. If no fixes are needed, do not create an empty commit. Do not report success if a check fails, a ticket requirement remains unmet, changes remain uncommitted, or an unresolved blocker exists. Explain the failure instead and exit nonzero when possible.
 

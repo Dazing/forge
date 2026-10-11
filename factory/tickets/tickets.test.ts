@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { AzureDevOpsProvider } from "../git-provider/azure-devops-provider.js";
+import { GitHubProvider } from "../git-provider/github-provider.js";
 import { listTicketPaths, loadTicket, planSchema, validatePlan, TicketMetadataError, type Ticket } from "./tickets.js";
+
+const github = new GitHubProvider("gh_secret_abc");
+const azure = new AzureDevOpsProvider("vso_pat_secret_123");
 
 async function ticketPath(frontMatter: string, body: string, name = "ticket.md"): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "sandcastle-ticket-"));
@@ -21,29 +26,70 @@ function ticket(overrides: Partial<Ticket> = {}): Ticket {
     path: "/tmp/ticket.md",
     content: "# Fix login redirect\n",
     repository: "git@github.com:acme/app.git",
-    githubOwner: "acme",
-    githubRepository: "app",
     baseBranch: "main",
     ...overrides,
   };
 }
 
-test("defaults base branch to main and derives GitHub owner/repository from the SSH URL", async () => {
+test("defaults base branch to main and keeps the canonical SSH URL as the clone target", async () => {
   const loaded = await loadTicket(
     await ticketPath("name: fix-login-redirect\nrepository: git@github.com:acme/app.git", "# Fix login redirect\nBody."),
+    github,
   );
   assert.equal(loaded.baseBranch, "main");
-  assert.equal(loaded.githubOwner, "acme");
-  assert.equal(loaded.githubRepository, "app");
   assert.equal(loaded.repository, "git@github.com:acme/app.git");
   assert.equal(loaded.name, "fix-login-redirect");
   assert.equal(loaded.slug, "fix-login-redirect");
   assert.equal(loaded.title, "Fix login redirect");
 });
 
+test("accepts the canonical Azure DevOps SSH URL", async () => {
+  const loaded = await loadTicket(
+    await ticketPath("name: fix-login-redirect\nrepository: git@ssh.dev.azure.com:v3/Contoso Team/Web App/fix-login", "Body."),
+    azure,
+  );
+  assert.equal(loaded.repository, "git@ssh.dev.azure.com:v3/Contoso Team/Web App/fix-login");
+});
+
+test("the GitHub provider rejects the Azure SSH URL", async () => {
+  await assert.rejects(
+    loadTicket(await ticketPath("name: fix-login-redirect\nrepository: git@ssh.dev.azure.com:v3/contoso/web/fix-login", "Body."), github),
+    (error: unknown) => {
+      assert.ok(error instanceof TicketMetadataError);
+      assert.equal(error.failure.operation, "validating repository URL");
+      return true;
+    },
+  );
+});
+
+test("the Azure DevOps provider rejects the GitHub SSH URL", async () => {
+  await assert.rejects(
+    loadTicket(await ticketPath("name: fix-login-redirect\nrepository: git@github.com:acme/app.git", "Body."), azure),
+    (error: unknown) => {
+      assert.ok(error instanceof TicketMetadataError);
+      assert.equal(error.failure.operation, "validating repository URL");
+      return true;
+    },
+  );
+});
+
+for (const repository of [
+  "git@ssh.dev.azure.com:v3/contoso/web",
+  "git@ssh.dev.azure.com:v3//web/fix-login",
+  "git@ssh.dev.azure.com:v3/contoso//fix-login",
+]) {
+  test(`rejects the Azure URL missing a segment ${repository}`, async () => {
+    await assert.rejects(
+      loadTicket(await ticketPath(`name: fix-login-redirect\nrepository: ${repository}`, "Body."), azure),
+      TicketMetadataError,
+    );
+  });
+}
+
 test("honors an explicit base branch", async () => {
   const loaded = await loadTicket(
     await ticketPath("name: fix-login-redirect\nrepository: git@github.com:acme/app.git\nbaseBranch: release/2.1", "Body."),
+    github,
   );
   assert.equal(loaded.baseBranch, "release/2.1");
 });
@@ -51,11 +97,13 @@ test("honors an explicit base branch", async () => {
 test("normalizes name once to lowercase kebab-case slug", async () => {
   const spaced = await loadTicket(
     await ticketPath("name: Fix Login Redirect!\nrepository: git@github.com:acme/app.git", "Body."),
+    github,
   );
   assert.equal(spaced.slug, "fix-login-redirect");
 
   const punctuated = await loadTicket(
     await ticketPath("name: __Fix__Login__v2__\nrepository: git@github.com:acme/app.git", "Body."),
+    github,
   );
   assert.equal(punctuated.slug, "fix-login-v2");
   assert.equal(punctuated.title, "fix-login-v2", "title falls back to the normalized name when no H1 exists");
@@ -63,7 +111,7 @@ test("normalizes name once to lowercase kebab-case slug", async () => {
 
 test("rejects empty normalized names", async () => {
   await assert.rejects(
-    loadTicket(await ticketPath("name: ___\nrepository: git@github.com:acme/app.git", "Body.")),
+    loadTicket(await ticketPath("name: ___\nrepository: git@github.com:acme/app.git", "Body."), github),
     (error: unknown) => {
       assert.ok(error instanceof TicketMetadataError);
       assert.match(error.failure.operation, /normalizing/);
@@ -78,18 +126,19 @@ for (const repository of [
   "/srv/repos/app.git",
   "ssh://git@github.com/acme/app.git",
   "git@github.com:acme/app",
+  "   ",
 ]) {
   test(`rejects non-github.com SSH repository ${repository}`, async () => {
     await assert.rejects(
-      loadTicket(await ticketPath(`name: fix-login-redirect\nrepository: ${repository}`, "Body.")),
+      loadTicket(await ticketPath(`name: fix-login-redirect\nrepository: ${repository}`, "Body."), github),
       TicketMetadataError,
     );
   });
 }
 
 test("rejects missing required fields", async () => {
-  await assert.rejects(loadTicket(await ticketPath("repository: git@github.com:acme/app.git", "Body.")), TicketMetadataError);
-  await assert.rejects(loadTicket(await ticketPath("name: fix-login-redirect", "Body.")), TicketMetadataError);
+  await assert.rejects(loadTicket(await ticketPath("repository: git@github.com:acme/app.git", "Body."), github), TicketMetadataError);
+  await assert.rejects(loadTicket(await ticketPath("name: fix-login-redirect", "Body."), github), TicketMetadataError);
 });
 
 test("rejects malformed front matter", async () => {
@@ -97,30 +146,32 @@ test("rejects malformed front matter", async () => {
 
   const noBlock = join(dir, "no-block.md");
   await writeFile(noBlock, "name: fix\n# Body");
-  await assert.rejects(loadTicket(noBlock), TicketMetadataError);
+  await assert.rejects(loadTicket(noBlock, github), TicketMetadataError);
 
   const unterminated = join(dir, "unterminated.md");
   await writeFile(unterminated, "---\nname: fix\nrepository: git@github.com:acme/app.git\n");
-  await assert.rejects(loadTicket(unterminated), TicketMetadataError);
+  await assert.rejects(loadTicket(unterminated, github), TicketMetadataError);
 
   const invalidYaml = join(dir, "invalid.md");
   await writeFile(invalidYaml, "---\nname: [unclosed\n---\nBody");
-  await assert.rejects(loadTicket(invalidYaml), TicketMetadataError);
+  await assert.rejects(loadTicket(invalidYaml, github), TicketMetadataError);
 
   const empty = join(dir, "empty.md");
   await writeFile(empty, "   \n");
-  await assert.rejects(loadTicket(empty), TicketMetadataError);
+  await assert.rejects(loadTicket(empty, github), TicketMetadataError);
 });
 
 test("front matter is removed from prompt content and the ID hashes the complete source", async () => {
   const loaded = await loadTicket(
     await ticketPath("name: fix-login-redirect\nrepository: git@github.com:acme/app.git", "# Fix login redirect\nBody text."),
+    github,
   );
   assert.ok(loaded.content.startsWith("# Fix login redirect"));
   assert.ok(!loaded.content.includes("repository:"));
 
   const sameBody = await loadTicket(
     await ticketPath("name: other-name\nrepository: git@github.com:acme/app.git", "# Fix login redirect\nBody text."),
+    github,
   );
   assert.notEqual(loaded.id, sameBody.id, "front matter participates in the content hash");
   assert.equal(loaded.id.length, 16);

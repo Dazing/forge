@@ -3,19 +3,18 @@ import { readdir, readFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
-import type { CommandFailure } from "../shared/git.js";
+import type { CommandFailure } from "../git-provider/git.js";
+import type { GitProvider } from "../git-provider/git-provider.js";
 
 // Ticket front-matter parsing, identity, formatting, and plan validation, split from main.ts.
 // Local-ticket adaptation of upstream commit 1e15922d0a0f51d5819f3615886444d10a6aa183
 // (.sandcastle/run.ts blob 58def9aeddc8680067711fe3a5399509926d1bb0).
 const MAX_PARALLEL = 1;
 
-const githubSshUrl = /^git@github\.com:([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\.git$/;
-
 const frontMatterSchema = z
   .object({
     name: z.string(),
-    repository: z.string().regex(githubSshUrl),
+    repository: z.string().trim().min(1),
     baseBranch: z.string().min(1).default("main"),
   })
   .strict();
@@ -28,8 +27,6 @@ export type Ticket = Readonly<{
   path: string;
   content: string;
   repository: string;
-  githubOwner: string;
-  githubRepository: string;
   baseBranch: string;
 }>;
 
@@ -54,8 +51,8 @@ function metadataFailure(path: string, operation: string, detail: string): Comma
   return { operation, command: `read ${path}`, exitCode: 1, stdout: "", stderr: detail };
 }
 
-/** Parse exactly one ticket file; throws TicketMetadataError with structured stage details for any metadata violation. */
-export async function loadTicket(path: string): Promise<Ticket> {
+/** Parse exactly one ticket file; throws TicketMetadataError with structured stage details for any metadata violation, including a repository URL the selected provider rejects. */
+export async function loadTicket(path: string, provider: GitProvider): Promise<Ticket> {
   const ticketPath = resolve(path);
   if (!ticketPath.toLowerCase().endsWith(".md")) {
     throw new TicketMetadataError(ticketPath, metadataFailure(ticketPath, "reading ticket file", "Ticket must be a Markdown file."), undefined);
@@ -115,12 +112,13 @@ export async function loadTicket(path: string): Promise<Ticket> {
     );
   }
 
-  const ssh = githubSshUrl.exec(validated.data.repository);
-  if (!ssh) {
+  try {
+    provider.validateRepository(validated.data.repository);
+  } catch (error) {
     throw new TicketMetadataError(
       ticketPath,
-      metadataFailure(ticketPath, "validating repository URL", `Repository must be a git@github.com:<owner>/<repository>.git SSH URL; got ${validated.data.repository}.`),
-      undefined,
+      metadataFailure(ticketPath, "validating repository URL", error instanceof Error ? error.message : String(error)),
+      error,
     );
   }
 
@@ -132,8 +130,6 @@ export async function loadTicket(path: string): Promise<Ticket> {
     path: ticketPath,
     content: body,
     repository: validated.data.repository,
-    githubOwner: ssh[1]!,
-    githubRepository: ssh[2]!,
     baseBranch: validated.data.baseBranch,
   };
 }

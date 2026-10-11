@@ -31,7 +31,7 @@ export type FailureAnnotation = Readonly<{
   exitCode: number;
   stdout: string;
   stderr: string;
-  githubToken: string;
+  secret: string;
 }>;
 
 function fence(text: string): string {
@@ -79,8 +79,8 @@ export async function annotateCompletion(ticketPath: string, completion: Complet
 
 /** Append the failure section with sanitized command, exit code/HTTP status, and fenced stdout/stderr. */
 export async function annotateFailure(ticketPath: string, failure: FailureAnnotation): Promise<void> {
-  const stdout = redactSecret(failure.githubToken, failure.stdout);
-  const stderr = redactSecret(failure.githubToken, failure.stderr);
+  const stdout = redactSecret(failure.secret, failure.stdout);
+  const stderr = redactSecret(failure.secret, failure.stderr);
   await appendSection(
     ticketPath,
     [
@@ -88,7 +88,7 @@ export async function annotateFailure(ticketPath: string, failure: FailureAnnota
       "",
       `- Attempt ID: \`${failure.attemptId}\``,
       `- Stage: \`${failure.stage}\``,
-      `- Command: \`${redactSecret(failure.githubToken, failure.command)}\` (exit code / HTTP status: ${failure.exitCode})`,
+      `- Command: \`${redactSecret(failure.secret, failure.command)}\` (exit code / HTTP status: ${failure.exitCode})`,
       "- stdout:",
       fence(stdout) + "text",
       stdout,

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { runCommand, runGit } from "../shared/git.js";
+import { runCommand, runGit } from "../git-provider/git.js";
 import type { Ticket } from "../tickets/tickets.js";
 
 // Fresh per-ticket Git workspace: attempt identity, clone, and local ticket branch, split from orchestration.
