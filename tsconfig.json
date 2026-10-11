@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": [".sandcastle/**/*.ts", "factory/**/*.ts", "proof/**/*.ts"]
+  "include": ["factory/**/*.ts", "proof/**/*.ts"]
 }

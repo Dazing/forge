@@ -1,9 +1,11 @@
 import { resolve } from "node:path";
 import * as sandcastle from "@ai-hero/sandcastle";
-import type { RunResult, Sandbox, SandboxRunResult } from "@ai-hero/sandcastle";
+import type { RunResult } from "@ai-hero/sandcastle";
 import { z } from "zod";
 import { sandboxProvider, type AgentHarness } from "../sandbox/sandbox.js";
+import type { InvocationLogger } from "../shared/invocation-log.js";
 import { formatTickets, planSchema, type Ticket } from "../tickets/tickets.js";
+import type { TicketAttempt } from "../workspace/workspace-service.js";
 import { ohMyPi } from "./oh-my-pi.js";
 
 // Agent construction and stage runs for the Sandcastle runner, split from main.ts.
@@ -12,14 +14,8 @@ import { ohMyPi } from "./oh-my-pi.js";
 
 const MODEL = "vllm-qwen38-27b";
 const COMPLETE = "<promise>COMPLETE</promise>";
+const TICKET_AGENT_MAX_ITERATIONS = 3;
 const promptsPath = resolve(import.meta.dirname, "..", "prompts");
-const runLogPath = resolve(
-  import.meta.dirname,
-  "..",
-  "..",
-  ".logs",
-  `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}`,
-);
 
 const TOOL_SUMMARY_KEYS = ["path", "command", "query", "url", "description"] as const;
 const MAX_TOOL_SUMMARY_LENGTH = 200;
@@ -37,25 +33,23 @@ function summarizeToolArgs(args: unknown): string {
   return Object.keys(values).join(", ");
 }
 
-const MCP_TOOL_RULES = `# Required MCP tool workflow
+const MCP_TOOL_RULES = `# MCP tool workflow
 
 The sandbox provides native MCP tools from roslyn and microsoft-learn.
 The pinned RoslynMcp 1.2.3 exposes load_solution, load_project, load_type,
 load_member, search_type, search_member, find_references, diagnose_file, and
-run_tests. Read their declared schemas before calling them. For C# analysis,
-call load_solution first, then load_project and the semantic navigation,
-reference, and diagnostic tools rather than shell/text substitutes. If the repo
-has only .csproj files, create a disposable .slnx under /tmp referencing the real
-projects by absolute path, load it, and remove it before completion. Never commit
-this analysis-only solution. Use run_tests
-for supported tests. This server has no build tool: use dotnet build for compilation.
-An executable custom test harness may require dotnet run; state why run_tests
-does not apply. Do not assume APIs from another Roslyn MCP server or version.
-For C#/.NET implementation or review, make a targeted Microsoft Learn
-microsoft_docs_search call to ground the framework behavior relevant to the
-ticket; fetch the document when the search excerpt is insufficient.
-Do not silently fall back when a required MCP call fails: report the exact error.
-Include the consequential MCP calls and their results in verification evidence.
+run_tests. Use Roslyn semantic navigation for C# symbol definitions, references,
+and diagnostics when those questions are material to the ticket. If the repo has
+only .csproj files and semantic analysis is needed, create a disposable .slnx
+under /tmp referencing the real projects by absolute path, load it, and remove
+it before completion. Never commit this analysis-only solution. Use run_tests
+for supported tests; an executable custom test harness may require dotnet run.
+This server has no build tool, so use dotnet build for compilation.
+Use microsoft_docs_search only when current official framework behavior is
+needed to resolve an implementation or review question. Do not repeat checks
+whose existing successful evidence remains valid. Report required tool failures
+instead of silently substituting a text search, and include consequential MCP
+results in verification evidence.
 `;
 
 function ticketAgent(harness: AgentHarness) {
@@ -107,10 +101,10 @@ function ticketAgent(harness: AgentHarness) {
   };
 }
 
-function fileLogging(name: string) {
+function fileLogging(logger: InvocationLogger, name: string) {
   return {
     type: "file",
-    path: resolve(runLogPath, `${name}.log`),
+    path: logger.agentLogPath(name),
   } as const;
 }
 
@@ -123,21 +117,22 @@ function requireCompletion(stage: string, result: { completionSignal?: string })
 /** Planner output shape extracted from the `<plan>` tag. */
 export type PlanOutput = z.infer<typeof planSchema>;
 
-/** Run one planning iteration; fails when the planner omits the complete `<plan>` response. */
+/** Run one planning iteration from the factory root; fails when the planner omits the complete `<plan>` response. */
 export async function runPlanAgent(
-  repo: string,
+  factoryRoot: string,
   harness: AgentHarness,
   iteration: number,
   pending: readonly Ticket[],
   completed: readonly string[],
+  logger: InvocationLogger,
 ): Promise<RunResult & { output: PlanOutput }> {
   const result = await sandcastle.run({
-    cwd: repo,
+    cwd: factoryRoot,
     sandbox: sandboxProvider(harness),
     branchStrategy: { type: "head" },
     name: "Planner",
     agent: ticketAgent(harness),
-    logging: fileLogging(`planner-${iteration}`),
+    logging: fileLogging(logger, `planner-${iteration}`),
     promptFile: resolve(promptsPath, "plan-prompt.md"),
     promptArgs: {
       TICKETS: formatTickets(pending),
@@ -152,69 +147,96 @@ export async function runPlanAgent(
   return result;
 }
 
-/** Run the implementer in the ticket's sandbox; fails without the completion signal. */
+/** Run the implementer in the ticket workspace's checked-out branch; fails without the completion signal. */
 export async function runImplementationAgent(
-  sandbox: Sandbox,
-  ticket: Ticket,
+  attempt: TicketAttempt,
   harness: AgentHarness,
-): Promise<SandboxRunResult> {
-  const result = await sandbox.run({
-    name: `Implementer ${ticket.id}`,
+  logger: InvocationLogger,
+): Promise<RunResult> {
+  const result = await sandcastle.run({
+    cwd: attempt.workspacePath,
+    sandbox: sandboxProvider(harness),
+    branchStrategy: { type: "head" },
+    name: `Implementer ${attempt.ticket.id}`,
     agent: ticketAgent(harness),
-    logging: fileLogging(`implementer-${ticket.id}`),
+    logging: fileLogging(logger, `implementer-${attempt.ticket.id}-${attempt.attemptId}`),
+    maxIterations: TICKET_AGENT_MAX_ITERATIONS,
     promptFile: resolve(promptsPath, "implement-prompt.md"),
     promptArgs: {
-      TICKET_ID: ticket.id,
-      TICKET_TITLE: ticket.title,
-      TICKET_CONTENT: ticket.content,
-      BRANCH: ticket.branch,
+      TICKET_ID: attempt.ticket.id,
+      TICKET_TITLE: attempt.ticket.title,
+      TICKET_CONTENT: attempt.ticket.content,
+      BRANCH: attempt.branch,
+      BASE_BRANCH: attempt.ticket.baseBranch,
     },
   });
-  requireCompletion(`Implementation for ticket ${ticket.id}`, result);
+  requireCompletion(`Implementation for ticket ${attempt.ticket.id}`, result);
   return result;
 }
 
-/** Run the reviewer in the ticket's sandbox; fails without the completion signal. */
+/** Run the reviewer in the ticket workspace's checked-out branch; fails without the completion signal. */
 export async function runReviewAgent(
-  sandbox: Sandbox,
-  ticket: Ticket,
+  attempt: TicketAttempt,
   harness: AgentHarness,
-): Promise<void> {
-  const result = await sandbox.run({
-    name: `Reviewer ${ticket.id}`,
-    agent: ticketAgent(harness),
-    logging: fileLogging(`reviewer-${ticket.id}`),
-    promptFile: resolve(promptsPath, "review-prompt.md"),
-    promptArgs: {
-      TICKET_ID: ticket.id,
-      TICKET_TITLE: ticket.title,
-      TICKET_CONTENT: ticket.content,
-      BRANCH: ticket.branch,
-    },
-  });
-  requireCompletion(`Review for ticket ${ticket.id}`, result);
-}
-
-/** Merge the implemented branches into the target repository head; fails without the completion signal. */
-export async function runMergeAgent(
-  repo: string,
-  harness: AgentHarness,
-  iteration: number,
-  implemented: readonly Ticket[],
-): Promise<void> {
+  logger: InvocationLogger,
+): Promise<RunResult> {
   const result = await sandcastle.run({
-    cwd: repo,
+    cwd: attempt.workspacePath,
     sandbox: sandboxProvider(harness),
     branchStrategy: { type: "head" },
-    name: "Merger",
-    maxIterations: 10,
+    name: `Reviewer ${attempt.ticket.id}`,
     agent: ticketAgent(harness),
-    logging: fileLogging(`merger-${iteration}`),
-    promptFile: resolve(promptsPath, "merge-prompt.md"),
+    logging: fileLogging(logger, `reviewer-${attempt.ticket.id}-${attempt.attemptId}`),
+    maxIterations: TICKET_AGENT_MAX_ITERATIONS,
+    promptFile: resolve(promptsPath, "review-prompt.md"),
     promptArgs: {
-      BRANCHES: implemented.map((ticket) => `- ${ticket.branch}`).join("\n"),
-      TICKETS: formatTickets(implemented),
+      TICKET_ID: attempt.ticket.id,
+      TICKET_TITLE: attempt.ticket.title,
+      TICKET_CONTENT: attempt.ticket.content,
+      BRANCH: attempt.branch,
+      BASE_BRANCH: attempt.ticket.baseBranch,
     },
   });
-  requireCompletion("Merge", result);
+  requireCompletion(`Review for ticket ${attempt.ticket.id}`, result);
+  return result;
+}
+
+/** Pull-request content shape extracted from the `<pull-request>` tag; all values trimmed and non-empty. */
+export const pullRequestSchema = z
+  .object({
+    title: z.string().trim().min(1),
+    body: z.string().trim().min(1),
+  })
+  .strict();
+
+export type PullRequestOutput = z.infer<typeof pullRequestSchema>;
+
+/** Run the read-only pull-request content agent in the ticket workspace; returns commit, title, and body content without touching Git or GitHub. */
+export async function runPullRequestAgent(
+  attempt: TicketAttempt,
+  harness: AgentHarness,
+  logger: InvocationLogger,
+): Promise<PullRequestOutput> {
+  const result = await sandcastle.run({
+    cwd: attempt.workspacePath,
+    sandbox: sandboxProvider(harness),
+    branchStrategy: { type: "head" },
+    name: `Pull request ${attempt.ticket.id}`,
+    agent: ticketAgent(harness),
+    logging: fileLogging(logger, `pull-request-${attempt.ticket.id}-${attempt.attemptId}`),
+    promptFile: resolve(promptsPath, "pull-request-prompt.md"),
+    promptArgs: {
+      TICKET_ID: attempt.ticket.id,
+      TICKET_TITLE: attempt.ticket.title,
+      TICKET_CONTENT: attempt.ticket.content,
+      BRANCH: attempt.branch,
+      BASE_BRANCH: attempt.ticket.baseBranch,
+    },
+    completionSignal: "</pull-request>",
+    output: sandcastle.Output.object({ tag: "pull-request", schema: pullRequestSchema }),
+  });
+  if (result.completionSignal !== "</pull-request>") {
+    throw new Error(`Pull-request content for ticket ${attempt.ticket.id} stopped without a complete <pull-request> response.`);
+  }
+  return result.output;
 }

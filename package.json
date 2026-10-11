@@ -8,6 +8,7 @@
     "sandcastle": "tsx factory/main.ts",
     "prepare:scenario": "tsx proof/harness/materialize-fixture.ts",
     "evaluate": "tsx proof/harness/evaluate.ts",
+    "test": "tsx --test \"factory/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
@@ -17,6 +18,7 @@
   },
   "dependencies": {
     "@ai-hero/sandcastle": "0.12.0",
+    "yaml": "2.9.1",
     "zod": "4.6.5"
   }
 }

@@ -1,10 +1,11 @@
 # Implementation task
 
-Implement the single supplied local ticket in the target repository, which is your current working directory.
+Implement the single supplied local ticket in its freshly cloned ticket workspace, which is your current working directory.
 
 - Ticket ID: {{TICKET_ID}}
 - Title: {{TICKET_TITLE}}
-- Branch: {{BRANCH}}
+- Branch: {{BRANCH}} (already checked out)
+- Base branch: {{BASE_BRANCH}} (the clone's `origin` tip)
 
 <ticket>
 {{TICKET_CONTENT}}
@@ -19,6 +20,7 @@ Execute this workflow directly. Work only on this ticket, preserve unrelated beh
 - Preserve public contracts, security, data integrity, and adopted architecture from the first edit. A coherent behavior may span several files when its contract and consumers must change together; do not silently reduce the overall ticket.
 - Keep work focused. Do not add speculative validation, retries, telemetry, abstractions, architecture, dependencies, or unrelated cleanup.
 - Use tools directly and inspect only to answer a question that affects the next edit or check. Do not invoke another coding controller, create a separate planning document, or repeatedly read unchanged material.
+- Make documented launch and verification commands reproducible from the stated directory. Specify environment values that determine observable behavior, such as listener URLs or ports, instead of relying on ambient sandbox configuration.
 
 ## 1. Ground the contract
 
@@ -80,11 +82,11 @@ After known obligations are implemented and verified, review once against the or
 - Allow at most three unsuccessful repair attempts for the same underlying unexpected failure. Renaming the check or changing phases does not reset the count. After the third failure, stop attempts on that cause, preserve the evidence, and finish only genuinely independent in-scope work.
 - Preserve command exit status. Never suppress diagnostics, weaken checks, or change unrelated source merely to make a command pass. Distinguish pre-existing or environmental failures from regressions introduced by this ticket.
 
-## Commit and completion
+## Git boundaries and completion
 
-You are already in the reusable sandbox for the deterministic branch named above. Do not create or switch branches.
+You are in the ticket workspace on the branch named above, cloned from the ticket repository. Local Git reads (`git status`, `git log`, `git diff`, `git rev-parse`) and local commits are allowed. Never run `git push`, delete or mutate remote branches, run `gh`, or call the GitHub API: the runner owns every remote operation. Do not create or switch branches.
 
-Before committing, inspect the final diff and worktree state. Load `commit-conventions` when available, then commit all completed source, test, and documentation changes with a concise conforming message. At least one implementation commit is required, and the worktree must be clean.
+Before committing, inspect the final diff and worktree state. Load `commit-conventions` when available, then commit all completed source, test, and documentation changes with a concise conforming message.
 
 Finish only when every explicit obligation has evidence, applicable standards are satisfied, existing applicable behavioral checks pass, every changed target compiles or type-checks, review findings are resolved, and no provisional behavior remains.
 
@@ -99,6 +101,6 @@ Give a concise final report containing:
 
 Do not report success when a command failed, the ticket is incomplete, changes remain uncommitted, or an unresolved blocker exists. On failure, explain the blocker and do not emit the completion signal.
 
-Only after the ticket is fully implemented, relevant checks pass, at least one implementation commit exists, and the worktree is clean, end with:
+Only after the ticket is fully implemented, relevant checks pass, and local commits exist, end with:
 
 <promise>COMPLETE</promise>

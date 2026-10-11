@@ -1,55 +1,116 @@
+import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
 import { parseArgs } from "./cli/cli.js";
 import { solveTickets } from "./orchestration/ticket-orchestrator.js";
 import { preflightSandbox } from "./sandbox/sandbox.js";
-import { runGit } from "./shared/git.js";
+import { toCommandFailure } from "./shared/git.js";
+import { InvocationLogger } from "./shared/invocation-log.js";
 import { requireDirectory } from "./shared/paths.js";
 import { sleep } from "./shared/sleep.js";
-import { listTicketPaths, loadTickets, type Ticket } from "./tickets/tickets.js";
+import { annotateFailure, moveTicket } from "./tickets/ticket-lifecycle.js";
+import { listTicketPaths, loadTicket, TicketMetadataError, type Ticket } from "./tickets/tickets.js";
 
 // Composition root for the Sandcastle runner: the daemon main loop and ticket bookkeeping.
-// CLI parsing lives in cli/cli.ts, the per-iteration ticket loop in orchestration/ticket-orchestrator.ts,
+// CLI parsing lives in cli/cli.ts, the per-iteration ticket lifecycle in orchestration/ticket-orchestrator.ts,
 // git and path checks in shared/, sandbox preflight in sandbox/sandbox.ts, and agent stage runs in harness/harness-agents.ts.
 // Local-ticket adaptation of upstream commit 1e15922d0a0f51d5819f3615886444d10a6aa183
 // (.sandcastle/run.ts blob 58def9aeddc8680067711fe3a5399509926d1bb0).
 
 const TICKET_POLL_MS = 10_000;
 
+function requireGithubToken(): string {
+  const token = process.env.GITHUB_TOKEN;
+  if (token === undefined || token.trim().length === 0) {
+    throw new Error("GITHUB_TOKEN must be set in the repository-root .env before the runner polls tickets. See .env.example.");
+  }
+  return token;
+}
+
+/** Settle one unreadable ticket: record, annotate the failure, and move it to `failed/` so the poll continues. */
+async function settleMetadataFailure(path: string, error: unknown, ticketsDir: string, githubToken: string, logger: InvocationLogger): Promise<void> {
+  const attemptId = randomBytes(3).toString("hex");
+  const stage = "ticket metadata";
+  const failure = error instanceof TicketMetadataError ? error.failure : toCommandFailure(error, stage);
+  const timestamp = new Date().toISOString();
+  await logger.record({ timestamp, attemptId, stage, operation: failure.operation, status: "failed", stdout: failure.stdout, stderr: failure.stderr });
+  try {
+    await annotateFailure(path, {
+      timestamp,
+      attemptId,
+      stage,
+      command: failure.command,
+      exitCode: failure.exitCode,
+      stdout: failure.stdout,
+      stderr: failure.stderr,
+      githubToken,
+    });
+  } catch (annotationError) {
+    await logger.record({ timestamp, attemptId, stage: "failure annotation", operation: "annotating failure", status: "failed", stderr: String(annotationError) });
+  }
+  try {
+    const destination = await moveTicket(path, resolve(ticketsDir, "failed"), attemptId);
+    console.log(`Ticket ${path} failed metadata validation; moved to ${destination}.`);
+  } catch (movementError) {
+    await logger.record({ timestamp, attemptId, stage: "terminal movement", operation: "moving ticket to failed directory", status: "failed", stderr: String(movementError) });
+    console.log(`Ticket ${path} failed metadata validation; movement to failed/ failed: ${String(movementError)}`);
+  }
+}
+
 async function run(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   if (!options) return;
 
-  const repo = resolve(options.repo);
-  await requireDirectory(repo, "Target repository");
-  await runGit(repo, ["rev-parse", "--git-dir"], "validating --repo");
+  const factoryRoot = resolve(import.meta.dirname, "..");
+  process.loadEnvFile(resolve(factoryRoot, ".env"));
+  const githubToken = requireGithubToken();
   const ticketsDir = resolve(options.ticketsDir);
   await requireDirectory(ticketsDir, "Ticket directory");
+  const logger = await InvocationLogger.create(factoryRoot, githubToken);
   await preflightSandbox(options.agentHarness);
-  const initialStatus = await runGit(repo, ["status", "--porcelain"], "checking initial worktree cleanliness");
-  if (initialStatus.trim().length > 0) {
-    throw new Error("Target repository must have a clean worktree before Sandcastle starts.");
-  }
 
-  const allTickets = new Map<string, Ticket>();
-  const completed = new Set<string>();
+  const known = new Map<string, Ticket>();
+  const terminal = new Set<string>();
   let iteration = 0;
   const stayAlive = true;
   while (stayAlive) {
     iteration++;
-    const discovered = await loadTickets(await listTicketPaths(ticketsDir));
-    for (const ticket of discovered) {
-      if (!allTickets.has(ticket.id)) allTickets.set(ticket.id, ticket);
+    for (const path of await listTicketPaths(ticketsDir)) {
+      try {
+        const ticket = await loadTicket(path);
+        if (!known.has(ticket.id) && !terminal.has(ticket.id)) {
+          known.set(ticket.id, ticket);
+        }
+      } catch (error) {
+        await settleMetadataFailure(path, error, ticketsDir, githubToken, logger);
+      }
     }
-    const pending = [...allTickets.values()].filter((ticket) => !completed.has(ticket.id));
+
+    const pending = [...known.values()].filter((ticket) => !terminal.has(ticket.id));
     if (pending.length === 0) {
       console.log(`[poll] No pending tickets; sleeping ${TICKET_POLL_MS / 1000} seconds.`);
       await sleep(TICKET_POLL_MS);
       continue;
     }
 
-    const implemented = await solveTickets(repo, options.agentHarness, iteration, pending, completed, allTickets);
-    for (const ticket of implemented) completed.add(ticket.id);
-    console.log(`merged ${implemented.map((ticket) => ticket.id).join(", ")}; ${completed.size}/${allTickets.size} ticket(s) completed`);
+    const outcomes = await solveTickets({
+      ticketsDir,
+      factoryRoot,
+      harness: options.agentHarness,
+      iteration,
+      pending,
+      completed: [...terminal],
+      logger,
+      githubToken,
+    });
+    for (const outcome of outcomes) {
+      terminal.add(outcome.ticketId);
+      known.delete(outcome.ticketId);
+      if (outcome.completed) {
+        console.log(`Ticket ${outcome.ticketId} completed (attempt ${outcome.attemptId}); moved to ${outcome.destination}.`);
+      } else {
+        console.log(`Ticket ${outcome.ticketId} failed at ${outcome.failure?.operation}; moved to ${outcome.destination}.`);
+      }
+    }
   }
 }
 

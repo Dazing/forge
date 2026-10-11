@@ -39,15 +39,3 @@ export async function preflightSandbox(harness: AgentHarness): Promise<void> {
   }
 }
 
-export async function requireCleanSandbox(
-  sandbox: { exec(command: string): Promise<{ exitCode: number; stdout: string; stderr: string }> },
-  stage: string,
-): Promise<void> {
-  const status = await sandbox.exec("git status --porcelain");
-  if (status.exitCode !== 0) {
-    throw new Error(`${stage} could not inspect the worktree: ${status.stderr.trim()}`);
-  }
-  if (status.stdout.trim().length > 0) {
-    throw new Error(`${stage} left uncommitted changes in the branch worktree.`);
-  }
-}

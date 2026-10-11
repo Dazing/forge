@@ -1,30 +1,141 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
+import { parse } from "yaml";
 import { z } from "zod";
+import type { CommandFailure } from "../shared/git.js";
 
-// Ticket loading, formatting, and plan validation, split from main.ts.
+// Ticket front-matter parsing, identity, formatting, and plan validation, split from main.ts.
 // Local-ticket adaptation of upstream commit 1e15922d0a0f51d5819f3615886444d10a6aa183
 // (.sandcastle/run.ts blob 58def9aeddc8680067711fe3a5399509926d1bb0).
 const MAX_PARALLEL = 1;
 
+const githubSshUrl = /^git@github\.com:([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\.git$/;
+
+const frontMatterSchema = z
+  .object({
+    name: z.string(),
+    repository: z.string().regex(githubSshUrl),
+    baseBranch: z.string().min(1).default("main"),
+  })
+  .strict();
+
 export type Ticket = Readonly<{
   id: string;
+  name: string;
+  slug: string;
   title: string;
   path: string;
   content: string;
-  branch: string;
+  repository: string;
+  githubOwner: string;
+  githubRepository: string;
+  baseBranch: string;
 }>;
 
 export type PlannedTicket = Readonly<{
   id: string;
   title: string;
-  branch: string;
 }>;
 
-function ticketTitle(path: string, content: string): string {
-  const heading = content.match(/^#\s+(.+?)\s*$/m)?.[1];
-  return heading ?? basename(path, ".md");
+/** Typed ticket metadata failure carrying the source path and structured stage details for ticket diagnostics. */
+export class TicketMetadataError extends Error {
+  constructor(
+    readonly path: string,
+    readonly failure: CommandFailure,
+    cause: unknown,
+  ) {
+    super(`Ticket metadata is invalid for ${path}: ${failure.operation} — ${failure.stderr}`, { cause });
+    this.name = "TicketMetadataError";
+  }
+}
+
+function metadataFailure(path: string, operation: string, detail: string): CommandFailure {
+  return { operation, command: `read ${path}`, exitCode: 1, stdout: "", stderr: detail };
+}
+
+/** Parse exactly one ticket file; throws TicketMetadataError with structured stage details for any metadata violation. */
+export async function loadTicket(path: string): Promise<Ticket> {
+  const ticketPath = resolve(path);
+  if (!ticketPath.toLowerCase().endsWith(".md")) {
+    throw new TicketMetadataError(ticketPath, metadataFailure(ticketPath, "reading ticket file", "Ticket must be a Markdown file."), undefined);
+  }
+
+  let source: string;
+  try {
+    source = await readFile(ticketPath, "utf8");
+  } catch (error) {
+    throw new TicketMetadataError(ticketPath, metadataFailure(ticketPath, "reading ticket file", `Could not read ticket: ${ticketPath}`), error);
+  }
+  if (source.trim().length === 0) {
+    throw new TicketMetadataError(ticketPath, metadataFailure(ticketPath, "reading ticket file", "Ticket is empty."), undefined);
+  }
+
+  const frontMatterMatch = source.match(/^---\n([\s\S]*?)\n---\n?/);
+  if (!frontMatterMatch) {
+    throw new TicketMetadataError(
+      ticketPath,
+      metadataFailure(ticketPath, "parsing YAML front matter", "Ticket must start with a --- delimited YAML front matter block."),
+      undefined,
+    );
+  }
+  const body = source.slice(frontMatterMatch[0].length);
+  const frontMatterText = frontMatterMatch[1] ?? "";
+
+  let frontMatter: unknown;
+  try {
+    frontMatter = parse(frontMatterText);
+  } catch (error) {
+    throw new TicketMetadataError(
+      ticketPath,
+      metadataFailure(ticketPath, "parsing YAML front matter", error instanceof Error ? error.message : String(error)),
+      error,
+    );
+  }
+
+  const validated = frontMatterSchema.safeParse(frontMatter);
+  if (!validated.success) {
+    throw new TicketMetadataError(
+      ticketPath,
+      metadataFailure(
+        ticketPath,
+        "validating ticket front matter",
+        validated.error.issues.map((issue) => `${issue.path.join(".") || "<front matter>"} ${issue.message}`).join("; "),
+      ),
+      undefined,
+    );
+  }
+
+  const slug = validated.data.name.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-").replaceAll(/^-+|-+$/g, "");
+  if (slug.length === 0) {
+    throw new TicketMetadataError(
+      ticketPath,
+      metadataFailure(ticketPath, "normalizing ticket name", `Normalized name is empty; name must contain ASCII letters, digits, or hyphens.`),
+      undefined,
+    );
+  }
+
+  const ssh = githubSshUrl.exec(validated.data.repository);
+  if (!ssh) {
+    throw new TicketMetadataError(
+      ticketPath,
+      metadataFailure(ticketPath, "validating repository URL", `Repository must be a git@github.com:<owner>/<repository>.git SSH URL; got ${validated.data.repository}.`),
+      undefined,
+    );
+  }
+
+  return {
+    id: createHash("sha256").update(source).digest("hex").slice(0, 16),
+    name: validated.data.name,
+    slug,
+    title: body.match(/^#\s+(.+?)\s*$/m)?.[1] ?? slug,
+    path: ticketPath,
+    content: body,
+    repository: validated.data.repository,
+    githubOwner: ssh[1]!,
+    githubRepository: ssh[2]!,
+    baseBranch: validated.data.baseBranch,
+  };
 }
 
 /** List Markdown ticket files in a directory as sorted full paths; non-Markdown entries are ignored. */
@@ -36,55 +147,12 @@ export async function listTicketPaths(dir: string): Promise<string[]> {
     .sort();
 }
 
-/** Load host Markdown tickets, rejecting duplicate paths, non-Markdown, empty files, and duplicate content (stable ticket IDs are content hashes). */
-export async function loadTickets(paths: readonly string[]): Promise<Ticket[]> {
-  const seenPaths = new Set<string>();
-  const seenIds = new Set<string>();
-  const tickets: Ticket[] = [];
-
-  for (const suppliedPath of paths) {
-    const path = resolve(suppliedPath);
-    if (seenPaths.has(path)) {
-      throw new Error(`Ticket path was supplied more than once: ${path}`);
-    }
-    seenPaths.add(path);
-    if (!path.toLowerCase().endsWith(".md")) {
-      throw new Error(`Ticket must be a Markdown file: ${path}`);
-    }
-
-    let content: string;
-    try {
-      content = await readFile(path, "utf8");
-    } catch (error) {
-      throw new Error(`Could not read ticket: ${path}`, { cause: error });
-    }
-    if (content.trim().length === 0) {
-      throw new Error(`Ticket is empty: ${path}`);
-    }
-
-    const id = createHash("sha256").update(content).digest("hex").slice(0, 16);
-    if (seenIds.has(id)) {
-      throw new Error(`Tickets must have distinct content; stable ticket ID ${id} is duplicated.`);
-    }
-    seenIds.add(id);
-    tickets.push({
-      id,
-      title: ticketTitle(path, content),
-      path,
-      content,
-      branch: `sandcastle/ticket-${id}`,
-    });
-  }
-
-  return tickets;
-}
-
-/** Render tickets as tagged prompt blocks with stable IDs, titles, branches, and full content. */
+/** Render tickets as tagged prompt blocks with stable IDs, titles, repository context, and body content. */
 export function formatTickets(tickets: readonly Ticket[]): string {
   return tickets
     .map(
       (ticket) =>
-        `<ticket id="${ticket.id}" title=${JSON.stringify(ticket.title)} branch="${ticket.branch}">\n` +
+        `<ticket id="${ticket.id}" name=${JSON.stringify(ticket.name)} title=${JSON.stringify(ticket.title)} repository="${ticket.repository}" base-branch="${ticket.baseBranch}">\n` +
         `<host-path>${ticket.path}</host-path>\n` +
         `<content>\n${ticket.content}\n</content>\n` +
         `</ticket>`,
@@ -100,7 +168,6 @@ export const planSchema = z
           .object({
             id: z.string(),
             title: z.string(),
-            branch: z.string(),
           })
           .strict(),
       )
@@ -108,7 +175,7 @@ export const planSchema = z
   })
   .strict();
 
-/** Validate planner selections against supplied pending tickets; rejects completed, unknown, duplicated, and title- or branch-mutated tickets. */
+/** Validate planner selections against supplied pending tickets; rejects completed, unknown, duplicated, and title-mutated tickets. */
 export function validatePlan(
   entries: readonly PlannedTicket[],
   available: ReadonlyMap<string, Ticket>,
@@ -130,9 +197,6 @@ export function validatePlan(
     if (candidate.title !== ticket.title) {
       throw new Error(`Planner changed title for ticket ${candidate.id}.`);
     }
-    if (candidate.branch !== ticket.branch) {
-      throw new Error(`Planner branch for ${candidate.id} must be ${ticket.branch}.`);
-    }
-    return { id: ticket.id, title: ticket.title, branch: ticket.branch };
+    return { id: ticket.id, title: ticket.title };
   });
 }
