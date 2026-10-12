@@ -34,7 +34,7 @@ export interface PublishPullRequestInput {
   readonly runAgent: AgentRunner;
   readonly gitProvider: GitProvider;
   /** Record verified read-only content at its entry SHA before any publication side effects. */
-  readonly onContentComplete: (head: string) => Promise<void>;
+  readonly onContentComplete: (head: string, logReference: string) => Promise<void>;
   readonly delivery?: Readonly<{
     included: readonly Readonly<{ id: string; title: string }>[];
     retryable: readonly Readonly<{ id: string; reason: string }>[];
@@ -63,23 +63,25 @@ export interface PublishResult {
 /** Publish one attempt: content, immutability, commits ahead of base, final SHA, push, draft pull request. */
 export async function publishPullRequest(input: PublishPullRequestInput): Promise<PublishResult> {
   let content: { title: string; body: string };
+  let contentReference: string;
   try {
     const beforeContent = await snapshotRepository(input.workspacePath);
     const result = await input.runAgent({
       cwd: input.workspacePath,
       harness: input.harness,
       name: `pull-request-${input.ticket.id}-${input.attemptId}`,
-      logName: `pull-request-${input.ticket.id}-${input.attemptId}`,
+      logTarget: { scope: "attempt", attemptId: input.attemptId, stage: "pull-request" },
       promptFile: resolve(import.meta.dirname, "pull-request-prompt.md"),
       promptArgs: { TICKET_ID: input.ticket.id, TICKET_TITLE: input.ticket.title, BRANCH: input.branch, BASE_BRANCH: input.ticket.baseBranch, TICKET_CONTENT: input.ticket.content },
       handoff: pullRequestHandoff,
     });
     content = result.handoff;
+    contentReference = result.logReference;
     if (input.gitProvider.secrets().some((secret) => secret.length > 0 && (content.title.includes(secret) || content.body.includes(secret)))) {
       throw new Error("pull-request content contains provider credential material.");
     }
     requireUnchanged("pull-request content stage", "ticket workspace", beforeContent, await snapshotRepository(input.workspacePath));
-    await input.onContentComplete(beforeContent.head);
+    await input.onContentComplete(beforeContent.head, contentReference);
   } catch (error) {
     throw new PublicationError("pull-request content", error);
   }

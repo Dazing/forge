@@ -34,7 +34,7 @@ function input(workspacePath: string, expectedHead: string, overrides: Partial<S
     stage: "implement",
     message: "fix(login): redirect after auth\n\nRan npm test; 12 passed.",
     expectedHead,
-    agentLogBasename: "implement-0123456789abcdef-1a2b3c.log",
+    agentLogReference: "2026-10-12_09-30-15-1a2b3c/implement-1.log",
     forbiddenSecrets: [SECRET],
     ...overrides,
   };
@@ -62,7 +62,7 @@ test("checkpoint commits stage work with runner identity when Git identity is un
     "Factory-Stage: implement",
     "Factory-Outcome: complete",
     "Factory-Changes: changed",
-    "Factory-Agent-Log: implement-0123456789abcdef-1a2b3c.log",
+    "Factory-Agent-Log: 2026-10-12_09-30-15-1a2b3c/implement-1.log",
   ].join("\n"));
   assert.equal((await git(path, ["log", "-1", "--format=%an <%ae>", result.checkpointSha], "reading checkpoint author")).trim(), "Factory Runner <factory-runner@localhost>");
   assert.equal((await git(path, ["rev-list", "--count", `${entryHead}..HEAD`], "counting commits ahead")).trim(), "1");

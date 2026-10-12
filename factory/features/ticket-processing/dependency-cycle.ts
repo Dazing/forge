@@ -236,7 +236,7 @@ async function publishReviewedSubset(
     harness: config.harness,
     runAgent: config.runAgent,
     gitProvider: config.gitProvider,
-    onContentComplete: (head) => config.logger.record({
+    onContentComplete: (head, logReference) => config.logger.record({
       timestamp: new Date().toISOString(),
       ticketId: representative.id,
       attemptId: publicationAttemptId,
@@ -245,7 +245,7 @@ async function publishReviewedSubset(
       status: "completed",
       checkpointSha: head,
       changes: "unchanged",
-      agentLogBasename: config.logger.agentLogBasename(`pull-request-${representative.id}-${publicationAttemptId}`),
+      agentLogReference: logReference,
     }),
     delivery: {
       included: includedTicketIds.map((id) => ({ id, title: state.tickets.get(id)!.title })),

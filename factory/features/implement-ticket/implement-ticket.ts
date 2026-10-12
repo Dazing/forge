@@ -22,6 +22,7 @@ export interface ImplementTicketInput {
 export type ImplementOutcome = Readonly<{
   message: string;
   head: string;
+  logReference: string;
 }>;
 
 /**
@@ -44,7 +45,7 @@ export async function implementTicket(input: ImplementTicketInput): Promise<Impl
         cwd: input.workspacePath,
         harness: input.harness,
         name: `implement-${input.ticket.slug}`,
-        logName: `implement-${input.ticket.id}-${input.attemptId}`,
+        logTarget: { scope: "attempt", attemptId: input.attemptId, stage: "implement" },
         promptFile: resolve(import.meta.dirname, "implement-prompt.md"),
         promptArgs: {
           TICKET_ID: input.ticket.id,
@@ -58,7 +59,7 @@ export async function implementTicket(input: ImplementTicketInput): Promise<Impl
         maxIterations: 1,
       };
       const result = await input.runAgent(request);
-      return { message: result.handoff.message, head: entry.head };
+      return { message: result.handoff.message, head: entry.head, logReference: result.logReference };
     } catch (error) {
       if (!(error instanceof MissingAgentHandoffError)) throw error;
       lastFailure = error;

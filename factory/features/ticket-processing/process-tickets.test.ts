@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { AgentRunner, AgentRunResult } from "../../infrastructure/agent-runtime/agent-runtime.js";
+import type { AgentRunRequest, AgentRunner, AgentRunResult } from "../../infrastructure/agent-runtime/agent-runtime.js";
 import { runCommand, runGit } from "../../infrastructure/git-provider/git.js";
 import type { GitProvider } from "../../infrastructure/git-provider/git-provider.js";
 import { InvocationLogger } from "../../infrastructure/logging/invocation-log.js";
@@ -30,9 +30,9 @@ test("the daemon replans without sleeping when an empty selection leaves active 
   await writeFile(join(ticketsDir, "active.md"), `---\nid: active\nname: Active\nrepository: ${repository}\n---\n\n# Active\n`);
   const stop = new Error("bounded daemon stop");
   let plans = 0;
-  const runAgent: AgentRunner = async <TOutput>() => {
+  const runAgent: AgentRunner = async <TOutput>(request: AgentRunRequest<TOutput>) => {
     if (++plans === 2) throw stop;
-    return { iterations: [], commits: [], stdout: "", branch: "", handoff: { groups: [] } as TOutput } as AgentRunResult<TOutput>;
+    return { iterations: [], commits: [], stdout: "", branch: "", logReference: `planner/${String(plans).padStart(3, "0")}.log`, handoff: { groups: [] } as TOutput } as AgentRunResult<TOutput>;
   };
   const provider: GitProvider = {
     name: "github",

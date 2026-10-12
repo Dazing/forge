@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
@@ -32,7 +32,8 @@ async function fixture() {
   await runGit(seed, ["push", "origin", "main"], "pushing seed");
   await runCommand("git", ["init", "-b", "main", factoryRoot], "creating factory");
   await writeFile(join(factoryRoot, "README.md"), "factory\n");
-  await runGit(factoryRoot, ["add", "README.md"], "staging factory");
+  await writeFile(join(factoryRoot, ".gitignore"), ".logs/\n.workspaces/\n");
+  await runGit(factoryRoot, ["add", "README.md", ".gitignore"], "staging factory");
   await runGit(factoryRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "factory"], "committing factory");
   await mkdir(ticketsDir);
   return { root, remote, factoryRoot, ticketsDir };
@@ -41,6 +42,17 @@ async function fixture() {
 function markdown(id: string, remote: string, dependencies: readonly string[]) {
   return `---\nid: ${id}\nname: ${id}\nrepository: ${remote}\ndependsOnTickets: [${dependencies.join(", ")}]\n---\n# ${id}\n\nImplement ${id}.\n`;
 }
+
+/** Mimics the runtime: every run for one attempt and stage gets the next numbered transcript inside that attempt's directory. */
+function transcriptFor(request: AgentRunRequest<unknown>): string {
+  const target = request.logTarget;
+  if (target.scope === "sequence") return `planner/${String(target.cycle).padStart(3, "0")}.log`;
+  const key = `${target.attemptId}/${target.stage}`;
+  const number = (RUNS.get(key) ?? 0) + 1;
+  RUNS.set(key, number);
+  return `${target.attemptId}/${target.stage}-${number}.log`;
+}
+const RUNS = new Map<string, number>();
 
 test("diamond dependencies use isolated sibling baselines, bounded overlap, reviewed integration, and one group publication", async () => {
   const { remote, factoryRoot, ticketsDir } = await fixture();
@@ -57,7 +69,7 @@ test("diamond dependencies use isolated sibling baselines, bounded overlap, revi
       const groupsText = request.promptArgs.GROUPS!;
       const groupId = /<group id="([^"]+)">/.exec(groupsText)![1]!;
       const tickets = [...groupsText.matchAll(/- ([^:]+): (.+)/g)].map((match) => ({ id: match[1]!, title: match[2]! }));
-      return { ...base, handoff: { groups: [{ groupId, tickets }] } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, logReference: transcriptFor(request), handoff: { groups: [{ groupId, tickets }] } } as unknown as AgentRunResult<TOutput>;
     }
     if (request.name.startsWith("implement-")) {
       const id = request.promptArgs.TICKET_ID!;
@@ -71,18 +83,18 @@ test("diamond dependencies use isolated sibling baselines, bounded overlap, revi
       await writeFile(join(request.cwd, `${id}.txt`), `${id}\n`);
       if (id === "b" || id === "c") await writeFile(join(request.cwd, "shared.txt"), `${id}\n`);
       activeImplementations--;
-      return { ...base, handoff: { message: `feat(${id}): implement ${id}` } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, logReference: transcriptFor(request), handoff: { message: `feat(${id}): implement ${id}` } } as unknown as AgentRunResult<TOutput>;
     }
-    if (request.name.startsWith("review-")) return { ...base, handoff: { message: "chore(review): verify combined behavior" } } as unknown as AgentRunResult<TOutput>;
+    if (request.name.startsWith("review-")) return { ...base, logReference: transcriptFor(request), handoff: { message: "chore(review): verify combined behavior" } } as unknown as AgentRunResult<TOutput>;
     if (request.name.startsWith("integrate-")) {
       const conflicts = request.promptArgs.CONFLICT_PATHS === "none" ? [] : request.promptArgs.CONFLICT_PATHS!.split("\n");
       if (conflicts.includes("shared.txt")) {
         await writeFile(join(request.cwd, "shared.txt"), "b\nc\n");
         await runGit(request.cwd, ["add", "shared.txt"], "resolving integration fixture conflict");
       }
-      return { ...base, handoff: { message: "chore(integration): review combined behavior", conflicts: conflicts.map((path) => ({ path, disposition: "combined" })) } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, logReference: transcriptFor(request), handoff: { message: "chore(integration): review combined behavior", conflicts: conflicts.map((path) => ({ path, disposition: "combined" })) } } as unknown as AgentRunResult<TOutput>;
     }
-    return { ...base, handoff: { title: "Deliver dependency group", body: "Reviewed as one dependency group." } } as unknown as AgentRunResult<TOutput>;
+    return { ...base, logReference: transcriptFor(request), handoff: { title: "Deliver dependency group", body: "Reviewed as one dependency group." } } as unknown as AgentRunResult<TOutput>;
   };
   const requests: DraftPullRequestRequest[] = [];
   const provider: GitProvider = {
@@ -134,7 +146,7 @@ test("an exhausted ticket publishes reviewed ancestors, blocks descendants, then
       const groupsText = request.promptArgs.GROUPS!;
       const groupId = /<group id="([^"]+)">/.exec(groupsText)![1]!;
       const tickets = [...groupsText.matchAll(/- ([^:]+): (.+)/g)].map((match) => ({ id: match[1]!, title: match[2]! }));
-      return { ...base, handoff: { groups: [{ groupId, tickets }] } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, logReference: transcriptFor(request), handoff: { groups: [{ groupId, tickets }] } } as unknown as AgentRunResult<TOutput>;
     }
     if (request.name.startsWith("implement-")) {
       const id = request.promptArgs.TICKET_ID!;
@@ -150,11 +162,11 @@ test("an exhausted ticket publishes reviewed ancestors, blocks descendants, then
       }
       if (id === "c") cImplementRuns++;
       await writeFile(join(request.cwd, `${id}.txt`), `${id}\n`);
-      return { ...base, handoff: { message: `feat(${id}): implement ${id}` } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, logReference: transcriptFor(request), handoff: { message: `feat(${id}): implement ${id}` } } as unknown as AgentRunResult<TOutput>;
     }
-    if (request.name.startsWith("review-")) return { ...base, handoff: { message: "chore(review): verify behavior" } } as unknown as AgentRunResult<TOutput>;
-    if (request.name.startsWith("integrate-")) return { ...base, handoff: { message: "chore(integration): verify group", conflicts: [] } } as unknown as AgentRunResult<TOutput>;
-    return { ...base, handoff: { title: `Cycle ${cycle}`, body: `Cycle ${cycle} delivery.` } } as unknown as AgentRunResult<TOutput>;
+    if (request.name.startsWith("review-")) return { ...base, logReference: transcriptFor(request), handoff: { message: "chore(review): verify behavior" } } as unknown as AgentRunResult<TOutput>;
+    if (request.name.startsWith("integrate-")) return { ...base, logReference: transcriptFor(request), handoff: { message: "chore(integration): verify group", conflicts: [] } } as unknown as AgentRunResult<TOutput>;
+    return { ...base, logReference: transcriptFor(request), handoff: { title: `Cycle ${cycle}`, body: `Cycle ${cycle} delivery.` } } as unknown as AgentRunResult<TOutput>;
   };
   const requests: DraftPullRequestRequest[] = [];
   const updates: UpdateDraftPullRequestRequest[] = [];
@@ -220,17 +232,17 @@ test("failed combined review publishes separate reviewed subsets and leaves mult
     if (request.name.startsWith("plan-groups-")) {
       const groupId = /<group id="([^"]+)">/.exec(request.promptArgs.GROUPS!)![1]!;
       const tickets = [...request.promptArgs.GROUPS!.matchAll(/- ([^:]+): (.+)/g)].map((match) => ({ id: match[1]!, title: match[2]! }));
-      return { ...base, handoff: { groups: [{ groupId, tickets }] } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, logReference: transcriptFor(request), handoff: { groups: [{ groupId, tickets }] } } as unknown as AgentRunResult<TOutput>;
     }
     if (request.name.startsWith("implement-")) {
       const id = request.promptArgs.TICKET_ID!;
       if (id === "d") dRuns++;
       await writeFile(join(request.cwd, `${id}.txt`), `${id}\n`);
-      return { ...base, handoff: { message: `feat(${id}): implement ${id}` } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, logReference: transcriptFor(request), handoff: { message: `feat(${id}): implement ${id}` } } as unknown as AgentRunResult<TOutput>;
     }
-    if (request.name.startsWith("review-")) return { ...base, handoff: { message: "chore(review): verify ticket" } } as unknown as AgentRunResult<TOutput>;
+    if (request.name.startsWith("review-")) return { ...base, logReference: transcriptFor(request), handoff: { message: "chore(review): verify ticket" } } as unknown as AgentRunResult<TOutput>;
     if (request.name.startsWith("integrate-")) throw new MissingAgentHandoffError();
-    return { ...base, handoff: { title: "Reviewed subset", body: "A reviewed dependency-closed subset." } } as unknown as AgentRunResult<TOutput>;
+    return { ...base, logReference: transcriptFor(request), handoff: { title: "Reviewed subset", body: "A reviewed dependency-closed subset." } } as unknown as AgentRunResult<TOutput>;
   };
   const requests: DraftPullRequestRequest[] = [];
   const provider: GitProvider = {
@@ -273,14 +285,14 @@ test("checkpoint failures are written to main.log and surfaced on stderr", async
     const base = { iterations: [], commits: [], stdout: "", branch: "" };
     if (request.name.startsWith("plan-groups-")) {
       const groupId = /<group id="([^"]+)">/.exec(request.promptArgs.GROUPS!)![1]!;
-      return { ...base, handoff: { groups: [{ groupId, tickets: [{ id: "a", title: "a" }] }] } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, logReference: transcriptFor(request), handoff: { groups: [{ groupId, tickets: [{ id: "a", title: "a" }] }] } } as unknown as AgentRunResult<TOutput>;
     }
     if (request.name.startsWith("implement-")) {
       await writeFile(join(request.cwd, "a.txt"), "a\n");
       const hook = join(request.cwd, ".git", "hooks", "pre-commit");
       await writeFile(hook, "#!/bin/sh\nexit 1\n");
       await chmod(hook, 0o755);
-      return { ...base, handoff: { message: "feat(a): implement a" } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, logReference: transcriptFor(request), handoff: { message: "feat(a): implement a" } } as unknown as AgentRunResult<TOutput>;
     }
     throw new Error(`unexpected agent ${request.name}`);
   };
@@ -351,4 +363,70 @@ test("startup reconciliation blocks are written to main.log and surfaced on stde
   assert.match(await readFile(join(logger.runDir, "main.log"), "utf8"), /ticket=a .*stage=scheduling .*status=blocked/);
   assert.equal(errors.length, 1);
   assert.match(errors[0]!, /Ticket a is blocked: prior factory evidence requires operator reconciliation/);
+});
+
+test("checkpoint commit, ticket annotation, and main.log all carry the runtime's invocation-relative transcript", async () => {
+  const { remote, factoryRoot, ticketsDir } = await fixture();
+  await writeFile(join(ticketsDir, "a.md"), markdown("a", remote, []));
+  const provider: GitProvider = {
+    name: "github",
+    credential: "secret",
+    mergeStrategySupport: "unsupported",
+    validateRepository: () => undefined,
+    createDraftPullRequest: async () => ({ number: 1, url: "https://example.test/pr/1", squashPreference: "unsupported" }),
+    secrets: () => ["secret"],
+  };
+  const logger = await InvocationLogger.create(factoryRoot, provider.credential);
+  const references: string[] = [];
+  const runAgent: AgentRunner = async <TOutput>(request: AgentRunRequest<TOutput>) => {
+    const base = { iterations: [], commits: [], stdout: "", branch: "" };
+    const transcript = await logger.allocate(request.logTarget);
+    await writeFile(transcript.path, `${request.name} transcript\n`);
+    const logReference = transcript.reference;
+    references.push(logReference);
+    if (request.name.startsWith("plan-groups-")) {
+      const groupId = /<group id="([^"]+)">/.exec(request.promptArgs.GROUPS!)![1]!;
+      return { ...base, logReference, handoff: { groups: [{ groupId, tickets: [{ id: "a", title: "a" }] }] } } as unknown as AgentRunResult<TOutput>;
+    }
+    if (request.name.startsWith("implement-")) {
+      if (logReference.endsWith("implement-1.log")) {
+        throw new MissingAgentHandoffError();
+      }
+      await writeFile(join(request.cwd, "a.txt"), "a\n");
+      return { ...base, logReference, handoff: { message: "feat(a): implement a" } } as unknown as AgentRunResult<TOutput>;
+    }
+    if (request.name.startsWith("review-")) {
+      await writeFile(join(request.cwd, "reviewed.txt"), "reviewed\n");
+      return { ...base, logReference, handoff: { message: "chore(review): approved a" } } as unknown as AgentRunResult<TOutput>;
+    }
+    return { ...base, logReference, handoff: { title: "Deliver a", body: "Reviewed a." } } as unknown as AgentRunResult<TOutput>;
+  };
+  const config: ProcessConfig = { ticketsDir, factoryRoot, harness: "pi", logger, gitProvider: provider, runAgent, maxParallel: 1, ticketAttemptsPerCycle: 1 };
+
+  await processDependencyCycle(config, createDependencyWorkflowState());
+
+  const main = await readFile(join(logger.runDir, "main.log"), "utf8");
+  const record = /stage=implementation commit .*?checkpoint=(\w{40}) .*agent-log=(\S+)/.exec(main)!;
+  const checkpointSha = record[1]!;
+  const recordedReference = record[2]!;
+  const ticket = await readFile(join(ticketsDir, "done", "a.md"), "utf8");
+  const workspacePath = /- Workspace: `([^`]+)`/.exec(ticket)![1]!;
+  const trailer = (await runGit(workspacePath, ["show", "-s", "--format=%B", checkpointSha], "reading the checkpoint message")).trim();
+
+  const attempt = recordedReference.split("/")[0]!;
+  const attemptId = /- Attempt ID: `([^`]+)`/.exec(ticket)![1]!;
+  assert.equal(references[0], "planner/001.log", "planner cycle 1 writes planner/001.log");
+  assert.deepEqual(references.slice(1, 4), [`${attempt}/implement-1.log`, `${attempt}/implement-2.log`, `${attempt}/review-1.log`], "the failed run consumed implement-1 and the retry got implement-2 in the same attempt directory");
+  assert.match(references[4]!, /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-group-[^/]+\/pull-request-1\.log$/, "publication runs in its own timestamped attempt directory");
+  assert.equal(recordedReference, references[2], "main.log records the reference the runtime handed the successful retry");
+  assert.match(recordedReference, /^[^/]+\/implement-2\.log$/, "the reference is invocation-relative, not a basename");
+  assert.equal(attempt.slice(attempt.lastIndexOf("-") + 1), attemptId, "the attempt directory is named for its attempt ID inside the instance directory");
+  const entries = await readdir(logger.runDir);
+  assert.ok(entries.includes("main.log") && entries.includes(attempt) && entries.includes("planner"), `instance directory holds main.log, planner/, and the attempt directory, got ${entries.join(", ")}`);
+  for (const reference of references) {
+    await access(join(logger.runDir, reference));
+  }
+  assert.ok(trailer.includes(`Factory-Agent-Log: ${recordedReference}`), "the checkpoint trailer carries the reference the runtime handed the stage");
+  assert.ok(ticket.includes(`- Agent log: \`${recordedReference}\``), "the ticket annotation carries the same reference");
+  assert.ok(ticket.includes(`- Agent log: \`${attempt}/review-1.log\``), "the review checkpoint annotates its own transcript");
 });

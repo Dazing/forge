@@ -21,7 +21,8 @@ export interface StageCommitInput {
   message: string;
   /** HEAD captured at the stage entry; the checkpoint must start from exactly this commit. */
   expectedHead: string;
-  agentLogBasename: string;
+  /** Invocation-relative transcript path of the successful stage run, e.g. `2026-10-12_09-30-15-1a2b3c/implement-1.log`. */
+  agentLogReference: string;
   /** Credential values, including derived forms, that must never reach a Git message. */
   forbiddenSecrets: readonly string[];
 }
@@ -41,7 +42,7 @@ function checkpointMessage(input: StageCommitInput, changes: "changed" | "unchan
     `Factory-Stage: ${input.stage}`,
     `Factory-Outcome: complete`,
     `Factory-Changes: ${changes}`,
-    `Factory-Agent-Log: ${input.agentLogBasename}`,
+    `Factory-Agent-Log: ${input.agentLogReference}`,
   ];
   return `${input.message}\n\n${trailers.join("\n")}`;
 }

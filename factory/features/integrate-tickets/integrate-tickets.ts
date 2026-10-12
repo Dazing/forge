@@ -9,6 +9,7 @@ const MAX_ITERATIONS = 3;
 
 export interface IntegrateTicketsInput {
   readonly groupId: string;
+  readonly attemptId: string;
   readonly workspacePath: string;
   readonly branch: string;
   readonly includedTickets: readonly Readonly<{ id: string; title: string; checkpointSha: string; summary: string }>[];
@@ -22,6 +23,7 @@ export type IntegrateTicketsOutcome = Readonly<{
   message: string;
   conflicts: readonly Readonly<{ path: string; disposition: string }>[];
   head: string;
+  logReference: string;
 }>;
 
 export async function integrateTickets(input: IntegrateTicketsInput): Promise<IntegrateTicketsOutcome> {
@@ -34,7 +36,7 @@ export async function integrateTickets(input: IntegrateTicketsInput): Promise<In
         cwd: input.workspacePath,
         harness: input.harness,
         name: `integrate-${input.groupId}`,
-        logName: `integrate-${input.groupId}`,
+        logTarget: { scope: "attempt", attemptId: input.attemptId, stage: "integrate" },
         promptFile: resolve(import.meta.dirname, "integrate-prompt.md"),
         promptArgs: {
           GROUP_ID: input.groupId,
@@ -60,7 +62,7 @@ export async function integrateTickets(input: IntegrateTicketsInput): Promise<In
         if (!(error instanceof CommandFailedError) || error.failure.exitCode !== 1) throw error;
       }
       if (tracked.trim().length > 0) throw new Error(`Integration left conflict markers:\n${tracked.trim()}`);
-      return { message: handoff.message, conflicts: handoff.conflicts, head };
+      return { message: handoff.message, conflicts: handoff.conflicts, head, logReference: result.logReference };
     } catch (error) {
       if (!(error instanceof MissingAgentHandoffError)) throw error;
       lastFailure = error;

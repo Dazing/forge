@@ -21,6 +21,7 @@ export interface ReviewTicketInput {
 export type ReviewOutcome = Readonly<{
   message: string;
   head: string;
+  logReference: string;
 }>;
 
 /**
@@ -43,7 +44,7 @@ export async function reviewTicket(input: ReviewTicketInput): Promise<ReviewOutc
         cwd: input.workspacePath,
         harness: input.harness,
         name: `review-${input.ticket.slug}`,
-        logName: `review-${input.ticket.id}-${input.attemptId}`,
+        logTarget: { scope: "attempt", attemptId: input.attemptId, stage: "review" },
         promptFile: resolve(import.meta.dirname, "review-prompt.md"),
         promptArgs: {
           TICKET_ID: input.ticket.id,
@@ -56,7 +57,7 @@ export async function reviewTicket(input: ReviewTicketInput): Promise<ReviewOutc
         maxIterations: 1,
       };
       const result = await input.runAgent(request);
-      return { message: result.handoff.message, head: entry.head };
+      return { message: result.handoff.message, head: entry.head, logReference: result.logReference };
     } catch (error) {
       if (!(error instanceof MissingAgentHandoffError)) throw error;
       lastFailure = error;

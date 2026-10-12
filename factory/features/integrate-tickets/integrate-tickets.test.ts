@@ -20,6 +20,7 @@ async function workspace(): Promise<string> {
 function input(workspacePath: string, runAgent: AgentRunner): IntegrateTicketsInput {
   return {
     groupId: "group-a",
+    attemptId: "1a2b3c",
     workspacePath,
     branch: BRANCH,
     includedTickets: [{ id: "a", title: "A", checkpointSha: "abc", summary: "implemented" }],
@@ -35,15 +36,16 @@ test("integration returns one accepted stage-shaped handoff", async () => {
   const requests: AgentRunRequest<unknown>[] = [];
   const runAgent: AgentRunner = async <THandoff>(request: AgentRunRequest<THandoff>) => {
     requests.push(request);
-    return { iterations: [], commits: [], stdout: "", branch: BRANCH, handoff: { message: "chore(integration): reviewed", conflicts: [] } as THandoff } as AgentRunResult<THandoff>;
+    return { iterations: [], commits: [], stdout: "", branch: BRANCH, logReference: "1a2b3c/integrate-1.log", handoff: { message: "chore(integration): reviewed", conflicts: [] } as THandoff } as AgentRunResult<THandoff>;
   };
 
   const outcome = await integrateTickets(input(workspacePath, runAgent));
 
   assert.equal(outcome.message, "chore(integration): reviewed");
+  assert.equal(outcome.logReference, "1a2b3c/integrate-1.log", "the stage carries the transcript the runtime allocated");
   assert.equal(requests.length, 1);
   assert.equal(requests[0]?.handoff.toolName, "submit_handoff");
-  assert.deepEqual(requests[0]?.handoff.inputSchema.required, ["message", "conflicts"]);
+  assert.deepEqual(requests[0]?.logTarget, { scope: "attempt", attemptId: "1a2b3c", stage: "integrate" });
 });
 
 test("integration retries only missing handoffs", async () => {

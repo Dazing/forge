@@ -90,7 +90,7 @@ export type StageCheckpointAnnotation = Readonly<{
   parentSha: string;
   checkpointSha: string;
   changes: "changed" | "unchanged";
-  agentLogBasename: string;
+  agentLogReference: string;
 }>;
 
 /** Append the stage checkpoint section recording the runner-owned commit boundary. */
@@ -105,7 +105,7 @@ export async function annotateStageCheckpoint(ticketPath: string, checkpoint: St
       `- Parent commit: \`${checkpoint.parentSha}\``,
       `- Checkpoint commit: \`${checkpoint.checkpointSha}\``,
       `- Changes: ${checkpoint.changes}`,
-      `- Agent log: \`${checkpoint.agentLogBasename}\``,
+      `- Agent log: \`${checkpoint.agentLogReference}\``,
     ].join("\n"),
   );
 }

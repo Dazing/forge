@@ -151,7 +151,7 @@ test("collision on the attempt-suffixed destination refuses to overwrite", async
   assert.equal(await readFile(join(doneDir, "fix-login-1a2b3c.md"), "utf8"), "# Existing attempt\n");
 });
 
-test("stage checkpoint section records attempt, stage, commits, changes, and the agent log basename", async () => {
+test("stage checkpoint section records attempt, stage, commits, changes, and the invocation-relative transcript path", async () => {
   const path = await ticketFile("# Fix login\nBody.");
 
   await annotateStageCheckpoint(path, {
@@ -161,7 +161,7 @@ test("stage checkpoint section records attempt, stage, commits, changes, and the
     parentSha: "1111111111111111111111111111111111111111",
     checkpointSha: "2222222222222222222222222222222222222222",
     changes: "changed",
-    agentLogBasename: "implement-0123456789abcdef-1a2b3c.log",
+    agentLogReference: "2026-10-11_07-29-58-1a2b3c/implement-1.log",
   });
 
   const final = await readFile(path, "utf8");
@@ -172,18 +172,20 @@ test("stage checkpoint section records attempt, stage, commits, changes, and the
   assert.match(final, /- Parent commit: `1{40}`/);
   assert.match(final, /- Checkpoint commit: `2{40}`/);
   assert.match(final, /- Changes: changed/);
-  assert.match(final, /- Agent log: `implement-0123456789abcdef-1a2b3c\.log`/);
+  assert.match(final, /- Agent log: `2026-10-11_07-29-58-1a2b3c\/implement-1\.log`/);
 });
 
 test("stage checkpoint annotations append in order without rewriting earlier sections", async () => {
   const path = await ticketFile("# Fix login\nBody.");
 
-  await annotateStageCheckpoint(path, { timestamp: "2026-10-11T07:30:00.000Z", attemptId: "1a2b3c", stage: "implement", parentSha: "1".repeat(40), checkpointSha: "2".repeat(40), changes: "changed", agentLogBasename: "implement-1a2b3c.log" });
-  await annotateStageCheckpoint(path, { timestamp: "2026-10-11T07:40:00.000Z", attemptId: "1a2b3c", stage: "review", parentSha: "2".repeat(40), checkpointSha: "3".repeat(40), changes: "unchanged", agentLogBasename: "review-1a2b3c.log" });
+  await annotateStageCheckpoint(path, { timestamp: "2026-10-11T07:30:00.000Z", attemptId: "1a2b3c", stage: "implement", parentSha: "1".repeat(40), checkpointSha: "2".repeat(40), changes: "changed", agentLogReference: "2026-10-11_07-29-58-1a2b3c/implement-1.log" });
+  await annotateStageCheckpoint(path, { timestamp: "2026-10-11T07:40:00.000Z", attemptId: "1a2b3c", stage: "review", parentSha: "2".repeat(40), checkpointSha: "3".repeat(40), changes: "unchanged", agentLogReference: "2026-10-11_07-29-58-1a2b3c/review-1.log" });
 
   const final = await readFile(path, "utf8");
   const implementAt = final.indexOf("## Stage checkpoint implement");
   const reviewAt = final.indexOf("## Stage checkpoint review");
   assert.ok(implementAt > 0 && reviewAt > implementAt);
   assert.match(final, /- Changes: unchanged/);
+  assert.match(final, /- Agent log: `2026-10-11_07-29-58-1a2b3c\/implement-1\.log`/);
+  assert.match(final, /- Agent log: `2026-10-11_07-29-58-1a2b3c\/review-1\.log`/);
 });

@@ -50,7 +50,7 @@ function input(runAgent: AgentRunner, workspacePath: string): ImplementTicketInp
 function completingAgent(message: string): AgentRunner {
   return async <TOutput>(request: AgentRunRequest<TOutput>) => {
     await writeFile(join(request.cwd, "login.ts"), "export const redirect = true;\n");
-    return { iterations: [], commits: [], stdout: "", branch: BRANCH, handoff: { message } as TOutput } as AgentRunResult<TOutput>;
+    return { iterations: [], commits: [], stdout: "", branch: BRANCH, logReference: "2026-10-12_09-30-15-1a2b3c/implement-1.log", handoff: { message } as TOutput } as AgentRunResult<TOutput>;
   };
 }
 
@@ -65,11 +65,12 @@ test("implementation returns the validated stage message and leaves the work unc
   const result = await implementTicket(input(runAgent, workspacePath));
 
   assert.equal(result.message, "fix(login): redirect after auth\n\nTests passed.");
+  assert.equal(result.logReference, "2026-10-12_09-30-15-1a2b3c/implement-1.log", "the stage carries the transcript the runtime allocated");
   assert.equal(requests.length, 1);
   const request = requests[0]!;
   assert.equal(request.maxIterations, 1);
   assert.equal(request.handoff.toolName, "submit_handoff");
-  assert.deepEqual(request.handoff.inputSchema.required, ["message"]);
+  assert.deepEqual(request.logTarget, { scope: "attempt", attemptId: "1a2b3c", stage: "implement" });
   await access(request.promptFile);
   const status = (await git(workspacePath, ["status", "--porcelain"])).trim();
   assert.match(status, /\?\? login\.ts/);
@@ -83,12 +84,13 @@ test("implementation retries a failed iteration within the three-iteration limit
     if (runs === 1) {
       throw new MissingAgentHandoffError();
     }
-    return { iterations: [], commits: [], stdout: "", branch: BRANCH, handoff: { message: "fix(login): redirect after auth" } as TOutput } as AgentRunResult<TOutput>;
+    return { iterations: [], commits: [], stdout: "", branch: BRANCH, logReference: `1a2b3c/implement-${runs}.log`, handoff: { message: "fix(login): redirect after auth" } as TOutput } as AgentRunResult<TOutput>;
   };
 
   const result = await implementTicket(input(runAgent, workspacePath));
 
   assert.equal(result.message, "fix(login): redirect after auth");
+  assert.equal(result.logReference, "1a2b3c/implement-2.log", "the retry carries its own transcript, not the failed run's");
   assert.equal(runs, 2);
 });
 

@@ -22,7 +22,7 @@ export async function planGroups(input: PlanGroupsInput): Promise<PlannedGroup[]
     cwd: input.factoryRoot,
     harness: input.harness,
     name: `plan-groups-${input.runId}`,
-    logName: `plan-groups-${input.runId}`,
+    logTarget: { scope: "sequence", directory: "planner", cycle: Number(input.runId) },
     promptFile: resolve(import.meta.dirname, "group-plan-prompt.md"),
     promptArgs: { GROUPS: input.groups.map((group) => `<group id="${group.groupId}">\n${group.tickets.map((ticket) => `- ${ticket.id}: ${ticket.title}`).join("\n")}\n</group>`).join("\n\n") },
     handoff: groupPlanHandoff,

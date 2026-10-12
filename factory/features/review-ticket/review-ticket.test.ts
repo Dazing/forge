@@ -52,17 +52,18 @@ test("review returns the validated message and accepts the uncommitted work unde
   const runAgent = async <TOutput>(request: AgentRunRequest<TOutput>) => {
     requests.push(request);
     await writeFile(join(request.cwd, "login.ts"), "export const redirect = true;\n");
-    return { iterations: [], commits: [], stdout: "", branch: BRANCH, handoff: { message: "fix(login): review approved" } as TOutput } as AgentRunResult<TOutput>;
+    return { iterations: [], commits: [], stdout: "", branch: BRANCH, logReference: "1a2b3c/review-1.log", handoff: { message: "fix(login): review approved" } as TOutput } as AgentRunResult<TOutput>;
   };
 
   const result = await reviewTicket(input(runAgent, workspacePath));
 
   assert.equal(result.message, "fix(login): review approved");
+  assert.equal(result.logReference, "1a2b3c/review-1.log", "the stage carries the transcript the runtime allocated");
   assert.equal(requests.length, 1);
   const request = requests[0]!;
   assert.equal(request.maxIterations, 1);
   assert.equal(request.handoff.toolName, "submit_handoff");
-  assert.deepEqual(request.handoff.inputSchema.required, ["message"]);
+  assert.deepEqual(request.logTarget, { scope: "attempt", attemptId: "1a2b3c", stage: "review" });
   const status = (await git(workspacePath, ["status", "--porcelain"])).trim();
   assert.match(status, /\?\? login\.ts/);
 });
@@ -75,12 +76,13 @@ test("review retries a failed iteration within the three-iteration limit", async
     if (runs === 1) {
       throw new MissingAgentHandoffError();
     }
-    return { iterations: [], commits: [], stdout: "", branch: BRANCH, handoff: { message: "fix(login): review approved" } as TOutput } as AgentRunResult<TOutput>;
+    return { iterations: [], commits: [], stdout: "", branch: BRANCH, logReference: `1a2b3c/review-${runs}.log`, handoff: { message: "fix(login): review approved" } as TOutput } as AgentRunResult<TOutput>;
   };
 
   const result = await reviewTicket(input(runAgent, workspacePath));
 
   assert.equal(result.message, "fix(login): review approved");
+  assert.equal(result.logReference, "1a2b3c/review-2.log", "the retry carries its own transcript, not the failed run's");
   assert.equal(runs, 2);
 });
 
@@ -102,7 +104,7 @@ test("review requires a clean stage-entry workspace", async () => {
 
   await assert.rejects(
     reviewTicket(input(async <TOutput>(request: AgentRunRequest<TOutput>) => {
-      return { iterations: [], commits: [], stdout: "", branch: BRANCH, handoff: { message: "fix(login): review approved" } as TOutput } as AgentRunResult<TOutput>;
+      return { iterations: [], commits: [], stdout: "", branch: BRANCH, logReference: "1a2b3c/review-1.log", handoff: { message: "fix(login): review approved" } as TOutput } as AgentRunResult<TOutput>;
     }, workspacePath)),
     /Review entry for ticket 0123456789abcdef left uncommitted changes/,
   );

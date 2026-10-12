@@ -79,7 +79,7 @@ function contentAgent(body = "Verified with curl.", mutate?: () => Promise<void>
     if (mutate) {
       await mutate();
     }
-    return { iterations: [], commits: [], stdout: "", branch: BRANCH, handoff: { title: "Fix login redirect", body } as TOutput };
+    return { iterations: [], commits: [], stdout: "", branch: BRANCH, logReference: "publication-1/pull-request-1.log", handoff: { title: "Fix login redirect", body } as TOutput };
   };
 }
 
@@ -105,18 +105,20 @@ function providerStub(outcome: "ok" | "http-failure", support: "configured" | "u
   return { provider, requests };
 }
 
-function input(workspacePath: string, runAgent: AgentRunner, gitProvider: GitProvider): PublishPullRequestInput {
-  return { ticket, workspacePath, branch: BRANCH, attemptId: "1", harness: "pi", runAgent, gitProvider, onContentComplete: async () => {} };
+function input(workspacePath: string, runAgent: AgentRunner, gitProvider: GitProvider, onContentComplete: (head: string, logReference: string) => Promise<void> = async () => {}): PublishPullRequestInput {
+  return { ticket, workspacePath, branch: BRANCH, attemptId: "1", harness: "pi", runAgent, gitProvider, onContentComplete };
 }
 
 test("publication pushes the branch and returns the final SHA, draft pull request, and squash preference", async () => {
   const workspace = await workspaceWithRemote();
   const { provider, requests } = providerStub("ok");
-  const result = await publishPullRequest(input(workspace, contentAgent(), provider));
+  const content: Array<[string, string]> = [];
+  const result = await publishPullRequest(input(workspace, contentAgent(), provider, async (head, logReference) => { content.push([head, logReference]); }));
   const expectedSha = (await git(workspace, ["rev-parse", "HEAD"])).trim();
   assert.equal(result.finalSha, expectedSha);
   assert.equal(result.pullRequest.url, "https://github.com/acme/app/pull/7");
   assert.equal(result.squashPreference, "unsupported");
+  assert.deepEqual(content, [[expectedSha, "publication-1/pull-request-1.log"]], "content completion records its entry SHA and its own transcript");
   assert.equal(requests[0]!.mergeStrategy, "squash");
   const remote = join(workspace, "..", "remote.git");
   const pushed = (await runCommand("git", ["-C", remote, "rev-parse", `refs/heads/${BRANCH}`], "reading pushed branch")).trim();

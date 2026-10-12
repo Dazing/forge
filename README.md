@@ -127,15 +127,17 @@ The persisted preference is appended to the ticket's completion section as `- Me
 
 ### Logs
 
-Agent output is written under `.logs/<run timestamp>-<process ID>/` at the root of this runner checkout. Each planner, implementer, reviewer, integration, and pull-request stage gets a separate human-readable progress log containing assistant text and a concise summary for every Pi-compatible tool-start event, including lowercase native and MCP tool names, while omitting raw Pi events such as thinking blocks and tool output. `submit_handoff` events identify the tool without logging title, body, message, or conflict payloads. The same directory holds `main.log`, the append-only record of ticket attempts, failures, and scheduling blocks. A newly discovered or changed block is also printed to stderr with its reason before planner selection, so a run with no runnable delivery group does not appear frozen.
+Agent output is written under `.logs/<utc-stamp>-<6-hex>/` at the root of this runner checkout: one instance directory per invocation, named with a sortable UTC stamp (`2026-10-12_09-30-15`) plus a random suffix, with `main.log` at its root. Planner cycles write numbered transcripts under `planner/` (`planner/001.log`, `planner/002.log`). Each attempt gets one directory named `<utc-stamp>-<attempt-id>/`, and every run inside it is a numbered stage file: `implement-1.log`, `implement-2.log`, `review-1.log`, `integrate-1.log`, `pull-request-1.log`. Every allocation consumes the next number, including runs that fail, so a retry never overwrites a prior transcript, and all runs of one attempt ID share one directory.
 
-Each successful checkpoint appends one line to `main.log` in the form `timestamp ticket=<id> attempt=<id> stage=<stage> operation=creating stage checkpoint commit status=completed parent=<sha> checkpoint=<sha> changes=<changed|unchanged> agent-log=<basename>.log`. Trace a stage from the log to its commit and its agent transcript:
+Each transcript is a human-readable progress log containing assistant text and a concise summary for every Pi-compatible tool-start event, including lowercase native and MCP tool names, while omitting raw Pi events such as thinking blocks and tool output. `submit_handoff` events identify the tool without logging title, body, message, or conflict payloads. `main.log` is the append-only record of ticket attempts, failures, and scheduling blocks. A newly discovered or changed block is also printed to stderr with its reason before planner selection, so a run with no runnable delivery group does not appear frozen.
+
+Each successful checkpoint appends one line to `main.log` in the form `timestamp ticket=<id> attempt=<id> stage=<stage> operation=creating stage checkpoint commit status=completed parent=<sha> checkpoint=<sha> changes=<changed|unchanged> agent-log=<invocation-relative path>`. The same invocation-relative path is the `Factory-Agent-Log` trailer on the checkpoint commit and the `- Agent log:` line in the ticket's stage checkpoint section, so the commit, the ticket, and the transcript agree. Trace a stage from the log to its commit and its agent transcript:
 
 ```bash
-grep 'stage=review commit' .logs/*/main.log            # boundary records with parent/checkpoint SHAs
+grep 'stage=review commit' .logs/*/main.log            # boundary records with parent/checkpoint SHAs and agent-log paths
 git -C .workspaces/<slug>-<attempt-id> show <checkpoint-sha>   # message plus Factory-* trailers
 git -C .workspaces/<slug>-<attempt-id> diff <parent-sha> <checkpoint-sha>   # the stage delta
-cat .logs/<run timestamp>-<process ID>/review-<ticket-id>-<attempt-id>.log  # the stage transcript
+cat .logs/<utc-stamp>-<6-hex>/<utc-stamp>-<attempt-id>/review-1.log  # the stage transcript
 ```
 
 ## Runner implementation

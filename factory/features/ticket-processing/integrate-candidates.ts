@@ -47,9 +47,9 @@ export async function integrateCandidates(
       if (conflictPaths.length === 0) throw error;
     }
 
-    const integrationLogName = `integrate-${groupId}-${workspace.attemptId}`;
     const outcome = await integrateTickets({
-      groupId: `${groupId}-${workspace.attemptId}`,
+      groupId,
+      attemptId: workspace.attemptId,
       workspacePath: workspace.workspacePath,
       branch: workspace.branch,
       includedTickets: [...included.map((id) => {
@@ -67,8 +67,7 @@ export async function integrateCandidates(
     if (config.gitProvider.secrets().some((secret) => secret.length > 0 && outcome.message.includes(secret))) throw new Error("Integration message contains provider credential material.");
     await runGit(workspace.workspacePath, ["add", "--all"], "staging integration result");
     const changes = (await runGit(workspace.workspacePath, ["diff", "--cached", "--name-only"], "classifying integration tree outcome")).trim().length > 0 ? "changed" : "unchanged";
-    const agentLogBasename = config.logger.agentLogBasename(integrationLogName);
-    await runGitAsRunner(workspace.workspacePath, ["commit", "-m", `${outcome.message}\n\nFactory-Group: ${groupId}\nFactory-Stage: integration\nFactory-Included: ${[...included, candidate.ticket.id].join(",")}\nFactory-Changes: ${changes}\nFactory-Agent-Log: ${agentLogBasename}`], "committing reviewed integration");
+    await runGitAsRunner(workspace.workspacePath, ["commit", "-m", `${outcome.message}\n\nFactory-Group: ${groupId}\nFactory-Stage: integration\nFactory-Included: ${[...included, candidate.ticket.id].join(",")}\nFactory-Changes: ${changes}\nFactory-Agent-Log: ${outcome.logReference}`], "committing reviewed integration");
     const checkpointSha = (await runGit(workspace.workspacePath, ["rev-parse", "HEAD"], "reading integration checkpoint")).trim();
     const actualParents = (await runGit(workspace.workspacePath, ["show", "-s", "--format=%P", "HEAD"], "validating integration parents")).trim().split(/\s+/);
     if (actualParents.length !== 2 || actualParents[0] !== parent || actualParents[1] !== candidate.reviewCheckpoint.checkpointSha) {
@@ -85,7 +84,7 @@ export async function integrateCandidates(
       parentSha: parent,
       checkpointSha,
       changes,
-      agentLogBasename,
+      agentLogReference: outcome.logReference,
     });
     await requireCleanRepository(workspace.workspacePath, "integration finalization");
     included.push(candidate.ticket.id);

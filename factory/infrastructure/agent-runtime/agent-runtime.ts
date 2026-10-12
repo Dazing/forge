@@ -9,7 +9,7 @@ import {
   MissingAgentHandoffError,
 } from "./handoff.js";
 import { sandboxProvider, type AgentHarness } from "../sandbox/sandbox.js";
-import type { InvocationLogger } from "../logging/invocation-log.js";
+import type { InvocationLogger, LogTarget } from "../logging/invocation-log.js";
 
 // Generic configured agent execution. Features own handoff schemas and stage completion policy;
 // infrastructure owns the isolated transport and configured sandbox lifecycle.
@@ -22,7 +22,7 @@ export interface AgentRunRequest<THandoff> {
   cwd: string;
   harness: AgentHarness;
   name: string;
-  logName: string;
+  logTarget: LogTarget;
   promptFile: string;
   promptArgs: Record<string, string>;
   handoff: AgentHandoffDefinition<THandoff>;
@@ -31,6 +31,7 @@ export interface AgentRunRequest<THandoff> {
 
 export interface AgentRunResult<THandoff> extends RunResult {
   handoff: THandoff;
+  logReference: string;
 }
 
 export type AgentRunner = <THandoff>(request: AgentRunRequest<THandoff>) => Promise<AgentRunResult<THandoff>>;
@@ -38,7 +39,8 @@ export type AgentRunner = <THandoff>(request: AgentRunRequest<THandoff>) => Prom
 export function createAgentRunner(logger: InvocationLogger, factoryRoot: string): AgentRunner {
   return async <THandoff>(request: AgentRunRequest<THandoff>): Promise<AgentRunResult<THandoff>> => {
     const channel = await createHandoffChannel(request.handoff);
-    const logPath = logger.agentLogPath(request.logName);
+    const transcript = await logger.allocate(request.logTarget);
+    const logPath = transcript.path;
     let runFinished = false;
     try {
       const result = await sandcastleRun({
@@ -61,7 +63,7 @@ export function createAgentRunner(logger: InvocationLogger, factoryRoot: string)
       try {
         const handoff = await channel.consume();
         await appendHandoffStatus(logPath, ["accepted by host"]);
-        return { ...result, handoff };
+        return { ...result, handoff, logReference: transcript.reference };
       } catch (error) {
         const status = error instanceof MissingAgentHandoffError
           ? "omitted"

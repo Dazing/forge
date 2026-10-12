@@ -23,12 +23,8 @@ interface Attempt {
 const commitStages = { implement: "implementation commit", review: "review commit" } as const;
 const annotationStages = { implement: "implementation checkpoint annotation", review: "review checkpoint annotation" } as const;
 
-function stageLogBasename(config: ProcessConfig, ticket: Ticket, attempt: Attempt, stage: StageName): string {
-  return config.logger.agentLogBasename(`${stage}-${ticket.id}-${attempt.attemptId}`);
-}
-
 /** One stage's validated message plus the HEAD its work started from. */
-type StageOutcome = Readonly<{ message: string; head: string }>;
+type StageOutcome = Readonly<{ message: string; head: string; logReference: string }>;
 export type ReviewedCheckpoint = Readonly<{
   ticket: Ticket;
   attemptId: string;
@@ -47,7 +43,6 @@ export type ReviewedAttemptResult =
 
 /** One successful mutating stage: checkpoint commit, then its main.log trace record. */
 async function commitBoundary(config: ProcessConfig, ticket: Ticket, attempt: Attempt, stage: StageName, outcome: StageOutcome): Promise<StageCommitResult> {
-  const agentLogBasename = stageLogBasename(config, ticket, attempt, stage);
   const checkpoint = await commitStage({
     workspacePath: attempt.workspacePath,
     branch: attempt.branch,
@@ -56,7 +51,7 @@ async function commitBoundary(config: ProcessConfig, ticket: Ticket, attempt: At
     stage,
     message: outcome.message,
     expectedHead: outcome.head,
-    agentLogBasename,
+    agentLogReference: outcome.logReference,
     forbiddenSecrets: config.gitProvider.secrets(),
   });
   await config.logger.record({
@@ -69,13 +64,12 @@ async function commitBoundary(config: ProcessConfig, ticket: Ticket, attempt: At
     parentSha: checkpoint.parentSha,
     checkpointSha: checkpoint.checkpointSha,
     changes: checkpoint.changes,
-    agentLogBasename,
+    agentLogReference: outcome.logReference,
   });
   return checkpoint;
 }
 
-/** Append the ticket-side record of one checkpoint boundary. A failure here is its own stage and never repeats the commit. */
-async function annotateBoundary(config: ProcessConfig, ticket: Ticket, attempt: Attempt, stage: StageName, checkpoint: StageCommitResult): Promise<void> {
+async function annotateBoundary(config: ProcessConfig, ticket: Ticket, attempt: Attempt, stage: StageName, checkpoint: StageCommitResult, logReference: string): Promise<void> {
   const record = {
     timestamp: new Date().toISOString(),
     ticketId: ticket.id,
@@ -91,7 +85,7 @@ async function annotateBoundary(config: ProcessConfig, ticket: Ticket, attempt: 
       parentSha: checkpoint.parentSha,
       checkpointSha: checkpoint.checkpointSha,
       changes: checkpoint.changes,
-      agentLogBasename: stageLogBasename(config, ticket, attempt, stage),
+      agentLogReference: logReference,
     });
   } catch (error) {
     // The commit is already durable; the annotation failure is its own stage and never repeats the commit.
@@ -124,13 +118,13 @@ export async function executeReviewedAttempt(ticket: Ticket, config: ProcessConf
     stage = commitStages.implement;
     const implementationCheckpoint = await commitBoundary(config, ticket, attempt, "implement", implementation);
     stage = annotationStages.implement;
-    await annotateBoundary(config, ticket, attempt, "implement", implementationCheckpoint);
+    await annotateBoundary(config, ticket, attempt, "implement", implementationCheckpoint, implementation.logReference);
     stage = "review";
     const review = await reviewTicket({ ticket, workspacePath: attempt.workspacePath, branch: attempt.branch, attemptId, harness: config.harness, runAgent: config.runAgent });
     stage = commitStages.review;
     const reviewCheckpoint = await commitBoundary(config, ticket, attempt, "review", review);
     stage = annotationStages.review;
-    await annotateBoundary(config, ticket, attempt, "review", reviewCheckpoint);
+    await annotateBoundary(config, ticket, attempt, "review", reviewCheckpoint, review.logReference);
     return {
       status: "reviewed",
       checkpoint: { ticket, attemptId, workspacePath: attempt.workspacePath, branch: attempt.branch, implementationCheckpoint, reviewCheckpoint, baselineSha: implementationCheckpoint.parentSha, requirementsHash: ticket.requirementsHash },

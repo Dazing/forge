@@ -3,7 +3,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { AgentRunner, AgentRunResult } from "../../infrastructure/agent-runtime/agent-runtime.js";
+import type { AgentRunRequest, AgentRunner, AgentRunResult } from "../../infrastructure/agent-runtime/agent-runtime.js";
 import { MissingAgentHandoffError } from "../../infrastructure/agent-runtime/handoff.js";
 import { runCommand, runGit } from "../../infrastructure/git-provider/git.js";
 import { validateGroupPlan, type PlannedGroup } from "./group-plan-schema.js";
@@ -35,17 +35,20 @@ async function factoryFixture(): Promise<string> {
 
 test("group planning returns validated output and preserves the factory checkout", async () => {
   const factoryRoot = await factoryFixture();
-  const runAgent: AgentRunner = async <TOutput>() => ({
-    iterations: [], commits: [], stdout: "", branch: "", handoff: { groups: [group] } as TOutput,
-  } as AgentRunResult<TOutput>);
+  const requests: AgentRunRequest<unknown>[] = [];
+  const runAgent: AgentRunner = async <TOutput>(request: AgentRunRequest<TOutput>) => {
+    requests.push(request);
+    return { iterations: [], commits: [], stdout: "", branch: "", logReference: "planner/001.log", handoff: { groups: [group] } as TOutput } as AgentRunResult<TOutput>;
+  };
   assert.deepEqual(await planGroups({ groups: [group], factoryRoot, harness: "pi", runAgent, runId: "1" }), [group]);
+  assert.deepEqual(requests[0]!.logTarget, { scope: "sequence", directory: "planner", cycle: 1 }, "planner cycle 1 writes planner/001.log");
 });
 
 test("group planning rejects factory mutations", async () => {
   const factoryRoot = await factoryFixture();
   const runAgent: AgentRunner = async <TOutput>() => {
     await writeFile(join(factoryRoot, "unexpected.txt"), "mutation\n");
-    return { iterations: [], commits: [], stdout: "", branch: "", handoff: { groups: [] } as TOutput } as AgentRunResult<TOutput>;
+    return { iterations: [], commits: [], stdout: "", branch: "", logReference: "planner/001.log", handoff: { groups: [] } as TOutput } as AgentRunResult<TOutput>;
   };
   await assert.rejects(planGroups({ groups: [group], factoryRoot, harness: "pi", runAgent, runId: "1" }), /planning stage changed factory/);
 });
@@ -53,7 +56,7 @@ test("group planning rejects factory mutations", async () => {
 test("group planning distinguishes an accepted empty selection from a missing handoff", async () => {
   const factoryRoot = await factoryFixture();
   const empty: AgentRunner = async <TOutput>() => ({
-    iterations: [], commits: [], stdout: "", branch: "", handoff: { groups: [] } as TOutput,
+    iterations: [], commits: [], stdout: "", branch: "", logReference: "planner/001.log", handoff: { groups: [] } as TOutput,
   } as AgentRunResult<TOutput>);
   assert.deepEqual(await planGroups({ groups: [group], factoryRoot, harness: "pi", runAgent: empty, runId: "1" }), []);
 
