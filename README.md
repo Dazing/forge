@@ -2,7 +2,7 @@
 
 This repository adapts Matt Pocock's Sandcastle runner for dependency-aware local Markdown tickets. Tickets execute in fresh retained Git workspaces; agents implement, review, and resolve integrations without committing. TypeScript owns implementation/review checkpoints, reviewed multi-parent integration commits, safe pushes, and draft pull-request creation or extension. Connected dependency groups normally produce one combined reviewed draft, while failed combinations fall back to dependency-closed reviewed subsets.
 
-The runner uses `@ai-hero/sandcastle@0.12.0`, Pi `1.1.0`, oh-my-pi `18.8.4`, and the OpenAI-compatible model ID `vllm-qwen38-27b` at `https://openai.taila49adb.ts.net/v1`. It runs continuously, sleeps 10 seconds only when no tickets are pending, and bounds all agent jobs with `--max-parallel` (default `1`).
+The runner uses `@ai-hero/sandcastle@0.12.0`, Pi `1.1.0`, oh-my-pi `18.8.4`, and the OpenAI-compatible model ID `vllm-qwen38-27b` at `https://openai.taila49adb.ts.net/v1`. It runs continuously, polls every 10 seconds when the active queue is empty or has no runnable tickets, and bounds all agent jobs with `--max-parallel` (default `1`).
 
 ## Prerequisites
 
@@ -23,18 +23,25 @@ In both cases SSH push authorization is independent from the REST credential use
 cp .env.example .env
 ```
 
-A missing repository-root `.env`, an unsupported `GIT_PROVIDER`, or a blank provider credential is a fatal startup failure before the runner polls any ticket. `npm run sandcastle -- --help` prints runner help without requiring Docker, credentials, or the token.
+A missing repository-root `.env`, an unsupported `GIT_PROVIDER`, or a blank provider credential is a fatal startup failure before the runner polls any ticket. `npm run factory -- --help` prints runner help without requiring Docker, credentials, or the token.
 
 Install dependencies and build the runner image:
 
 ```bash
 npm install
-npx sandcastle docker build-image \
-  --image-name local-sandcastle-runner:latest \
-  --dockerfile factory/infrastructure/sandbox/Dockerfile
+docker build \
+  --build-arg AGENT_UID="$(id -u)" \
+  --build-arg AGENT_GID="$(id -g)" \
+  --tag local-sandcastle-runner:latest \
+  --file factory/infrastructure/sandbox/Dockerfile \
+  .
 ```
 
+Build directly with Docker; this factory does not use or require a `.sandcastle/` directory. The UID/GID arguments make files created by the container belong to the invoking host user.
+
 The container uses host networking so the agent can resolve the tailnet hostname and use the host's Tailscale routes. `factory/infrastructure/agent-runtime/models.json` defines the `local-vllm` provider and is mounted read-only at `~/.pi/agent/models.json` for Pi or `~/.omp/agent/models.yml` for oh-my-pi (JSON is valid YAML); no Anthropic or OpenAI API credential is required for this local service. The catalog at `factory/infrastructure/agent-runtime/skills/` is mounted read-only at the selected harness's global skills directory, `~/.pi/agent/skills/` or `~/.omp/agent/skills/`.
+
+Every planner, implementation, review, integration, and pull-request-content run receives one MCP tool named `submit_handoff`. The owning feature supplies that run's strict schema; the runtime writes a nonce-bearing contract to a unique host temporary directory, mounts the contract read-only and a separate result directory writable outside the repository, and revalidates the first accepted result after the agent exits. Pi and oh-my-pi preflight require the handoff server and tool. Assistant prose is diagnostic only: it cannot complete a stage.
 
 ## Running
 
@@ -88,13 +95,13 @@ npm run factory -- --tickets-dir ./.ticket-queue \
 
 Pi is the default harness; pass `--agent-harness oh-my-pi` when required. Both numeric options require positive integers and are validated before environment, credential, or sandbox work. `--max-parallel` is invocation-global across implementation, review, integration, and pull-request content jobs. `--ticket-attempts-per-cycle` controls fresh complete attempts; the default is `3`.
 
-The daemon scans sorted root-level Markdown files and plans at most one validated connected delivery group per cycle. Within that group, every dependency-ready ticket can run concurrently within the global limit. Planning remains serialized. Empty planner selections and retryable pending work add no backoff; only an empty active queue sleeps for 10 seconds.
+The daemon scans sorted root-level Markdown files and plans at most one validated connected delivery group per cycle. Within that group, every dependency-ready ticket can run concurrently within the global limit. Planning remains serialized. Empty planner selections and retryable pending work add no backoff. An empty active queue or an active queue with no runnable delivery group sleeps for 10 seconds, then rescans so new or changed tickets can become runnable.
 
 ### Dependency-group lifecycle
 
 1. Validate declared IDs, references, cycles, and repository/base compatibility. Missing references and descendants of unsuccessful work remain nonterminally blocked.
 2. Run dependency-ready tickets in isolated fresh workspaces. Roots start at the refreshed canonical base; a one-parent ticket imports the parent's clean review checkpoint; multi-parent tickets wait for a runner-owned reviewed integration baseline. Siblings never see one another's ticket-specific changes.
-3. Each complete attempt runs implementation and review through their existing three single-iteration stage loops. Every successful stage receives exactly one runner-owned checkpoint, including an empty review checkpoint. A failed complete attempt is retained and retried in a fresh workspace from the same pinned dependency baseline, up to the cycle budget.
+3. Each complete attempt runs implementation and review through three single-iteration stage loops. A missing `submit_handoff` result consumes the next stage iteration in the same uncommitted workspace; schema, transport, and accepted-result postcondition failures do not. Every successful stage receives exactly one runner-owned checkpoint, including an empty review checkpoint. Checkpoint commits use the runner-local `Factory Runner <factory-runner@localhost>` identity, so host-level Git author configuration is not required. A failed complete attempt is retained and retried in a fresh workspace from the same pinned dependency baseline, up to the cycle budget.
 4. Exhausted tickets remain retryable for the next cycle. Descendants stay blocked; successful ancestors and independent siblings remain reusable and publishable.
 5. After runnable work settles, reviewed leaf candidates are merged in stable ticket-ID order in a fresh integration workspace. The integration agent resolves conflicts and reviews the combined behavior but never commits; the runner validates parents, conflict dispositions, index/tree cleanliness, and creates the merge commit. Combined review runs even for clean Git merges.
 6. Publish only dependency-closed reviewed candidates. A failed combined review never publishes its tree; independently reviewed subsets may publish separately. Pull-request content lists included, retryable, blocked, integration-excluded tickets, and every conflict disposition.
@@ -120,7 +127,7 @@ The persisted preference is appended to the ticket's completion section as `- Me
 
 ### Logs
 
-Agent output is written under `.logs/<run timestamp>-<process ID>/` at the root of this runner checkout. Each planner, implementer, reviewer, and pull-request stage gets a separate human-readable progress log containing assistant text and concise tool-start summaries while omitting raw Pi events such as thinking blocks and tool output. The same directory holds `main.log`, the append-only record of ticket attempts and failures.
+Agent output is written under `.logs/<run timestamp>-<process ID>/` at the root of this runner checkout. Each planner, implementer, reviewer, integration, and pull-request stage gets a separate human-readable progress log containing assistant text and a concise summary for every Pi-compatible tool-start event, including lowercase native and MCP tool names, while omitting raw Pi events such as thinking blocks and tool output. `submit_handoff` events identify the tool without logging title, body, message, or conflict payloads. The same directory holds `main.log`, the append-only record of ticket attempts, failures, and scheduling blocks. A newly discovered or changed block is also printed to stderr with its reason before planner selection, so a run with no runnable delivery group does not appear frozen.
 
 Each successful checkpoint appends one line to `main.log` in the form `timestamp ticket=<id> attempt=<id> stage=<stage> operation=creating stage checkpoint commit status=completed parent=<sha> checkpoint=<sha> changes=<changed|unchanged> agent-log=<basename>.log`. Trace a stage from the log to its commit and its agent transcript:
 
@@ -139,17 +146,17 @@ The runner is the `factory/` tree, split by responsibility:
 - `factory/cli/cli.ts` — `--tickets-dir`, harness selection, `--max-parallel`, `--ticket-attempts-per-cycle`, validation, and help-first startup behavior.
 - `factory/features/tickets/` — declared identity/dependencies, source and authored-requirements fingerprints, active/lifecycle discovery, append-only attempt/checkpoint/retryable/blocked/publication/completion/failure records, evidence inspection, and guarded movement.
 - `factory/features/plan-tickets/` — immutable factory-checkout planning for exact validated delivery-group IDs and member ID/title records. Execution capacity remains coordinator policy.
-- `factory/features/implement-ticket/` and `review-ticket/` — stage-owned loops of up to three single-iteration agent runs, structured messages, branch/HEAD contracts, and no agent commits. Implementation receives the pinned reviewed dependency context.
-- `factory/features/integrate-tickets/` — conflict resolution and combined review for pending runner-created merges, with three repair runs, structured conflict dispositions, branch/HEAD protection, unresolved-entry checks, and conflict-marker rejection.
+- `factory/features/implement-ticket/` and `review-ticket/` — stage-owned loops of up to three single-iteration agent runs, feature-owned `submit_handoff` message schemas, branch/HEAD contracts, and no agent commits. Implementation receives the pinned reviewed dependency context.
+- `factory/features/integrate-tickets/` — conflict resolution and combined review for pending runner-created merges, with three repair runs, a feature-owned handoff schema for conflict dispositions, branch/HEAD protection, unresolved-entry checks, and conflict-marker rejection.
 - `factory/features/publish-pull-request/` — read-only grouped content, immutable entry trace, commit-count/net-change gates, final SHA, safe non-force create/extension push, draft creation/update, uncertain-update reread, included/retryable/blocked/excluded/conflict evidence, and bounded GitHub squash note.
 - `factory/features/ticket-processing/` — invocation graph/component state, global agent leases, dependency-ready scheduling, fresh complete retries, dependency checkpoint import, multi-parent integration, reviewed-subset fallback, publication/settlement separation, startup evidence blocks, requirements guards, and merged-delta reconciliation.
 - `factory/infrastructure/git-provider/` — provider-neutral create/read/update contracts and Git mechanisms. GitHub and Azure DevOps return canonical PR state, refs, source SHA, title/body, draft status, squash capability, and merge-result SHA while preserving structured credential-redacted failures.
 - `factory/infrastructure/logging/` — `invocation-log.ts` (run directory, agent log paths, redacted `main.log`).
-- `factory/infrastructure/sandbox/` — `sandbox.ts` (host-network Docker provider, native read-only skill/model mounts, factory credential masking, preflight), `masked.env` (empty credential overlay), `Dockerfile` (Pi 1.1.0, oh-my-pi 18.8.4, RoslynMcp 1.2.3, .NET 10 runtime), and `check-mcp.mjs` (Pi MCP preflight).
-- `factory/infrastructure/agent-runtime/` — `agent-runtime.ts` (generic configured agent execution: sandbox provider, file logging, prompt file, completion signal, structured output, iteration limits), `create-agent.ts`, `stream-events.ts`, `oh-my-pi.ts`, `models.json` with `models-path.ts`, and the read-only `skills/` catalog.
+- `factory/infrastructure/sandbox/` — `sandbox.ts` (host-network Docker provider, native read-only skill/model/server mounts, isolated per-run handoff mounts, factory credential masking, preflight), `masked.env` (empty credential overlay), `Dockerfile` (Pi 1.1.0, oh-my-pi 18.8.4, RoslynMcp 1.2.3, .NET 10 runtime, and pinned handoff MCP dependencies), and `check-mcp.mjs` (Pi/oh-my-pi MCP preflight).
+- `factory/infrastructure/agent-runtime/` — generic configured execution, nonce-authenticated handoff contract/channel lifecycle, the schema-driven `submit_handoff` stdio server, safe stream summaries, agent construction, `oh-my-pi.ts`, `models.json` with `models-path.ts`, and the read-only `skills/` catalog. Feature schemas do not enter infrastructure.
 - `factory/shared/` — `paths.ts`, `sleep.ts`, and `redact-secret.ts`.
 
-The planner returns at most one exact validated delivery group and cannot bypass graph readiness. Implement, review, and integration own their structured single-iteration repair loops; agents never commit. The runner owns every checkpoint and integration commit. Planning/graph contract failures are invocation-fatal; unsuccessful complete attempts remain retryable, while durable-boundary failures require reconciliation.
+The planner returns at most one exact validated delivery group and cannot bypass graph readiness. Every stage completes only through its feature-shaped `submit_handoff` result; the first valid call is immutable, invalid arguments can be corrected in the same agent turn, and prose has no completion authority. Implement, review, and integration retry only omitted handoffs within their three-run loops; agents never commit. The runner owns every checkpoint and integration commit. Planning/graph contract failures are invocation-fatal; unsuccessful complete attempts remain retryable, while durable-boundary failures require reconciliation.
 
 ## Tests
 

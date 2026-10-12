@@ -1,12 +1,11 @@
-import { Output, StructuredOutputError } from "@ai-hero/sandcastle";
 import { resolve } from "node:path";
+import { MissingAgentHandoffError } from "../../infrastructure/agent-runtime/handoff.js";
 import type { AgentRunRequest, AgentRunner } from "../../infrastructure/agent-runtime/agent-runtime.js";
 import { type AgentHarness } from "../../infrastructure/sandbox/sandbox.js";
 import { requireCleanRepository, snapshotHeadAndBranch } from "../../infrastructure/git-provider/git.js";
 import type { Ticket } from "../tickets/index.js";
-import { implementSchema, type ImplementStageResult } from "./implement-schema.js";
+import { implementHandoff, type ImplementStageResult } from "./implement-schema.js";
 
-const COMPLETE = "<promise>COMPLETE</promise>";
 const MAX_ITERATIONS = 3;
 
 export interface ImplementTicketInput {
@@ -27,10 +26,9 @@ export type ImplementOutcome = Readonly<{
 
 /**
  * Runs the implementation agent in the ticket workspace, up to three single-iteration runs.
- * Sandcastle supports structured output only for single-iteration runs, so the runner owns the
- * iteration loop: each run reports one validated stage message, and uncommitted stage work
- * persists in the workspace for the next iteration. The agent never commits; the runner creates
- * the checkpoint after this stage succeeds.
+ * A missing handoff consumes another iteration in the same uncommitted workspace. Accepted
+ * handoffs and infrastructure failures return immediately to controller-owned postconditions.
+ * The agent never commits; the runner creates the checkpoint after this stage succeeds.
  */
 export async function implementTicket(input: ImplementTicketInput): Promise<ImplementOutcome> {
   await requireCleanRepository(input.workspacePath, `Implementation entry for ticket ${input.ticket.id}`);
@@ -56,21 +54,13 @@ export async function implementTicket(input: ImplementTicketInput): Promise<Impl
           BRANCH: input.branch,
           BASE_BRANCH: input.ticket.baseBranch,
         },
-        completionSignal: COMPLETE,
-        output: Output.object({ tag: "implementation", schema: implementSchema }),
+        handoff: implementHandoff,
         maxIterations: 1,
       };
       const result = await input.runAgent(request);
-      if (result.completionSignal === COMPLETE) {
-        return { message: result.output.message, head: entry.head };
-      }
-      lastFailure = new Error(`iteration ${iteration} ended without the completion signal`);
+      return { message: result.handoff.message, head: entry.head };
     } catch (error) {
-      // A run that fails to produce a valid structured message is a failed iteration; the next
-      // iteration continues from the same uncommitted stage work. Infrastructure failures are fatal.
-      if (!(error instanceof StructuredOutputError)) {
-        throw error;
-      }
+      if (!(error instanceof MissingAgentHandoffError)) throw error;
       lastFailure = error;
     }
   }

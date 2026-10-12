@@ -14,4 +14,16 @@ for (const harness of ["pi", "oh-my-pi"] as const) {
 
     assert.deepEqual(agent.parseStreamLine(line), [{ type: "text", text: "Tool: edit factory/main.ts" }]);
   });
+
+  test(`${harness} handoff tool logs omit payload fields`, () => {
+    const agent = ticketAgent(harness);
+    const line = JSON.stringify({
+      type: "tool_execution_start",
+      toolCallId: "call-2",
+      toolName: "submit_handoff",
+      args: { title: "secret title", body: "secret body" },
+    });
+
+    assert.deepEqual(agent.parseStreamLine(line), [{ type: "text", text: "Tool: submit_handoff [payload omitted]" }]);
+  });
 }

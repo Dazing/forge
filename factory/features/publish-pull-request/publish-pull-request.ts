@@ -1,16 +1,14 @@
-import { Output } from "@ai-hero/sandcastle";
 import { resolve } from "node:path";
 import { requireUnchanged, runGit, snapshotRepository } from "../../infrastructure/git-provider/git.js";
 import type { DraftPullRequest, GitProvider, SquashPreference } from "../../infrastructure/git-provider/git-provider.js";
 import type { AgentRunner } from "../../infrastructure/agent-runtime/agent-runtime.js";
 import { type AgentHarness } from "../../infrastructure/sandbox/sandbox.js";
 import type { Ticket } from "../tickets/index.js";
-import { MAX_BODY_CHARS, pullRequestSchema } from "./pull-request-schema.js";
+import { MAX_BODY_CHARS, pullRequestHandoff } from "./pull-request-schema.js";
 
 // Publication: read-only content stage, commits-ahead validation, final SHA, push, and draft pull-request creation.
 // Each substage failure carries its name so settlement records the correct stage with the original diagnostics.
 
-const COMPLETE = "<promise>COMPLETE</promise>";
 // Runner-owned note appended when the provider cannot persist a per-pull-request merge method.
 const squashNote = "\n\nMerge method: squash. This provider cannot record a merge method on a draft pull request; select squash when merging.";
 
@@ -74,13 +72,12 @@ export async function publishPullRequest(input: PublishPullRequestInput): Promis
       logName: `pull-request-${input.ticket.id}-${input.attemptId}`,
       promptFile: resolve(import.meta.dirname, "pull-request-prompt.md"),
       promptArgs: { TICKET_ID: input.ticket.id, TICKET_TITLE: input.ticket.title, BRANCH: input.branch, BASE_BRANCH: input.ticket.baseBranch, TICKET_CONTENT: input.ticket.content },
-      completionSignal: COMPLETE,
-      output: Output.object({ tag: "pull-request", schema: pullRequestSchema }),
+      handoff: pullRequestHandoff,
     });
-    if (result.completionSignal !== COMPLETE) {
-      throw new Error("pull-request agent did not complete");
+    content = result.handoff;
+    if (input.gitProvider.secrets().some((secret) => secret.length > 0 && (content.title.includes(secret) || content.body.includes(secret)))) {
+      throw new Error("pull-request content contains provider credential material.");
     }
-    content = result.output;
     requireUnchanged("pull-request content stage", "ticket workspace", beforeContent, await snapshotRepository(input.workspacePath));
     await input.onContentComplete(beforeContent.head);
   } catch (error) {

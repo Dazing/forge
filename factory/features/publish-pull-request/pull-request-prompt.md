@@ -32,12 +32,8 @@ Body requirements:
 
 You have no authority to execute anything remote. Do not run `git push`, create, delete, merge, or switch branches, stage, commit, modify, delete, or create any file, run `gh` or `az repos`, or call the GitHub or Azure DevOps API. The runner performs every Git and provider API operation deterministically from your output.
 
-Return exactly one JSON object wrapped in `<pull-request>` tags and no other `<pull-request>` block. Both values must be non-empty:
+After the title and body satisfy every requirement, call `submit_handoff` exactly once with:
 
-<pull-request>
-{"title":"Short pull-request title","body":"Markdown summary."}
-</pull-request>
+`{"title":"Short pull-request title","body":"Markdown summary."}`
 
-Then end with:
-
-<promise>COMPLETE</promise>
+Both values must be non-empty. If the tool rejects invalid arguments, correct the arguments and call it again in this turn. After acceptance, stop without running more tools or changing files.

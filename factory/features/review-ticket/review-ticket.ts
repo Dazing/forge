@@ -1,12 +1,11 @@
-import { Output, StructuredOutputError } from "@ai-hero/sandcastle";
 import { resolve } from "node:path";
+import { MissingAgentHandoffError } from "../../infrastructure/agent-runtime/handoff.js";
 import type { AgentRunRequest, AgentRunner } from "../../infrastructure/agent-runtime/agent-runtime.js";
 import { type AgentHarness } from "../../infrastructure/sandbox/sandbox.js";
 import { requireCleanRepository, snapshotHeadAndBranch } from "../../infrastructure/git-provider/git.js";
 import type { Ticket } from "../tickets/index.js";
-import { reviewSchema, type ReviewStageResult } from "./review-schema.js";
+import { reviewHandoff, type ReviewStageResult } from "./review-schema.js";
 
-const COMPLETE = "<promise>COMPLETE</promise>";
 const MAX_ITERATIONS = 3;
 
 export interface ReviewTicketInput {
@@ -25,12 +24,10 @@ export type ReviewOutcome = Readonly<{
 }>;
 
 /**
- * Runs the review agent in the ticket workspace, up to three single-iteration runs. Sandcastle
- * supports structured output only for single-iteration runs, so the runner owns the iteration
- * loop. The reviewer inspects the uncommitted implementation work, may make small corrections,
- * and reports one validated stage message. The reviewer never commits; the runner creates the
- * checkpoint after this stage succeeds, and cleanliness of the resulting workspace is enforced
- * at that boundary.
+ * Runs the review agent in the ticket workspace, up to three single-iteration runs. A missing
+ * handoff consumes another iteration in the same uncommitted workspace. The reviewer inspects
+ * implementation work, may make small corrections, and never commits; the runner creates the
+ * checkpoint after an accepted handoff.
  */
 export async function reviewTicket(input: ReviewTicketInput): Promise<ReviewOutcome> {
   await requireCleanRepository(input.workspacePath, `Review entry for ticket ${input.ticket.id}`);
@@ -55,21 +52,13 @@ export async function reviewTicket(input: ReviewTicketInput): Promise<ReviewOutc
           BRANCH: input.branch,
           BASE_BRANCH: input.ticket.baseBranch,
         },
-        completionSignal: COMPLETE,
-        output: Output.object({ tag: "review", schema: reviewSchema }),
+        handoff: reviewHandoff,
         maxIterations: 1,
       };
       const result = await input.runAgent(request);
-      if (result.completionSignal === COMPLETE) {
-        return { message: result.output.message, head: entry.head };
-      }
-      lastFailure = new Error(`iteration ${iteration} ended without the completion signal`);
+      return { message: result.handoff.message, head: entry.head };
     } catch (error) {
-      // A run that fails to produce a valid structured message is a failed iteration; the next
-      // iteration continues from the same uncommitted stage work. Infrastructure failures are fatal.
-      if (!(error instanceof StructuredOutputError)) {
-        throw error;
-      }
+      if (!(error instanceof MissingAgentHandoffError)) throw error;
       lastFailure = error;
     }
   }

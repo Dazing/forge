@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { runCommand, CommandFailedError } from "../../infrastructure/git-provider/git.js";
 import type { DraftPullRequest, DraftPullRequestRequest, GitProvider } from "../../infrastructure/git-provider/git-provider.js";
 import type { AgentRunRequest, AgentRunner } from "../../infrastructure/agent-runtime/agent-runtime.js";
+import { MissingAgentHandoffError } from "../../infrastructure/agent-runtime/handoff.js";
 import type { Ticket } from "../tickets/index.js";
 import { publishPullRequest, PublicationError, type PublishPullRequestInput } from "./publish-pull-request.js";
 import { pullRequestSchema } from "./pull-request-schema.js";
@@ -78,7 +79,7 @@ function contentAgent(body = "Verified with curl.", mutate?: () => Promise<void>
     if (mutate) {
       await mutate();
     }
-    return { iterations: [], commits: [], stdout: "", branch: BRANCH, completionSignal: "<promise>COMPLETE</promise>", output: { title: "Fix login redirect", body } as TOutput };
+    return { iterations: [], commits: [], stdout: "", branch: BRANCH, handoff: { title: "Fix login redirect", body } as TOutput };
   };
 }
 
@@ -166,6 +167,35 @@ test("content stage mutations reject publication before any provider call", asyn
   assert.equal(error.substage, "pull-request content");
   assert.match(String(error.cause), /worktree status/);
   assert.equal(requests.length, 0);
+});
+
+test("a missing content handoff fails before push or provider calls", async () => {
+  const workspace = await workspaceWithRemote();
+  const { provider, requests } = providerStub("ok");
+  const missing: AgentRunner = async () => {
+    throw new MissingAgentHandoffError();
+  };
+
+  const error = await publishPullRequest(input(workspace, missing, provider)).catch((value) => value as PublicationError);
+
+  assert.ok(error instanceof PublicationError);
+  assert.equal(error.substage, "pull-request content");
+  assert.ok(error.cause instanceof MissingAgentHandoffError);
+  assert.equal(requests.length, 0);
+});
+
+test("content containing provider credential material fails before push or provider calls", async () => {
+  const workspace = await workspaceWithRemote();
+  const { provider, requests } = providerStub("ok");
+
+  const error = await publishPullRequest(input(workspace, contentAgent("Leaked gh_secret_abc"), provider)).catch((value) => value as PublicationError);
+
+  assert.ok(error instanceof PublicationError);
+  assert.equal(error.substage, "pull-request content");
+  assert.match(String(error.cause), /credential material/);
+  assert.equal(requests.length, 0);
+  const remote = join(workspace, "..", "remote.git");
+  await assert.rejects(runCommand("git", ["-C", remote, "rev-parse", `refs/heads/${BRANCH}`], "reading pushed branch"));
 });
 
 test("a branch with no commits ahead of the base branch cannot publish", async () => {

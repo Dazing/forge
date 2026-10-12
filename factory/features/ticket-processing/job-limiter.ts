@@ -1,4 +1,4 @@
-import type { AgentRunner } from "../../infrastructure/agent-runtime/agent-runtime.js";
+import type { AgentRunRequest, AgentRunner } from "../../infrastructure/agent-runtime/agent-runtime.js";
 
 /** Invocation-wide lease pool. A job owns exactly one lease and releases it in finally. */
 export class JobLimiter {
@@ -21,6 +21,6 @@ export class JobLimiter {
   }
 
   wrap(runAgent: AgentRunner): AgentRunner {
-    return <TOutput>(request: Parameters<AgentRunner>[0]) => this.run(() => runAgent<TOutput>(request));
+    return <THandoff>(request: AgentRunRequest<THandoff>) => this.run(() => runAgent(request));
   }
 }

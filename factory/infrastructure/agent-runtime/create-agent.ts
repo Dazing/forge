@@ -16,6 +16,10 @@ semantic tool. Use \`find_symbol_definition\`, \`find_usages\`, \`get_diagnostic
 \`run_dotnet_build\`, and \`run_dotnet_test\` for code intelligence and verification. Call
 \`reset_workspace\` after \`dotnet build\` so generated files are picked up. Enable tool groups with
 \`list_tool_groups\` and \`enable_tool_group\` when a tool is not yet available.
+
+\`submit_handoff\` is the authoritative stage result. Call it exactly once only after all work and
+verification obligations pass. If it rejects an invalid payload, correct that call in the same turn.
+After acceptance, stop without running more tools or changing files.
 `;
 
 export function ticketAgent(harness: AgentHarness): AgentProvider {
@@ -24,7 +28,7 @@ export function ticketAgent(harness: AgentHarness): AgentProvider {
     ...base,
     buildPrintCommand(options) {
       const command = base.buildPrintCommand({ ...options, prompt: `${options.prompt}\n${MCP_TOOL_RULES}` });
-      return harness === "pi" ? { ...command, command: `node /home/agent/.pi/agent/check-mcp.mjs && ${command.command}` } : command;
+      return { ...command, command: `node /home/agent/.factory-assets/check-mcp.mjs ${harness} && ${command.command}` };
     },
     parseStreamLine(line) {
       const parsedEvents = base.parseStreamLine(line);

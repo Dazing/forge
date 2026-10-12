@@ -16,10 +16,8 @@ Integrate and review the supplied ticket checkpoints in the current workspace.
 
 Resolve every pending merge conflict, stage resolutions with `git add`, and review the combined behavior even when Git merged cleanly. Run relevant verification. Do not commit, change HEAD/branch, push, reset, rebase, or discard reviewed ticket changes. Preserve unrelated behavior. Every encountered conflict needs a concise disposition.
 
-Return exactly:
-<integration>
-{"message":"integration review summary and verification","conflicts":[{"path":"path","disposition":"resolution"}]}
-</integration>
-<promise>COMPLETE</promise>
+Only after every conflict is resolved, combined review passes, and no conflict markers, generated debris, or unresolved findings remain, call `submit_handoff` exactly once with:
 
-Do not emit completion while conflicts, conflict markers, dirty generated debris, or unresolved review findings remain.
+`{"message":"integration review summary and verification","conflicts":[{"path":"path","disposition":"resolution"}]}`
+
+Include one disposition for every encountered conflict. If the tool rejects invalid arguments, correct the arguments and call it again in this turn. Do not submit a handoff while work is incomplete. After acceptance, stop without running more tools or changing files.

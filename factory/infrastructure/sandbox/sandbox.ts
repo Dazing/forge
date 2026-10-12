@@ -14,14 +14,22 @@ export const IMAGE_NAME = "local-sandcastle-runner:latest";
 export const dockerfilePath = "factory/infrastructure/sandbox/Dockerfile";
 
 const checkMcpPath = resolve(import.meta.dirname, "check-mcp.mjs");
+const handoffServerPath = resolve(import.meta.dirname, "../agent-runtime/handoff-server.mjs");
 const maskedEnvPath = resolve(import.meta.dirname, "masked.env");
 
-function sandboxMounts(harness: AgentHarness, factoryRoot: string, repositoryPath: string): MountConfig[] {
+type HandoffMountPaths = Readonly<{ contractPath: string; resultDirectoryPath: string }>;
+
+function sandboxMounts(harness: AgentHarness, factoryRoot: string, repositoryPath: string, handoff?: HandoffMountPaths): MountConfig[] {
   const agentDir = harness === "pi" ? "/home/agent/.pi/agent" : "/home/agent/.omp/agent";
   return [
     { hostPath: resolve(factoryRoot, "factory/infrastructure/agent-runtime/skills"), sandboxPath: `${agentDir}/skills`, readonly: true },
     { hostPath: modelsPath, sandboxPath: `${agentDir}/${harness === "pi" ? "models.json" : "models.yml"}`, readonly: true },
-    { hostPath: checkMcpPath, sandboxPath: "/home/agent/.pi/agent/check-mcp.mjs", readonly: true },
+    { hostPath: checkMcpPath, sandboxPath: "/home/agent/.factory-assets/check-mcp.mjs", readonly: true },
+    { hostPath: handoffServerPath, sandboxPath: "/home/agent/.factory-assets/handoff-server.mjs", readonly: true },
+    ...(handoff === undefined ? [] : [
+      { hostPath: handoff.contractPath, sandboxPath: "/home/agent/.factory-handoff/contract.json", readonly: true },
+      { hostPath: handoff.resultDirectoryPath, sandboxPath: "/home/agent/.factory-handoff/result" },
+    ]),
     // Head-mode planning mounts the factory checkout, including its REST credentials.
     // Shadow only the factory's .env; ticket repositories retain their own application config.
     ...(resolve(repositoryPath) === resolve(factoryRoot)
@@ -30,8 +38,13 @@ function sandboxMounts(harness: AgentHarness, factoryRoot: string, repositoryPat
   ];
 }
 
-export function sandboxProvider(harness: AgentHarness, factoryRoot: string, repositoryPath: string): SandboxProvider {
-  return docker({ imageName: IMAGE_NAME, network: "host", mounts: sandboxMounts(harness, factoryRoot, repositoryPath) });
+export function sandboxProvider(
+  harness: AgentHarness,
+  factoryRoot: string,
+  repositoryPath: string,
+  handoff: HandoffMountPaths,
+): SandboxProvider {
+  return docker({ imageName: IMAGE_NAME, network: "host", mounts: sandboxMounts(harness, factoryRoot, repositoryPath, handoff) });
 }
 
 /** Verify the runner image exists and every mount source is present before the daemon polls any ticket. */

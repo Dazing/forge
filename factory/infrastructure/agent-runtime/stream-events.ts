@@ -22,8 +22,9 @@ export function parseToolExecutionStart(line: string): ToolCallEvent | undefined
   }
 }
 
-/** Summarize a tool call's formatted JSON arguments: file path (with line range) for file tools, command for bash, raw JSON otherwise. */
+/** Summarize tool arguments without exposing handoff content in human-readable logs. */
 export function summarizeToolArgs(toolName: string, args: string): string {
+  if (toolName === "submit_handoff") return "[payload omitted]";
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(args) as Record<string, unknown>;

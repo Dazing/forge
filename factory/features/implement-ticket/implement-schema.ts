@@ -1,3 +1,4 @@
+import { createAgentHandoff } from "../../infrastructure/agent-runtime/handoff.js";
 import { z } from "zod";
 
 // Implementation stage message contract. The agent reports a Conventional Commit subject plus a short body of completed changes
@@ -8,17 +9,19 @@ import { z } from "zod";
 export const MAX_MESSAGE_CHARS = 4000;
 
 /** Control characters other than line feed are rejected in stage messages. */
-const controlCharacters = /[\x00-\x09\x0B-\x1F\x7F]/;
+const safeMessage = z.string()
+  .trim()
+  .min(1)
+  .max(MAX_MESSAGE_CHARS)
+  .regex(/^[^\x00-\x09\x0B-\x1F\x7F]*$/, "message contains control characters other than line feed")
+  .regex(/^(?![\s\S]*(^|\n)Factory-[A-Za-z][A-Za-z-]*:)[\s\S]*$/, "message contains a runner-reserved commit trailer");
 
-/** `Factory-*:` commit trailers are runner-owned stage identity; agent prose containing one is rejected so it cannot be forged. */
-const reservedTrailers = /(^|\n)Factory-[A-Za-z][A-Za-z-]*:/;
-
-export const implementSchema = z
-  .strictObject({ message: z.string().trim().min(1).max(MAX_MESSAGE_CHARS) })
-  .refine((value) => !controlCharacters.test(value.message), { message: "message contains control characters other than line feed" })
-  .refine((value) => !reservedTrailers.test(value.message), { message: "message contains a runner-reserved commit trailer" });
+export const implementSchema = z.strictObject({ message: safeMessage });
 
 /** Validated implementation stage result. */
-export type ImplementStageResult = Readonly<{
-  message: string;
-}>;
+export type ImplementStageResult = z.infer<typeof implementSchema>;
+
+export const implementHandoff = createAgentHandoff(
+  "Submit the implementation summary only after the ticket is complete and verification passes.",
+  implementSchema,
+);

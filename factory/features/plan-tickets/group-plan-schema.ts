@@ -1,3 +1,4 @@
+import { createAgentHandoff } from "../../infrastructure/agent-runtime/handoff.js";
 import { z } from "zod";
 
 export type PlannedGroup = Readonly<{
@@ -11,6 +12,11 @@ export const groupPlanSchema = z.object({
     tickets: z.array(z.object({ id: z.string().trim().min(1), title: z.string() }).strict()).min(1),
   }).strict()).max(1),
 }).strict();
+
+export const groupPlanHandoff = createAgentHandoff(
+  "Submit zero or one exact supplied delivery group selected for this iteration.",
+  groupPlanSchema,
+);
 
 export function validateGroupPlan(entries: readonly PlannedGroup[], available: ReadonlyMap<string, PlannedGroup>): PlannedGroup[] {
   const selected = new Set<string>();

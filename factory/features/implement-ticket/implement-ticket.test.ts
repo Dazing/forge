@@ -4,13 +4,12 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentRunRequest, AgentRunner, AgentRunResult } from "../../infrastructure/agent-runtime/agent-runtime.js";
-import { StructuredOutputError } from "@ai-hero/sandcastle";
+import { MissingAgentHandoffError } from "../../infrastructure/agent-runtime/handoff.js";
 import { runCommand } from "../../infrastructure/git-provider/git.js";
 import type { Ticket } from "../tickets/index.js";
 import { implementTicket, type ImplementTicketInput } from "./implement-ticket.js";
 import { implementSchema } from "./implement-schema.js";
 
-const COMPLETE = "<promise>COMPLETE</promise>";
 
 const ticket: Ticket = {
   id: "0123456789abcdef",
@@ -47,11 +46,11 @@ function input(runAgent: AgentRunner, workspacePath: string): ImplementTicketInp
   return { ticket, workspacePath, branch: BRANCH, attemptId: "1a2b3c", harness: "pi", runAgent };
 }
 
-/** Agent that leaves uncommitted stage work and emits the completion signal with a valid message. */
+/** Agent that leaves uncommitted stage work and submits a valid handoff. */
 function completingAgent(message: string): AgentRunner {
   return async <TOutput>(request: AgentRunRequest<TOutput>) => {
     await writeFile(join(request.cwd, "login.ts"), "export const redirect = true;\n");
-    return { iterations: [], commits: [], stdout: "", branch: BRANCH, completionSignal: COMPLETE, output: { message } as TOutput } as AgentRunResult<TOutput>;
+    return { iterations: [], commits: [], stdout: "", branch: BRANCH, handoff: { message } as TOutput } as AgentRunResult<TOutput>;
   };
 }
 
@@ -69,8 +68,8 @@ test("implementation returns the validated stage message and leaves the work unc
   assert.equal(requests.length, 1);
   const request = requests[0]!;
   assert.equal(request.maxIterations, 1);
-  assert.equal(request.completionSignal, COMPLETE);
-  assert.equal(request.output?.tag, "implementation");
+  assert.equal(request.handoff.toolName, "submit_handoff");
+  assert.deepEqual(request.handoff.inputSchema.required, ["message"]);
   await access(request.promptFile);
   const status = (await git(workspacePath, ["status", "--porcelain"])).trim();
   assert.match(status, /\?\? login\.ts/);
@@ -82,9 +81,9 @@ test("implementation retries a failed iteration within the three-iteration limit
   const runAgent = async <TOutput>(request: AgentRunRequest<TOutput>) => {
     runs += 1;
     if (runs === 1) {
-      throw new StructuredOutputError("Structured output validation failed: missing <implementation> tag", { tag: "implementation", rawMatched: undefined, commits: [], branch: BRANCH });
+      throw new MissingAgentHandoffError();
     }
-    return { iterations: [], commits: [], stdout: "", branch: BRANCH, completionSignal: COMPLETE, output: { message: "fix(login): redirect after auth" } as TOutput } as AgentRunResult<TOutput>;
+    return { iterations: [], commits: [], stdout: "", branch: BRANCH, handoff: { message: "fix(login): redirect after auth" } as TOutput } as AgentRunResult<TOutput>;
   };
 
   const result = await implementTicket(input(runAgent, workspacePath));
@@ -93,12 +92,12 @@ test("implementation retries a failed iteration within the three-iteration limit
   assert.equal(runs, 2);
 });
 
-test("implementation rejects after three iterations without a completion signal", async () => {
+test("implementation rejects after three omitted handoffs", async () => {
   const workspacePath = await workspace();
   let runs = 0;
   const runAgent = async <TOutput>(request: AgentRunRequest<TOutput>) => {
     runs += 1;
-    return { iterations: [], commits: [], stdout: "", branch: BRANCH, output: undefined as TOutput } as AgentRunResult<TOutput>;
+    throw new MissingAgentHandoffError();
   };
 
   await assert.rejects(implementTicket(input(runAgent, workspacePath)), /implementation agent did not complete/);

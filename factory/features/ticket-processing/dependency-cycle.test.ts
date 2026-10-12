@@ -4,6 +4,7 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentRunRequest, AgentRunner, AgentRunResult } from "../../infrastructure/agent-runtime/agent-runtime.js";
+import { MissingAgentHandoffError } from "../../infrastructure/agent-runtime/handoff.js";
 import { runCommand, runGit } from "../../infrastructure/git-provider/git.js";
 import type { DraftPullRequestRequest, GitProvider, PullRequestDetails, UpdateDraftPullRequestRequest } from "../../infrastructure/git-provider/git-provider.js";
 import { InvocationLogger } from "../../infrastructure/logging/invocation-log.js";
@@ -15,7 +16,6 @@ process.env.GIT_AUTHOR_NAME = "Dependency Test";
 process.env.GIT_AUTHOR_EMAIL = "dependency@test.example";
 process.env.GIT_COMMITTER_NAME = "Dependency Test";
 process.env.GIT_COMMITTER_EMAIL = "dependency@test.example";
-const COMPLETE = "<promise>COMPLETE</promise>";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "sandcastle-dependencies-"));
@@ -57,7 +57,7 @@ test("diamond dependencies use isolated sibling baselines, bounded overlap, revi
       const groupsText = request.promptArgs.GROUPS!;
       const groupId = /<group id="([^"]+)">/.exec(groupsText)![1]!;
       const tickets = [...groupsText.matchAll(/- ([^:]+): (.+)/g)].map((match) => ({ id: match[1]!, title: match[2]! }));
-      return { ...base, completionSignal: "</plan>", output: { groups: [{ groupId, tickets }] } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, handoff: { groups: [{ groupId, tickets }] } } as unknown as AgentRunResult<TOutput>;
     }
     if (request.name.startsWith("implement-")) {
       const id = request.promptArgs.TICKET_ID!;
@@ -71,18 +71,18 @@ test("diamond dependencies use isolated sibling baselines, bounded overlap, revi
       await writeFile(join(request.cwd, `${id}.txt`), `${id}\n`);
       if (id === "b" || id === "c") await writeFile(join(request.cwd, "shared.txt"), `${id}\n`);
       activeImplementations--;
-      return { ...base, completionSignal: COMPLETE, output: { message: `feat(${id}): implement ${id}` } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, handoff: { message: `feat(${id}): implement ${id}` } } as unknown as AgentRunResult<TOutput>;
     }
-    if (request.name.startsWith("review-")) return { ...base, completionSignal: COMPLETE, output: { message: "chore(review): verify combined behavior" } } as unknown as AgentRunResult<TOutput>;
+    if (request.name.startsWith("review-")) return { ...base, handoff: { message: "chore(review): verify combined behavior" } } as unknown as AgentRunResult<TOutput>;
     if (request.name.startsWith("integrate-")) {
       const conflicts = request.promptArgs.CONFLICT_PATHS === "none" ? [] : request.promptArgs.CONFLICT_PATHS!.split("\n");
       if (conflicts.includes("shared.txt")) {
         await writeFile(join(request.cwd, "shared.txt"), "b\nc\n");
         await runGit(request.cwd, ["add", "shared.txt"], "resolving integration fixture conflict");
       }
-      return { ...base, completionSignal: COMPLETE, output: { message: "chore(integration): review combined behavior", conflicts: conflicts.map((path) => ({ path, disposition: "combined" })) } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, handoff: { message: "chore(integration): review combined behavior", conflicts: conflicts.map((path) => ({ path, disposition: "combined" })) } } as unknown as AgentRunResult<TOutput>;
     }
-    return { ...base, completionSignal: COMPLETE, output: { title: "Deliver dependency group", body: "Reviewed as one dependency group." } } as unknown as AgentRunResult<TOutput>;
+    return { ...base, handoff: { title: "Deliver dependency group", body: "Reviewed as one dependency group." } } as unknown as AgentRunResult<TOutput>;
   };
   const requests: DraftPullRequestRequest[] = [];
   const provider: GitProvider = {
@@ -134,7 +134,7 @@ test("an exhausted ticket publishes reviewed ancestors, blocks descendants, then
       const groupsText = request.promptArgs.GROUPS!;
       const groupId = /<group id="([^"]+)">/.exec(groupsText)![1]!;
       const tickets = [...groupsText.matchAll(/- ([^:]+): (.+)/g)].map((match) => ({ id: match[1]!, title: match[2]! }));
-      return { ...base, completionSignal: "</plan>", output: { groups: [{ groupId, tickets }] } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, handoff: { groups: [{ groupId, tickets }] } } as unknown as AgentRunResult<TOutput>;
     }
     if (request.name.startsWith("implement-")) {
       const id = request.promptArgs.TICKET_ID!;
@@ -143,18 +143,18 @@ test("an exhausted ticket publishes reviewed ancestors, blocks descendants, then
         bWorkspaces.add(request.cwd);
         if (cycle === 1) {
           await writeFile(join(request.cwd, "failed-attempt-sentinel.txt"), "must not leak\n");
-          return { ...base, completionSignal: "", output: { message: "incomplete" } } as unknown as AgentRunResult<TOutput>;
+          throw new MissingAgentHandoffError();
         }
         await assert.rejects(readFile(join(request.cwd, "failed-attempt-sentinel.txt"), "utf8"), { code: "ENOENT" });
         freshRetryWasClean = true;
       }
       if (id === "c") cImplementRuns++;
       await writeFile(join(request.cwd, `${id}.txt`), `${id}\n`);
-      return { ...base, completionSignal: COMPLETE, output: { message: `feat(${id}): implement ${id}` } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, handoff: { message: `feat(${id}): implement ${id}` } } as unknown as AgentRunResult<TOutput>;
     }
-    if (request.name.startsWith("review-")) return { ...base, completionSignal: COMPLETE, output: { message: "chore(review): verify behavior" } } as unknown as AgentRunResult<TOutput>;
-    if (request.name.startsWith("integrate-")) return { ...base, completionSignal: COMPLETE, output: { message: "chore(integration): verify group", conflicts: [] } } as unknown as AgentRunResult<TOutput>;
-    return { ...base, completionSignal: COMPLETE, output: { title: `Cycle ${cycle}`, body: `Cycle ${cycle} delivery.` } } as unknown as AgentRunResult<TOutput>;
+    if (request.name.startsWith("review-")) return { ...base, handoff: { message: "chore(review): verify behavior" } } as unknown as AgentRunResult<TOutput>;
+    if (request.name.startsWith("integrate-")) return { ...base, handoff: { message: "chore(integration): verify group", conflicts: [] } } as unknown as AgentRunResult<TOutput>;
+    return { ...base, handoff: { title: `Cycle ${cycle}`, body: `Cycle ${cycle} delivery.` } } as unknown as AgentRunResult<TOutput>;
   };
   const requests: DraftPullRequestRequest[] = [];
   const updates: UpdateDraftPullRequestRequest[] = [];
@@ -220,17 +220,17 @@ test("failed combined review publishes separate reviewed subsets and leaves mult
     if (request.name.startsWith("plan-groups-")) {
       const groupId = /<group id="([^"]+)">/.exec(request.promptArgs.GROUPS!)![1]!;
       const tickets = [...request.promptArgs.GROUPS!.matchAll(/- ([^:]+): (.+)/g)].map((match) => ({ id: match[1]!, title: match[2]! }));
-      return { ...base, completionSignal: "</plan>", output: { groups: [{ groupId, tickets }] } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, handoff: { groups: [{ groupId, tickets }] } } as unknown as AgentRunResult<TOutput>;
     }
     if (request.name.startsWith("implement-")) {
       const id = request.promptArgs.TICKET_ID!;
       if (id === "d") dRuns++;
       await writeFile(join(request.cwd, `${id}.txt`), `${id}\n`);
-      return { ...base, completionSignal: COMPLETE, output: { message: `feat(${id}): implement ${id}` } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, handoff: { message: `feat(${id}): implement ${id}` } } as unknown as AgentRunResult<TOutput>;
     }
-    if (request.name.startsWith("review-")) return { ...base, completionSignal: COMPLETE, output: { message: "chore(review): verify ticket" } } as unknown as AgentRunResult<TOutput>;
-    if (request.name.startsWith("integrate-")) return { ...base, completionSignal: "", output: { message: "incomplete combined review", conflicts: [] } } as unknown as AgentRunResult<TOutput>;
-    return { ...base, completionSignal: COMPLETE, output: { title: "Reviewed subset", body: "A reviewed dependency-closed subset." } } as unknown as AgentRunResult<TOutput>;
+    if (request.name.startsWith("review-")) return { ...base, handoff: { message: "chore(review): verify ticket" } } as unknown as AgentRunResult<TOutput>;
+    if (request.name.startsWith("integrate-")) throw new MissingAgentHandoffError();
+    return { ...base, handoff: { title: "Reviewed subset", body: "A reviewed dependency-closed subset." } } as unknown as AgentRunResult<TOutput>;
   };
   const requests: DraftPullRequestRequest[] = [];
   const provider: GitProvider = {
@@ -273,14 +273,14 @@ test("checkpoint failures are written to main.log and surfaced on stderr", async
     const base = { iterations: [], commits: [], stdout: "", branch: "" };
     if (request.name.startsWith("plan-groups-")) {
       const groupId = /<group id="([^"]+)">/.exec(request.promptArgs.GROUPS!)![1]!;
-      return { ...base, completionSignal: "</plan>", output: { groups: [{ groupId, tickets: [{ id: "a", title: "a" }] }] } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, handoff: { groups: [{ groupId, tickets: [{ id: "a", title: "a" }] }] } } as unknown as AgentRunResult<TOutput>;
     }
     if (request.name.startsWith("implement-")) {
       await writeFile(join(request.cwd, "a.txt"), "a\n");
       const hook = join(request.cwd, ".git", "hooks", "pre-commit");
       await writeFile(hook, "#!/bin/sh\nexit 1\n");
       await chmod(hook, 0o755);
-      return { ...base, completionSignal: COMPLETE, output: { message: "feat(a): implement a" } } as unknown as AgentRunResult<TOutput>;
+      return { ...base, handoff: { message: "feat(a): implement a" } } as unknown as AgentRunResult<TOutput>;
     }
     throw new Error(`unexpected agent ${request.name}`);
   };

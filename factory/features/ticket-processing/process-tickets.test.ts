@@ -32,7 +32,7 @@ test("the daemon replans without sleeping when an empty selection leaves active 
   let plans = 0;
   const runAgent: AgentRunner = async <TOutput>() => {
     if (++plans === 2) throw stop;
-    return { iterations: [], commits: [], stdout: "", branch: "", completionSignal: "</plan>", output: { groups: [] } as TOutput } as AgentRunResult<TOutput>;
+    return { iterations: [], commits: [], stdout: "", branch: "", handoff: { groups: [] } as TOutput } as AgentRunResult<TOutput>;
   };
   const provider: GitProvider = {
     name: "github",

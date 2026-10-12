@@ -1,11 +1,10 @@
-import { Output, StructuredOutputError } from "@ai-hero/sandcastle";
 import { resolve } from "node:path";
+import { MissingAgentHandoffError } from "../../infrastructure/agent-runtime/handoff.js";
 import type { AgentRunner } from "../../infrastructure/agent-runtime/agent-runtime.js";
 import { CommandFailedError, currentBranch, requireNoUnmergedEntries, runGit } from "../../infrastructure/git-provider/git.js";
 import type { AgentHarness } from "../../infrastructure/sandbox/sandbox.js";
-import { integrateSchema, type IntegrateStageResult } from "./integrate-schema.js";
+import { integrateHandoff, type IntegrateStageResult } from "./integrate-schema.js";
 
-const COMPLETE = "<promise>COMPLETE</promise>";
 const MAX_ITERATIONS = 3;
 
 export interface IntegrateTicketsInput {
@@ -44,18 +43,14 @@ export async function integrateTickets(input: IntegrateTicketsInput): Promise<In
           TICKETS: input.includedTickets.map((ticket) => `${ticket.id} (${ticket.checkpointSha}) ${ticket.title}: ${ticket.summary}`).join("\n"),
           CONFLICT_PATHS: input.conflictPaths.join("\n") || "none",
         },
-        completionSignal: COMPLETE,
-        output: Output.object({ tag: "integration", schema: integrateSchema }),
+        handoff: integrateHandoff,
         maxIterations: 1,
       });
-      if (result.completionSignal !== COMPLETE) {
-        lastFailure = new Error(`iteration ${iteration} ended without the completion signal`);
-        continue;
-      }
+      const handoff = result.handoff;
       if (await currentBranch(input.workspacePath) !== input.branch) throw new Error(`Integration agent changed branch from ${input.branch}.`);
       if ((await runGit(input.workspacePath, ["rev-parse", "HEAD"], "checking integration HEAD")).trim() !== head) throw new Error("Integration agent created or changed a commit; only the runner may commit.");
       await requireNoUnmergedEntries(input.workspacePath, "integration completion");
-      const dispositionPaths = new Set(result.output.conflicts.map((conflict) => conflict.path));
+      const dispositionPaths = new Set(handoff.conflicts.map((conflict) => conflict.path));
       const missingDispositions = input.conflictPaths.filter((path) => !dispositionPaths.has(path));
       if (missingDispositions.length > 0) throw new Error(`Integration omitted conflict dispositions for: ${missingDispositions.join(", ")}.`);
       let tracked = "";
@@ -65,9 +60,9 @@ export async function integrateTickets(input: IntegrateTicketsInput): Promise<In
         if (!(error instanceof CommandFailedError) || error.failure.exitCode !== 1) throw error;
       }
       if (tracked.trim().length > 0) throw new Error(`Integration left conflict markers:\n${tracked.trim()}`);
-      return { message: result.output.message, conflicts: result.output.conflicts, head };
+      return { message: handoff.message, conflicts: handoff.conflicts, head };
     } catch (error) {
-      if (!(error instanceof StructuredOutputError)) throw error;
+      if (!(error instanceof MissingAgentHandoffError)) throw error;
       lastFailure = error;
     }
   }

@@ -98,16 +98,10 @@ Leave all completed changes uncommitted in the worktree. When this is a later it
 
 Finish only when every explicit obligation has evidence, applicable standards are satisfied, existing applicable behavioral checks pass, every changed target compiles or type-checks, review findings are resolved, and no provisional behavior remains.
 
-Report exactly one JSON object inside an `<implementation>` tag, immediately followed by the completion signal:
+After every obligation passes, call `submit_handoff` exactly once with:
 
-<implementation>
-{"message": "fix(scope): imperative subject summarizing the change\n\nShort body: completed changes, the exact verification commands run and their observed results, and any limitation."}
-</implementation>
+`{"message":"fix(scope): imperative subject summarizing the change\n\nShort body: completed changes, the exact verification commands run and their observed results, and any limitation."}`
 
 `message` is one trimmed string of at most 4000 characters. Line feeds are allowed; other control characters are not. Use a Conventional Commit subject without the ticket ID as scope; when the stage needed no file changes, use a `chore` subject and explain that no changes were needed. Never include a `Factory-*:` trailer line (the runner owns commit trailers), and never include credentials, tokens, or secrets.
 
-Do not report success when a command failed, the ticket is incomplete, or an unresolved blocker exists. On failure, explain the blocker in prose and emit neither the `<implementation>` block nor the completion signal.
-
-Only after the ticket is fully implemented and every requirement above holds, end with:
-
-<promise>COMPLETE</promise>
+Do not submit a handoff when a command failed, the ticket is incomplete, or an unresolved blocker exists. Explain the blocker in prose instead. If the tool rejects invalid arguments, correct the arguments and call it again in this turn. After the tool accepts the handoff, stop without running more tools or changing files.

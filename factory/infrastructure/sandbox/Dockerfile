@@ -18,7 +18,7 @@ RUN set -eux; \
     if ! getent passwd "${AGENT_UID}" >/dev/null; then \
       useradd --uid "${AGENT_UID}" --gid "${AGENT_GID}" --create-home --shell /bin/bash agent; \
     fi; \
-    mkdir -p /home/agent/.pi/agent/skills /home/agent/.omp/agent/skills /home/agent/workspace; \
+    mkdir -p /home/agent/.pi/agent/skills /home/agent/.omp/agent/skills /home/agent/.factory-assets /home/agent/.factory-handoff/result /home/agent/workspace; \
     chown -R "${AGENT_UID}:${AGENT_GID}" /home/agent
 
 ENV DOTNET_CLI_HOME=/home/agent \
@@ -33,6 +33,7 @@ RUN DOTNET_CLI_HOME=/tmp/dotnet dotnet tool install --tool-path /usr/local/bin R
     && rm -rf /tmp/dotnet \
     && npm install --global --ignore-scripts @earendil-works/pi-coding-agent@1.1.0 \
     && npm install --global --ignore-scripts @oh-my-pi/pi-coding-agent@18.8.4 \
+    && npm install --prefix /home/agent/.factory-assets --ignore-scripts --omit=dev @modelcontextprotocol/sdk@1.32.1 ajv@8.20.0 \
     && printf '%s\n' \
       '{' \
       '  "mcpServers": {' \
@@ -45,12 +46,19 @@ RUN DOTNET_CLI_HOME=/tmp/dotnet dotnet tool install --tool-path /usr/local/bin R
       '      "url": "https://learn.microsoft.com/api/mcp",' \
       '      "exposure": "direct",' \
       '      "description": "Search and fetch current official Microsoft documentation and code samples."' \
+      '    },' \
+      '    "handoff": {' \
+      '      "command": "node",' \
+      '      "args": ["/home/agent/.factory-assets/handoff-server.mjs"],' \
+      '      "env": {"FACTORY_HANDOFF_CONTROL_DIR": "/home/agent/.factory-handoff"},' \
+      '      "exposure": "direct",' \
+      '      "description": "Submit the authoritative typed result for the current factory stage."' \
       '    }' \
       '  }' \
       '}' \
       > /home/agent/.pi/agent/mcp.json \
     && printf '%s\n' \
-      '{"mcpServers":{"roslyn":{"command":"roslynmcp"},"microsoft-learn":{"type":"http","url":"https://learn.microsoft.com/api/mcp"}}}' \
+      '{"mcpServers":{"roslyn":{"command":"roslynmcp"},"microsoft-learn":{"type":"http","url":"https://learn.microsoft.com/api/mcp"},"handoff":{"command":"node","args":["/home/agent/.factory-assets/handoff-server.mjs"],"env":{"FACTORY_HANDOFF_CONTROL_DIR":"/home/agent/.factory-handoff"}}}}' \
       > /home/agent/.omp/agent/mcp.json \
     && chown -R "${AGENT_UID}:${AGENT_GID}" /home/agent
 USER ${AGENT_UID}:${AGENT_GID}

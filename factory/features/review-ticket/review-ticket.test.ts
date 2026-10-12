@@ -4,13 +4,12 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentRunRequest, AgentRunner, AgentRunResult } from "../../infrastructure/agent-runtime/agent-runtime.js";
-import { StructuredOutputError } from "@ai-hero/sandcastle";
+import { MissingAgentHandoffError } from "../../infrastructure/agent-runtime/handoff.js";
 import { runCommand } from "../../infrastructure/git-provider/git.js";
 import type { Ticket } from "../tickets/index.js";
 import { reviewTicket, type ReviewTicketInput } from "./review-ticket.js";
 import { reviewSchema } from "./review-schema.js";
 
-const COMPLETE = "<promise>COMPLETE</promise>";
 
 const ticket: Ticket = {
   id: "0123456789abcdef",
@@ -53,7 +52,7 @@ test("review returns the validated message and accepts the uncommitted work unde
   const runAgent = async <TOutput>(request: AgentRunRequest<TOutput>) => {
     requests.push(request);
     await writeFile(join(request.cwd, "login.ts"), "export const redirect = true;\n");
-    return { iterations: [], commits: [], stdout: "", branch: BRANCH, completionSignal: COMPLETE, output: { message: "fix(login): review approved" } as TOutput } as AgentRunResult<TOutput>;
+    return { iterations: [], commits: [], stdout: "", branch: BRANCH, handoff: { message: "fix(login): review approved" } as TOutput } as AgentRunResult<TOutput>;
   };
 
   const result = await reviewTicket(input(runAgent, workspacePath));
@@ -62,8 +61,8 @@ test("review returns the validated message and accepts the uncommitted work unde
   assert.equal(requests.length, 1);
   const request = requests[0]!;
   assert.equal(request.maxIterations, 1);
-  assert.equal(request.completionSignal, COMPLETE);
-  assert.equal(request.output?.tag, "review");
+  assert.equal(request.handoff.toolName, "submit_handoff");
+  assert.deepEqual(request.handoff.inputSchema.required, ["message"]);
   const status = (await git(workspacePath, ["status", "--porcelain"])).trim();
   assert.match(status, /\?\? login\.ts/);
 });
@@ -74,9 +73,9 @@ test("review retries a failed iteration within the three-iteration limit", async
   const runAgent = async <TOutput>(request: AgentRunRequest<TOutput>) => {
     runs += 1;
     if (runs === 1) {
-      throw new StructuredOutputError("Structured output validation failed: blank message", { tag: "review", rawMatched: undefined, commits: [], branch: BRANCH });
+      throw new MissingAgentHandoffError();
     }
-    return { iterations: [], commits: [], stdout: "", branch: BRANCH, completionSignal: COMPLETE, output: { message: "fix(login): review approved" } as TOutput } as AgentRunResult<TOutput>;
+    return { iterations: [], commits: [], stdout: "", branch: BRANCH, handoff: { message: "fix(login): review approved" } as TOutput } as AgentRunResult<TOutput>;
   };
 
   const result = await reviewTicket(input(runAgent, workspacePath));
@@ -85,12 +84,12 @@ test("review retries a failed iteration within the three-iteration limit", async
   assert.equal(runs, 2);
 });
 
-test("review rejects after three iterations without a completion signal", async () => {
+test("review rejects after three omitted handoffs", async () => {
   const workspacePath = await workspace();
   let runs = 0;
   const runAgent = async <TOutput>(request: AgentRunRequest<TOutput>) => {
     runs += 1;
-    return { iterations: [], commits: [], stdout: "", branch: BRANCH, output: undefined as TOutput } as AgentRunResult<TOutput>;
+    throw new MissingAgentHandoffError();
   };
 
   await assert.rejects(reviewTicket(input(runAgent, workspacePath)), /review agent did not complete/);
@@ -103,7 +102,7 @@ test("review requires a clean stage-entry workspace", async () => {
 
   await assert.rejects(
     reviewTicket(input(async <TOutput>(request: AgentRunRequest<TOutput>) => {
-      return { iterations: [], commits: [], stdout: "", branch: BRANCH, completionSignal: COMPLETE, output: { message: "fix(login): review approved" } as TOutput } as AgentRunResult<TOutput>;
+      return { iterations: [], commits: [], stdout: "", branch: BRANCH, handoff: { message: "fix(login): review approved" } as TOutput } as AgentRunResult<TOutput>;
     }, workspacePath)),
     /Review entry for ticket 0123456789abcdef left uncommitted changes/,
   );

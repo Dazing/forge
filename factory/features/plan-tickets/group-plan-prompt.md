@@ -6,7 +6,4 @@ Select at most one supplied delivery group for this cycle. Preserve its exact gr
 {{GROUPS}}
 </delivery-groups>
 
-Return exactly one object:
-<plan>{"groups":[{"groupId":"...","tickets":[{"id":"...","title":"..."}]}]}</plan>
-
-End with `</plan>`.
+Call `submit_handoff` exactly once with `{"groups":[{"groupId":"...","tickets":[{"id":"...","title":"..."}]}]}` or `{"groups":[]}`. Call it only after preserving the supplied identity and ordering exactly. If the tool rejects invalid arguments, correct the arguments and call it again in this turn. After acceptance, stop.

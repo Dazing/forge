@@ -1,3 +1,4 @@
+import { createAgentHandoff } from "../../infrastructure/agent-runtime/handoff.js";
 import { z } from "zod";
 
 // Review stage message contract. The reviewer reports a Conventional Commit subject plus a short body of findings and verification;
@@ -7,17 +8,19 @@ import { z } from "zod";
 export const MAX_MESSAGE_CHARS = 4000;
 
 /** Control characters other than line feed are rejected in stage messages. */
-const controlCharacters = /[\x00-\x09\x0B-\x1F\x7F]/;
+const safeMessage = z.string()
+  .trim()
+  .min(1)
+  .max(MAX_MESSAGE_CHARS)
+  .regex(/^[^\x00-\x09\x0B-\x1F\x7F]*$/, "message contains control characters other than line feed")
+  .regex(/^(?![\s\S]*(^|\n)Factory-[A-Za-z][A-Za-z-]*:)[\s\S]*$/, "message contains a runner-reserved commit trailer");
 
-/** `Factory-*:` commit trailers are runner-owned stage identity; agent prose containing one is rejected so it cannot be forged. */
-const reservedTrailers = /(^|\n)Factory-[A-Za-z][A-Za-z-]*:/;
-
-export const reviewSchema = z
-  .strictObject({ message: z.string().trim().min(1).max(MAX_MESSAGE_CHARS) })
-  .refine((value) => !controlCharacters.test(value.message), { message: "message contains control characters other than line feed" })
-  .refine((value) => !reservedTrailers.test(value.message), { message: "message contains a runner-reserved commit trailer" });
+export const reviewSchema = z.strictObject({ message: safeMessage });
 
 /** Validated review stage result. */
-export type ReviewStageResult = Readonly<{
-  message: string;
-}>;
+export type ReviewStageResult = z.infer<typeof reviewSchema>;
+
+export const reviewHandoff = createAgentHandoff(
+  "Submit the review summary only after all findings are resolved and verification passes.",
+  reviewSchema,
+);

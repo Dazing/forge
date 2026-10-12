@@ -21,16 +21,10 @@ Local Git reads (`git status`, `git log`, `git diff`, `git rev-parse`) are allow
 
 Fix every supported issue directly on this branch and leave the fixes uncommitted. After the final fix, run the relevant checks and inspect the complete `git status --short` output without excluding generated directories. Restore unrelated generated changes. Do not report success if a check fails, a ticket requirement remains unmet, or an unresolved blocker exists.
 
-Report exactly one JSON object inside a `<review>` tag, immediately followed by the completion signal:
+After the implementation is complete, all findings are resolved, and relevant checks pass, call `submit_handoff` exactly once with:
 
-<review>
-{"message": "fix(scope): imperative subject summarizing the reviewed outcome\n\nShort body: findings and their disposition, the exact checks run and their observed results, and any limitation. State explicitly when no changes were needed."}
-</review>
+`{"message":"fix(scope): imperative subject summarizing the reviewed outcome\n\nShort body: findings and their disposition, the exact checks run and their observed results, and any limitation. State explicitly when no changes were needed."}`
 
 `message` is one trimmed string of at most 4000 characters. Line feeds are allowed; other control characters are not. Use a Conventional Commit subject without the ticket ID as scope; when the review needed no file changes, use a `chore` subject and explain that no changes were needed. Never include a `Factory-*:` trailer line (the runner owns commit trailers), and never include credentials, tokens, or secrets.
 
-Do not report success when a check fails, a ticket requirement remains unmet, or an unresolved blocker exists. On failure, explain the blocker in prose and emit neither the `<review>` block nor the completion signal.
-
-Only after the implementation is complete, the review has no unresolved findings, and relevant checks pass, end with:
-
-<promise>COMPLETE</promise>
+Do not submit a handoff when a check fails, a ticket requirement remains unmet, or an unresolved blocker exists. Explain the blocker in prose instead. If the tool rejects invalid arguments, correct the arguments and call it again in this turn. After the tool accepts the handoff, stop without running more tools or changing files.
