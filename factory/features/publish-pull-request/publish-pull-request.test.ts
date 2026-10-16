@@ -114,7 +114,15 @@ test("publication pushes the branch and returns the final SHA, draft pull reques
   const workspace = await workspaceWithRemote();
   const { provider, requests } = providerStub("ok");
   const content: Array<[string, string]> = [];
-  const result = await publishPullRequest(input(workspace, contentAgent(), provider, async (head, logReference) => { content.push([head, logReference]); }));
+  const intents: Array<{ head: string; sourceSha: string; title: string; body: string }> = [];
+  const result = await publishPullRequest({
+    ...input(workspace, contentAgent(), provider, async (head, logReference) => { content.push([head, logReference]); }),
+    onPublicationIntent: async (facts) => {
+      await assert.rejects(runCommand("git", ["-C", join(workspace, "..", "remote.git"), "rev-parse", `refs/heads/${BRANCH}`], "checking pre-push intent boundary"));
+      assert.equal(requests.length, 0);
+      intents.push(facts);
+    },
+  });
   const expectedSha = (await git(workspace, ["rev-parse", "HEAD"])).trim();
   assert.equal(result.finalSha, expectedSha);
   assert.equal(result.pullRequest.url, "https://github.com/acme/app/pull/7");
@@ -124,6 +132,7 @@ test("publication pushes the branch and returns the final SHA, draft pull reques
   const remote = join(workspace, "..", "remote.git");
   const pushed = (await runCommand("git", ["-C", remote, "rev-parse", `refs/heads/${BRANCH}`], "reading pushed branch")).trim();
   assert.equal(pushed, expectedSha);
+  assert.deepEqual(intents, [{ head: result.head, sourceSha: result.finalSha, title: result.title, body: result.body }]);
 });
 
 test("a branch whose commits change no files fails the change set before push and provider calls", async () => {
@@ -201,15 +210,17 @@ test("content containing provider credential material fails before push or provi
   await assert.rejects(runCommand("git", ["-C", remote, "rev-parse", `refs/heads/${BRANCH}`], "reading pushed branch"));
 });
 
-test("the aggregate forbiddenSecrets, not the publishing provider's own secrets, drive credential rejection", async () => {
-  const workspace = await workspaceWithRemote();
-  const { provider, requests } = providerStub("ok");
-  const error = await publishPullRequest(input(workspace, contentAgent("Leaked vso_pat_secret_123"), provider, async () => {}, ["gh_secret_abc", "vso_pat_secret_123"])).catch((value) => value as PublicationError);
-  assert.ok(error instanceof PublicationError);
-  assert.equal(error.substage, "pull-request content");
-  assert.match(String(error.cause), /credential material/);
-  assert.equal(requests.length, 0);
-});
+for (const secret of ["vso_pat_secret_123", "backlog_only_secret_456"]) {
+  test(`aggregate credential rejection covers ${secret.startsWith("backlog") ? "backlog" : "other target"} secrets`, async () => {
+    const workspace = await workspaceWithRemote();
+    const { provider, requests } = providerStub("ok");
+    const error = await publishPullRequest(input(workspace, contentAgent(`Leaked ${secret}`), provider, async () => {}, ["gh_secret_abc", "vso_pat_secret_123", "backlog_only_secret_456"])).catch((value) => value as PublicationError);
+    assert.ok(error instanceof PublicationError);
+    assert.equal(error.substage, "pull-request content");
+    assert.match(String(error.cause), /credential material/);
+    assert.equal(requests.length, 0);
+  });
+}
 
 test("a branch with no commits ahead of the base branch cannot publish", async () => {
   const root = await mkdtemp(join(tmpdir(), "sandcastle-publish-"));

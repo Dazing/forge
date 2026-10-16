@@ -181,14 +181,22 @@ type TicketTarget = Readonly<{ remote: RemoteTicket | undefined; effect: "create
 /** Locate the issue carrying this ticket: the sidecar number first, then the exact ticket-ID scan of the backlog. */
 export async function findTicketTarget(backlog: GitHubBacklog, registry: GitProviderRegistry, source: ValidatedSource, sidecar: SubmissionRecord | undefined, gates: SubmissionGates): Promise<TicketTarget> {
   if (sidecar !== undefined) {
-    const issue = await backlog.getIssue(sidecar.issueNumber);
-    if (issue !== undefined) {
-      const carrier = parseIssueTicket(issue, registry);
-      if (carrier !== undefined && carrier.id !== source.ticket.id) {
-        throw new Error(`Sidecar for ${source.path} points at issue ${issue.number}, which carries ticket ${carrier.id}.`);
-      }
-      return { remote: { issue, ticketId: source.ticket.id, requirementsHash: source.ticket.requirementsHash }, effect: "updated" };
+    if (sidecar.backlogRepository.toLowerCase() !== gates.repository.toLowerCase() || sidecar.projectId !== gates.projectId) {
+      throw new Error(`Sidecar for ${source.path} targets ${sidecar.backlogRepository} / ${sidecar.projectId}, not ${gates.repository} / ${gates.projectId}.`);
     }
+    const expectedMarker = commentMarker(submissionOperationKey(source.ticket.id, sidecar.sourceHash));
+    if (sidecar.lastComment.marker !== expectedMarker || sidecar.lastComment.sourceHash !== sidecar.sourceHash) {
+      throw new Error(`Sidecar for ${source.path} does not identify ticket ${source.ticket.id}.`);
+    }
+    const issue = await backlog.getIssue(sidecar.issueNumber);
+    if (issue === undefined || issue.number !== sidecar.issueNumber || issue.nodeId !== sidecar.issueNodeId) {
+      throw new Error(`Sidecar for ${source.path} does not match the exact issue number and node identity.`);
+    }
+    const carrier = parseIssueTicket(issue, registry);
+    if (carrier === undefined || carrier.id !== source.ticket.id) {
+      throw new Error(`Sidecar for ${source.path} points at issue ${issue.number}, which does not carry validated ticket ${source.ticket.id}.`);
+    }
+    return { remote: { issue, ticketId: carrier.id, requirementsHash: carrier.requirementsHash }, effect: "updated" };
   }
   const scanned = gates.remote.get(source.ticket.id);
   return { remote: scanned, effect: scanned === undefined ? "created" : "updated" };
@@ -238,58 +246,64 @@ export async function submitValidated(
   });
 
   const registry = submissionProviderRegistry(input.provider);
+  let target: TicketTarget;
   let sidecar: SubmissionRecord | undefined;
+  let status: string | undefined;
   try {
     sidecar = await readSubmissionRecord(source.path);
+    target = await findTicketTarget(backlog, registry, source, sidecar, gates);
+    if (target.remote !== undefined) {
+      status = (await backlog.findProjectItem(target.remote.issue.nodeId))?.status?.name;
+    }
   } catch (error) {
     return failed(toMessage(error), undefined);
   }
-
-  const target = await findTicketTarget(backlog, registry, source, sidecar, gates);
   const remote = target.remote;
-  const unchanged = sidecar !== undefined && remote !== undefined && sidecar.sourceHash === ticket.sourceHash && remote.issue.body === source.source;
-  if (unchanged) {
-    return { ...base, outcome: "unchanged", issueNumber: remote.issue.number, issueUrl: remote.issue.url };
+  const exactSource = remote !== undefined && remote.issue.body === source.source;
+  if (remote !== undefined && status !== STAGING && !exactSource) {
+    return failed(`Refusing to mutate ${remote.issue.url}: Project Status is ${status ?? "not set"}, and only \`${STAGING}\` accepts a resubmission.`, remote.issue);
   }
-
-  if (remote !== undefined) {
-    const item = await backlog.findProjectItem(remote.issue.nodeId);
-    const status = item?.status?.name;
-    if (status !== STAGING) {
-      return failed(`Refusing to mutate ${remote.issue.url}: Project Status is ${status ?? "not set"}, and only \`${STAGING}\` accepts a resubmission.`, remote.issue);
-    }
-  }
-
-  const planned = { outcome: target.effect, ...(remote === undefined ? {} : { issueNumber: remote.issue.number, issueUrl: remote.issue.url }) };
-  if (input.dryRun) {
-    log(`${target.effect} ${ticket.id} (dry run)`);
-    return { ...base, ...planned, status: READY_FOR_DEVELOPMENT };
-  }
-
+  // Exact authored bytes establish a replay, not permission to edit a claimed ticket.
+  // A missing attachment/status is repairable; a later status must never be demoted.
+  const needsReady = remote === undefined || status === undefined || status === STAGING;
+  const marker = commentMarker(submissionOperationKey(ticket.id, ticket.sourceHash));
+  let issue = remote?.issue;
   try {
-    const issue = remote === undefined
-      ? await backlog.createIssue(ticket.title, source.source)
-      : await backlog.updateIssueBody(remote.issue.number, source.source, remote.issue.revision);
-    await backlog.setProjectStatus(issue.nodeId, gates.stagingOptionId);
-
-    const readBack = await backlog.getIssue(issue.number);
-    if (readBack === undefined || readBack.body !== source.source) {
-      throw new Error(`Issue ${issue.number} body read-back is not the submitted source; Ready was not set.`);
+    const comments = remote === undefined ? [] : await backlog.listComments(remote.issue.number);
+    const posted = comments.find((comment) => comment.body.includes(marker));
+    if (remote !== undefined && !needsReady && sidecar !== undefined && sidecar.sourceHash === ticket.sourceHash
+      && sidecar.requirementsHash === ticket.requirementsHash && posted !== undefined
+      && sidecar.lastComment.id === posted.id && sidecar.lastComment.url === posted.url) {
+      return { ...base, outcome: "unchanged", issueNumber: remote.issue.number, issueUrl: remote.issue.url };
     }
+    const finalStatus = needsReady ? READY_FOR_DEVELOPMENT : status;
+    const planned = { outcome: target.effect, ...(remote === undefined ? {} : { issueNumber: remote.issue.number, issueUrl: remote.issue.url }) };
+    if (input.dryRun) {
+      log(`${target.effect} ${ticket.id} (dry run)`);
+      return { ...base, ...planned, ...(finalStatus === undefined ? {} : { status: finalStatus }) };
+    }
+
+    const accepted = remote === undefined
+      ? await backlog.createIssue(ticket.title, source.source)
+      : exactSource ? remote.issue : await backlog.updateIssueBody(remote.issue.number, source.source, remote.issue.revision);
+    if (needsReady) await backlog.setProjectStatus(accepted.nodeId, gates.stagingOptionId);
+
+    const readBack = await backlog.getIssue(accepted.number);
+    if (readBack === undefined || readBack.number !== accepted.number || readBack.nodeId !== accepted.nodeId || readBack.body !== source.source) {
+      throw new Error(`Issue ${accepted.number} body or identity read-back is not the submitted source; no further writes.`);
+    }
+    issue = readBack;
     for (const dependency of ticket.dependsOnTickets) {
       if (!gates.remote.has(dependency) && !batchIds.has(dependency)) {
         throw new Error(`Ticket ${ticket.id} dependency ${dependency} does not resolve in the backlog; Ready was not set.`);
       }
     }
     const privacy = await backlog.validateRepository();
-    if (!privacy.private) {
-      throw new SubmissionGateError(`Backlog repository ${privacy.fullName} became public before Ready was set; no further writes.`);
+    if (!privacy.private || privacy.fullName.toLowerCase() !== gates.repository.toLowerCase()) {
+      throw new SubmissionGateError(`Backlog repository ${privacy.fullName} became public or changed identity before submission completed; no further writes.`);
     }
-    await backlog.setProjectStatus(issue.nodeId, gates.readyOptionId);
+    if (needsReady) await backlog.setProjectStatus(issue.nodeId, gates.readyOptionId);
 
-    const marker = commentMarker(submissionOperationKey(ticket.id, ticket.sourceHash));
-    const comments = await backlog.listComments(issue.number);
-    const posted = comments.find((comment) => comment.body.includes(marker));
     const body = submissionCommentBody({
       marker,
       ticketId: ticket.id,
@@ -318,10 +332,10 @@ export async function submitValidated(
       lastComment: { id: comment.id, url: comment.url, marker, sourceHash: ticket.sourceHash, postedAt: stamp },
     });
     log(`${target.effect} ${ticket.id} #${issue.number} ${issue.url}`);
-    return { ...base, outcome: target.effect, issueNumber: issue.number, issueUrl: issue.url, status: READY_FOR_DEVELOPMENT };
+    return { ...base, outcome: target.effect, issueNumber: issue.number, issueUrl: issue.url, ...(finalStatus === undefined ? {} : { status: finalStatus }) };
   } catch (error) {
     if (error instanceof SubmissionGateError) throw error;
     if (error instanceof BacklogConfigurationError) throw gateFailure(`submitting ticket ${ticket.id}`, "project", error, redact);
-    return failed(toMessage(error), remote?.issue);
+    return failed(toMessage(error), issue);
   }
 }

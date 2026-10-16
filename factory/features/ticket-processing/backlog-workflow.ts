@@ -3,6 +3,7 @@ import { BacklogConfigurationError } from "../../infrastructure/github-backlog/i
 import { commentMarker, operationKey } from "./publication-record.js";
 import { PublicationLedger, type PendingSettlement } from "./publication-ledger.js";
 import { BACKLOG_STATUSES, type BacklogStatusName, type IssueIdentity } from "../tickets/index.js";
+import { AuthorizationWithdrawnError, type IssueAuthorization } from "./authorization-guard.js";
 
 // Backlog settlement (D11): every issue effect is one idempotent operation built from a stable
 // operation key, and every status transition is durably recorded, applied, read back, and only then
@@ -39,6 +40,8 @@ export type PreservationFacts = Readonly<{
   branchUrl: string | undefined;
   pushed: boolean;
   pushFailure: string | undefined;
+  captureComplete: boolean;
+  captureFailure: string | undefined;
   reviewed: boolean;
 }>;
 
@@ -63,13 +66,15 @@ export class BacklogWorkflow {
   private readonly ledger: PublicationLedger;
   private readonly redact: (text: string) => string;
   private readonly now: () => Date;
+  private readonly readAuthorization: ((identity: IssueIdentity) => Promise<IssueAuthorization>) | undefined;
   private options: ReadonlyMap<string, BacklogStatusOption> | undefined;
 
-  constructor(backlog: GitHubBacklog, ledger: PublicationLedger, redact: (text: string) => string = (text) => text, now: () => Date = () => new Date()) {
+  constructor(backlog: GitHubBacklog, ledger: PublicationLedger, redact: (text: string) => string = (text) => text, now: () => Date = () => new Date(), readAuthorization?: (identity: IssueIdentity) => Promise<IssueAuthorization>) {
     this.backlog = backlog;
     this.ledger = ledger;
     this.redact = redact;
     this.now = now;
+    this.readAuthorization = readAuthorization;
   }
 
   /** Startup gate: the backlog is private and the Project exposes every configured status. */
@@ -88,6 +93,8 @@ export class BacklogWorkflow {
 
   /** Claim a ticket for one attempt: durable start comment, then `In progress`. */
   async claim(target: BacklogTarget, attemptId: string, branch: string, repository: string, baseBranch: string): Promise<void> {
+    const authorize = () => this.authorizeClaim(target);
+    await authorize();
     await this.post(target.identity, "start", attemptId, [
       "## Factory attempt started",
       "",
@@ -96,8 +103,8 @@ export class BacklogWorkflow {
       `- Target repository: ${quoted(repository)}`,
       `- Base branch: ${quoted(baseBranch)}`,
       `- Work branch: ${quoted(branch)}`,
-    ].join("\n"));
-    await this.setStatus(target, "In progress");
+    ].join("\n"), authorize);
+    await this.setStatus(target, "In progress", authorize);
   }
 
   /** Report work that cannot proceed and park it on the board. */
@@ -123,10 +130,11 @@ export class BacklogWorkflow {
       `- Branch link: ${facts.branchUrl ?? quoted(facts.branch)}`,
       `- Commit: ${quoted(facts.commitSha)}`,
       `- Pushed: ${facts.pushed ? "yes" : `no — ${facts.pushFailure ?? "unknown failure"}`}`,
+      `- Work capture: ${facts.captureComplete ? "complete" : `incomplete — ${facts.captureFailure ?? "unknown failure"}`}`,
       `- Reviewed: ${facts.reviewed ? "yes" : "no"}`,
       `- Workspace: ${quoted(facts.workspacePath)}`,
       "",
-      "The branch is pushed without a pull request. Restore authorization, then move the issue back to `In progress` to continue.",
+      "The retained branch is preserved without a pull request; incomplete capture remains only in the retained workspace. Restore authorization, then move the issue back to `In progress` to continue.",
     ].join("\n"));
     await this.setStatus(target, "Blocked");
   }
@@ -144,6 +152,7 @@ export class BacklogWorkflow {
       `- Branch link: ${facts.branchUrl ?? quoted(facts.branch)}`,
       `- Commit: ${quoted(facts.commitSha)}`,
       `- Pushed: ${facts.pushed ? "yes" : `no — ${facts.pushFailure ?? "unknown failure"}`}`,
+      `- Work capture: ${facts.captureComplete ? "complete" : `incomplete — ${facts.captureFailure ?? "unknown failure"}`}`,
       `- Reviewed: ${facts.reviewed ? "yes" : "no"}`,
       `- Workspace: ${quoted(facts.workspacePath)}`,
       "",
@@ -159,7 +168,7 @@ export class BacklogWorkflow {
       `- Ticket: ${quoted(target.ticketId)}`,
       "- Reason: the recorded pull request is no longer an open draft, so this ticket's work is published again from a fresh attempt.",
     ].join("\n"));
-    await this.setStatus(target, "In progress");
+    await this.setStatus(target, "Ready for development");
   }
 
   /** Record a published draft on every included issue and move them into review. */
@@ -213,6 +222,21 @@ export class BacklogWorkflow {
     return recovered;
   }
 
+  private async authorizeClaim(target: BacklogTarget): Promise<void> {
+    const stage = "claiming the backlog issue";
+    if (this.readAuthorization === undefined) {
+      throw new AuthorizationWithdrawnError(target.ticketId, stage, "no authoritative issue reader is configured");
+    }
+    const fact = await this.readAuthorization(target.identity);
+    if (!fact.open) throw new AuthorizationWithdrawnError(target.ticketId, stage, `backlog issue #${target.identity.number} is no longer open`);
+    if (fact.status !== "Ready for development" && fact.status !== "In progress") {
+      throw new AuthorizationWithdrawnError(target.ticketId, stage, `its Project status is ${fact.status ?? "unknown"}, not Ready for development or In progress`);
+    }
+    if (fact.requirementsHash !== target.requirementsHash) {
+      throw new AuthorizationWithdrawnError(target.ticketId, stage, "its authored requirements changed since the work was scheduled");
+    }
+  }
+
   private async statusOptions(): Promise<ReadonlyMap<string, BacklogStatusOption>> {
     const statusField = await this.backlog.validateProject(BACKLOG_STATUSES);
     return new Map(statusField.options.map((option) => [option.name, option]));
@@ -227,22 +251,30 @@ export class BacklogWorkflow {
   }
 
   /** One key-marked comment, written only when that key has produced no comment yet. */
-  private async post(identity: IssueIdentity, kind: "comment" | "start" | "failure" | "publication" | "preservation" | "settlement", subject: string, body: string): Promise<void> {
+  private async post(identity: IssueIdentity, kind: "comment" | "start" | "failure" | "publication" | "preservation" | "settlement", subject: string, body: string, authorize?: () => Promise<void>): Promise<void> {
     const marker = commentMarker(operationKey(kind, issueSubject(identity), subject));
     const comments = await this.backlog.listComments(identity.number);
     if (comments.some((comment) => comment.body.includes(marker))) return;
+    await authorize?.();
     await this.backlog.createComment(identity.number, this.redact(`${body}\n\n${marker}`));
   }
 
   /** Durable record, Project write, provider read-back, completion. A transition already in effect is never rewritten. */
-  private async setStatus(target: BacklogTarget, status: BacklogStatusName): Promise<void> {
+  private async setStatus(target: BacklogTarget, status: BacklogStatusName, authorize?: () => Promise<void>): Promise<void> {
     const current = await this.backlog.findProjectItem(target.identity.nodeId);
     if (current?.status?.name === status) {
       await this.settle(target, `status-${codeOf(status)}`);
       return;
     }
-    await this.recordStatus(target, status);
     const option = await this.option(status);
+    await authorize?.();
+    await this.recordStatus(target, status);
+    try {
+      await authorize?.();
+    } catch (error) {
+      await this.settle(target, `status-${codeOf(status)}`);
+      throw error;
+    }
     await this.backlog.setProjectStatus(target.identity.nodeId, option.optionId);
     const applied = await this.backlog.findProjectItem(target.identity.nodeId);
     if (applied?.status?.name !== status) {

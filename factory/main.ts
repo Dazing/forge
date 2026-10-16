@@ -6,7 +6,7 @@ import { createGitProviderRegistry } from "./infrastructure/git-provider/create-
 import { InvocationLogger } from "./infrastructure/logging/invocation-log.js";
 import { preflightSandbox } from "./infrastructure/sandbox/sandbox.js";
 import { redactSecrets } from "./shared/redact-secret.js";
-import { BacklogWorkflow, processTickets, PublicationLedger } from "./features/ticket-processing/index.js";
+import { BacklogWorkflow, createIssueAuthorizationReader, processTickets, PublicationLedger } from "./features/ticket-processing/index.js";
 
 // Composition root: parse args, build the real dependencies, and start the ticket-processing daemon.
 // Ticket lifecycle lives in features/tickets/, planning in features/plan-tickets/, the stage features
@@ -23,10 +23,11 @@ async function run(): Promise<void> {
 
   const factoryRoot = resolve(import.meta.dirname, "..");
   process.loadEnvFile(resolve(factoryRoot, ".env"));
-  const providers = createGitProviderRegistry(process.env);
+  const targetProviders = createGitProviderRegistry(process.env);
   const backlog = createGitHubBacklog(process.env);
+  const providers = { ...targetProviders, secrets: [...targetProviders.secrets, ...backlog.secrets] };
   const ledger = PublicationLedger.open(factoryRoot);
-  const workflow = new BacklogWorkflow(backlog, ledger, (text) => redactSecrets(providers.secrets, text));
+  const workflow = new BacklogWorkflow(backlog, ledger, (text) => redactSecrets(providers.secrets, text), undefined, createIssueAuthorizationReader({ backlog, providers }));
   const logger = await InvocationLogger.create(factoryRoot, providers.secrets);
   await preflightSandbox(options.agentHarness, factoryRoot);
   await workflow.validate();

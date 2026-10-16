@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -355,7 +355,8 @@ test("an issue edited externally mid-flight is reported as a conflict and never 
 
 test("a comment failure redacts the token and keeps the accepted work recoverable", async () => {
   const directory = await ticketDirectory({ "first.md": ticketSource("T-1", "First ticket") });
-  const backlog = new FakeBacklog({ commentFailure: "GitHub returned HTTP 500 with Bearer backlog_secret_xyz" });
+  const behaviour: { commentFailure?: string } = { commentFailure: "GitHub returned HTTP 500 with Bearer backlog_secret_xyz" };
+  const backlog = new FakeBacklog(behaviour);
 
   const result = await submission({ paths: [directory], cwd: directory, backlog });
 
@@ -363,6 +364,20 @@ test("a comment failure redacts the token and keeps the accepted work recoverabl
   assert.match(result.entries[0]!.reason ?? "", /HTTP 500/);
   assert.ok(!(result.entries[0]!.reason ?? "").includes("backlog_secret_xyz"), "transport diagnostics are redacted");
   await assert.rejects(() => sidecar(directory, "first"), "the sidecar is written last, so the run replays from the read-back");
+
+  delete behaviour.commentFailure;
+  const writesBeforeRetry = backlog.writes.length;
+  const recovered = await submission({ paths: [directory], cwd: directory, backlog });
+  assert.equal(recovered.ok, true);
+  assert.equal(backlog.issues.length, 1);
+  assert.deepEqual(backlog.writeOperations().slice(writesBeforeRetry), ["createComment"]);
+  assert.equal(backlog.statusOf(backlog.issues[0]!.nodeId), "Ready for development");
+  assert.equal((await sidecar(directory, "first")).issueNumber, 100);
+
+  const writesAfterRecovery = backlog.writes.length;
+  const rerun = await submission({ paths: [directory], cwd: directory, backlog });
+  assert.equal(rerun.entries[0]!.outcome, "unchanged");
+  assert.equal(backlog.writes.length, writesAfterRecovery);
 });
 
 test("an accepted ticket keeps its sidecar when a later ticket is refused", async () => {
@@ -371,7 +386,7 @@ test("an accepted ticket keeps its sidecar when a later ticket is refused", asyn
     "b-second.md": ticketSource("T-2", "Second ticket"),
   });
   const backlog = new FakeBacklog();
-  backlog.seedIssue(ticketSource("T-2", "Second ticket"), { number: 80, status: "In progress" });
+  backlog.seedIssue(ticketSource("T-2", "Earlier requirements"), { number: 80, status: "In progress" });
 
   const result = await submission({ paths: [directory], cwd: directory, backlog });
 
@@ -392,3 +407,193 @@ test("--repository retargets validation and is recorded in the sidecar", async (
 });
 
 
+test("an issue created before attachment failure is recovered by exact ticket identity without a duplicate", async () => {
+  class InterruptedBacklog extends FakeBacklog {
+    failAttachment = true;
+    override async setProjectStatus(nodeId: string, optionId: string): Promise<void> {
+      if (this.failAttachment) {
+        this.failAttachment = false;
+        throw new Error("attachment interrupted");
+      }
+      await super.setProjectStatus(nodeId, optionId);
+    }
+  }
+  const source = ticketSource("T-1", "First ticket");
+  const directory = await ticketDirectory({ "first.md": source });
+  const backlog = new InterruptedBacklog();
+  const interrupted = await submission({ paths: [directory], cwd: directory, backlog });
+  assert.equal(interrupted.entries[0]!.outcome, "failed");
+  assert.equal(backlog.issues.length, 1);
+  assert.equal(await backlog.findProjectItem(backlog.issues[0]!.nodeId), undefined);
+
+  const beforeDryRun = backlog.writes.length;
+  const dryRun = await submission({ paths: [directory], cwd: directory, backlog, dryRun: true });
+  assert.equal(dryRun.entries[0]!.outcome, "updated");
+  assert.equal(backlog.writes.length, beforeDryRun);
+  await assert.rejects(() => sidecar(directory, "first"));
+
+  const recovered = await submission({ paths: [directory], cwd: directory, backlog });
+  assert.equal(recovered.ok, true);
+  assert.equal(recovered.entries[0]!.issueNumber, 100);
+  assert.equal(backlog.issues.length, 1);
+  assert.equal(backlog.issues[0]!.body, source);
+  assert.deepEqual(backlog.writeOperations(), ["createIssue", "setProjectStatus", "setProjectStatus", "createComment"]);
+  assert.equal(backlog.statusOf(backlog.issues[0]!.nodeId), "Ready for development");
+  assert.equal((await sidecar(directory, "first")).issueNumber, 100);
+
+  const writesAfterRecovery = backlog.writes.length;
+  assert.equal((await submission({ paths: [directory], cwd: directory, backlog })).entries[0]!.outcome, "unchanged");
+  assert.equal(backlog.writes.length, writesAfterRecovery);
+});
+
+test("a missing status on an attached exact ticket is repaired without rewriting its body", async () => {
+  const source = ticketSource("T-1", "First ticket");
+  const directory = await ticketDirectory({ "first.md": source });
+  const backlog = new FakeBacklog();
+  backlog.seedIssue(source, { number: 73 });
+
+  const result = await submission({ paths: [directory], cwd: directory, backlog });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.entries[0]!.issueNumber, 73);
+  assert.equal(backlog.issues.length, 1);
+  assert.deepEqual(backlog.writeOperations(), ["setProjectStatus", "setProjectStatus", "createComment"]);
+  assert.equal(backlog.statusOf(backlog.issues[0]!.nodeId), "Ready for development");
+});
+
+test("a comment already posted before sidecar loss is recovered without demoting a claimed ticket", async () => {
+  const source = ticketSource("T-1", "First ticket");
+  const directory = await ticketDirectory({ "first.md": source });
+  const backlog = new FakeBacklog();
+  await submission({ paths: [directory], cwd: directory, backlog });
+  await rm(join(directory, "first.submission.json"));
+  await backlog.setProjectStatus(backlog.issues[0]!.nodeId, "opt-In progress");
+  const writesBeforeRecovery = backlog.writes.length;
+
+  const dryRun = await submission({ paths: [directory], cwd: directory, backlog, dryRun: true });
+  assert.equal(dryRun.entries[0]!.status, "In progress");
+  await assert.rejects(() => sidecar(directory, "first"));
+  const result = await submission({ paths: [directory], cwd: directory, backlog });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.entries[0]!.status, "In progress");
+  assert.equal(backlog.writes.length, writesBeforeRecovery);
+  assert.equal(backlog.issues[0]!.body, source);
+  assert.equal(backlog.statusOf(backlog.issues[0]!.nodeId), "In progress");
+  assert.equal(backlog.commentsFor(100).length, 1);
+  assert.equal((await sidecar(directory, "first")).issueNumber, 100);
+  assert.equal((await submission({ paths: [directory], cwd: directory, backlog })).entries[0]!.outcome, "unchanged");
+  assert.equal(backlog.writes.length, writesBeforeRecovery);
+});
+
+test("a changed submission whose comment failed after Ready repairs the stale sidecar without rewriting authored content", async () => {
+  const directory = await ticketDirectory({ "first.md": ticketSource("T-1", "First ticket") });
+  const behaviour: { commentFailure?: string } = {};
+  const backlog = new FakeBacklog(behaviour);
+  await submission({ paths: [directory], cwd: directory, backlog });
+  const oldRecord = await sidecar(directory, "first");
+  const source = ticketSource("T-1", "First ticket", { body: "Revised requirements." });
+  await writeFile(join(directory, "first.md"), source, "utf8");
+  await backlog.setProjectStatus(backlog.issues[0]!.nodeId, "opt-Staging");
+  behaviour.commentFailure = "interrupted";
+  assert.equal((await submission({ paths: [directory], cwd: directory, backlog })).entries[0]!.outcome, "failed");
+  assert.deepEqual(await sidecar(directory, "first"), oldRecord);
+  assert.equal(backlog.statusOf(backlog.issues[0]!.nodeId), "Ready for development");
+  delete behaviour.commentFailure;
+  const writesBeforeRecovery = backlog.writes.length;
+
+  const result = await submission({ paths: [directory], cwd: directory, backlog });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(backlog.writeOperations().slice(writesBeforeRecovery), ["createComment"]);
+  assert.equal(backlog.issues[0]!.body, source);
+  assert.notEqual((await sidecar(directory, "first")).sourceHash, oldRecord.sourceHash);
+  assert.equal(backlog.commentsFor(100).length, 2);
+});
+
+test("a sidecar for a foreign repository or Project fails before looking up or mutating either destination", async () => {
+  for (const field of ["backlogRepository", "projectId"] as const) {
+    const source = ticketSource("T-1", "First ticket");
+    const directory = await ticketDirectory({ "first.md": source });
+    const original = new FakeBacklog();
+    await submission({ paths: [directory], cwd: directory, backlog: original });
+    const record = await sidecar(directory, "first");
+    const foreignRecord = { ...record, [field]: field === "backlogRepository" ? "other/backlog" : "PVT_other" };
+    await writeFile(join(directory, "first.submission.json"), JSON.stringify(foreignRecord), "utf8");
+    const destination = new FakeBacklog();
+    destination.seedIssue(source, { number: 100, status: "Staging" });
+    const originalWrites = original.writes.length;
+
+    const result = await submission({ paths: [directory], cwd: directory, backlog: destination });
+
+    assert.equal(result.entries[0]!.outcome, "failed", field);
+    assert.match(result.entries[0]!.reason ?? "", /targets .* not /);
+    assert.ok(!destination.reads.includes("getIssue:100"), "a foreign sidecar is rejected before lookup");
+    assert.deepEqual(destination.writes, []);
+    assert.equal(original.writes.length, originalWrites);
+    assert.deepEqual(await sidecar(directory, "first"), foreignRecord);
+  }
+});
+
+test("sidecar issue identity requires matching number, node, and a valid ticket body", async () => {
+  for (const mismatch of ["number", "node", "ticket", "invalid"] as const) {
+    const source = ticketSource("T-1", "First ticket");
+    const directory = await ticketDirectory({ "first.md": source });
+    const backlog = new FakeBacklog();
+    await submission({ paths: [directory], cwd: directory, backlog });
+    const record = await sidecar(directory, "first");
+    if (mismatch === "number") {
+      await writeFile(join(directory, "first.submission.json"), JSON.stringify({ ...record, issueNumber: 999 }), "utf8");
+    } else if (mismatch === "node") {
+      backlog.issues[0]!.nodeId = "ISSIONODE_other";
+    } else {
+      backlog.issues[0]!.body = mismatch === "ticket" ? ticketSource("T-2", "Other ticket") : "---\nid: T-1\n---\ninvalid ticket";
+    }
+    const writesBeforeRetry = backlog.writes.length;
+
+    const result = await submission({ paths: [directory], cwd: directory, backlog });
+
+    assert.equal(result.entries[0]!.outcome, "failed", mismatch);
+    assert.match(result.entries[0]!.reason ?? "", /exact issue|validated ticket/);
+    assert.equal(backlog.writes.length, writesBeforeRetry);
+    assert.equal(backlog.issues.length, 1);
+  }
+});
+
+test("per-ticket target lookup errors fail that entry while later tickets can still be accepted", async () => {
+  class BrokenTargetBacklog extends FakeBacklog {
+    override async findProjectItem(nodeId: string) {
+      if (nodeId === "ISSIONODE_73") throw new Error("target lookup failed");
+      return super.findProjectItem(nodeId);
+    }
+  }
+  const directory = await ticketDirectory({
+    "a-first.md": ticketSource("T-1", "First ticket"),
+    "b-second.md": ticketSource("T-2", "Second ticket"),
+  });
+  const backlog = new BrokenTargetBacklog();
+  backlog.seedIssue(ticketSource("T-1", "First ticket"), { number: 73, status: "Staging" });
+
+  const result = await submission({ paths: [directory], cwd: directory, backlog });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.entries.map((entry) => [entry.ticketId, entry.outcome]), [["T-1", "failed"], ["T-2", "created"]]);
+  assert.match(result.entries[0]!.reason ?? "", /target lookup failed/);
+  assert.equal((await sidecar(directory, "b-second")).issueNumber, 100);
+  assert.deepEqual((await readdir(directory)).filter((name) => name.endsWith(".lock")), []);
+});
+
+test("a missing attachment does not authorize changed authored content", async () => {
+  const source = ticketSource("T-1", "First ticket");
+  const directory = await ticketDirectory({ "first.md": ticketSource("T-1", "First ticket", { body: "Unrelated changed requirements." }) });
+  const backlog = new FakeBacklog();
+  const issue = await backlog.createIssue("First ticket", source);
+  const writesBeforeRetry = backlog.writes.length;
+
+  const result = await submission({ paths: [directory], cwd: directory, backlog });
+
+  assert.equal(result.entries[0]!.outcome, "failed");
+  assert.equal(backlog.issues[0]!.body, source);
+  assert.equal(backlog.writes.length, writesBeforeRetry);
+  assert.equal(await backlog.findProjectItem(issue.nodeId), undefined);
+});

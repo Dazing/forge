@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
@@ -11,6 +11,7 @@ import type { DraftPullRequestRequest, Fetch } from "../../infrastructure/git-pr
 import { InvocationLogger } from "../../infrastructure/logging/invocation-log.js";
 import { redactSecrets } from "../../shared/redact-secret.js";
 import { BacklogWorkflow } from "./backlog-workflow.js";
+import { createIssueAuthorizationReader } from "./authorization-guard.js";
 import { PublicationLedger } from "./publication-ledger.js";
 import { createDependencyWorkflowState, processDependencyCycle } from "./dependency-cycle.js";
 import { JobLimiter } from "./job-limiter.js";
@@ -41,6 +42,7 @@ type FakePull = Readonly<{ number: number; url: string; head: string; base: stri
 function fakeGitHub(remote: string, pulls: FakePull[]) {
   const creates: DraftPullRequestRequest[] = [];
   const patches: Readonly<{ number: number; title: string; body: string }>[] = [];
+  let nextCreateFailure = false;
   /** An operator merges the draft: the fake reports the merge-result commit the test pushed to `main`. */
   const merge = (number: number, mergeCommitSha: string) => {
     const index = pulls.findIndex((pull) => pull.number === number);
@@ -70,6 +72,10 @@ function fakeGitHub(remote: string, pulls: FakePull[]) {
     const payload = typeof init.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
     const text = (key: string) => String(payload[key] ?? "");
     if (target.pathname === "/repos/acme/app/pulls" && init.method === "POST") {
+      if (nextCreateFailure) {
+        nextCreateFailure = false;
+        return json({ message: "temporary provider failure" }, 503);
+      }
       creates.push({ repositoryUrl: TARGET_REPOSITORY, head: text("head"), base: text("base"), title: text("title"), body: text("body"), mergeStrategy: "squash" });
       const number = 100 + pulls.length;
       const pull: FakePull = { number, url: `https://github.com/acme/app/pull/${number}`, head: text("head"), base: text("base"), title: text("title"), body: text("body"), draft: payload.draft === true, state: "open", created: `2026-10-16T07:00:0${pulls.length}.000Z`, mergedAt: null, mergeCommitSha: null };
@@ -107,7 +113,7 @@ function fakeGitHub(remote: string, pulls: FakePull[]) {
     return json(items);
   };
 
-  return { fetchImpl, creates, patches, merge };
+  return { fetchImpl, creates, patches, merge, failNextCreate: () => { nextCreateFailure = true; } };
 }
 
 /** One fixture: a real target bare repository, a real factory checkout with no `tickets/`, and the backlog issues. */
@@ -147,16 +153,16 @@ async function fixture(seeds: readonly Seed[]) {
   process.env.GIT_SSH_COMMAND = ssh;
 
   const pulls: FakePull[] = [];
-  const { fetchImpl, creates, patches, merge } = fakeGitHub(remote, pulls);
+  const { fetchImpl, creates, patches, merge, failNextCreate } = fakeGitHub(remote, pulls);
   const providers = createGitProviderRegistry({ GITHUB_TOKEN, AZURE_DEVOPS_PAT, GITHUB_REPOSITORY: "acme/tickets" }, fetchImpl);
   const backlog = new TestBacklog();
   for (const entry of seeds) backlog.seed(entry);
   const secrets = [...providers.secrets, ...backlog.secrets];
   const ledger = PublicationLedger.open(factoryRoot);
-  const workflow = new BacklogWorkflow(backlog, ledger, (text) => redactSecrets(secrets, text));
+  const workflow = new BacklogWorkflow(backlog, ledger, (text) => redactSecrets(secrets, text), undefined, createIssueAuthorizationReader({ backlog, providers }));
   await workflow.validate();
   const logger = await InvocationLogger.create(factoryRoot, secrets);
-  return { root, remote, factoryRoot, backlog, ledger, workflow, logger, providers, pulls, creates, patches, merge };
+  return { root, remote, factoryRoot, backlog, ledger, workflow, logger, providers, pulls, creates, patches, merge, failNextCreate };
 }
 
 /** The coordinator's own checkout carries no ticket files: the backlog is the ticket source. */
@@ -180,6 +186,21 @@ async function planAll(request: AgentRunRequest<unknown>): Promise<Record<string
   const groups = request.promptArgs.GROUPS!;
   const groupId = /<group id="([^"]+)">/.exec(groups)![1]!;
   return { groups: [{ groupId, tickets: [...groups.matchAll(/- ([^:]+): (.+)/g)].map((match) => ({ id: match[1]!, title: match[2]! })) }] };
+}
+
+function successfulRunner(logger: InvocationLogger, implement?: (request: AgentRunRequest<unknown>) => Promise<void>): AgentRunner {
+  return transcriptRunner(logger, async (request) => {
+    if (request.name.startsWith("plan-groups-")) return planAll(request);
+    if (request.name.startsWith("implement-")) {
+      await implement?.(request);
+      const id = request.promptArgs.TICKET_ID!;
+      await writeFile(join(request.cwd, `${id}.txt`), `${id}\n`);
+      return { message: `feat(${id}): implement ${id}` };
+    }
+    if (request.name.startsWith("review-")) return { message: "chore(review): verify behavior" };
+    if (request.name.startsWith("integrate-")) return { message: "chore(integration): verify group", conflicts: [] };
+    return { title: "Deliver reviewed work", body: "Reviewed dependency group." };
+  });
 }
 
 test("diamond dependencies use isolated sibling baselines, bounded overlap, reviewed integration, and one group publication settled on every issue", async () => {
@@ -283,7 +304,7 @@ test("diamond dependencies use isolated sibling baselines, bounded overlap, revi
 });
 
 test("an exhausted issue publishes its reviewed ancestor, parks its descendants on the board, then retries fresh and extends the same draft", async () => {
-  const { factoryRoot, backlog, ledger, workflow, logger, providers, creates, patches } = await fixture([
+  const { remote, factoryRoot, backlog, ledger, workflow, logger, providers, creates, patches } = await fixture([
     { id: "a", number: 21, status: "Ready for development" },
     { id: "b", number: 22, status: "Ready for development", dependencies: ["a"] },
     { id: "c", number: 23, status: "Ready for development", dependencies: ["b"] },
@@ -349,11 +370,6 @@ test("an exhausted issue publishes its reviewed ancestor, parks its descendants 
   assert.equal(backlog.statusOf("c"), "In review");
   assert.deepEqual(backlog.transitions.filter((entry) => entry.startsWith("b=")), ["b=In progress", "b=Blocked", "b=In progress", "b=In review"]);
 
-  // The parked descendant was reported onto its own issue at the start of the resume cycle, then resumed.
-  assert.deepEqual(backlog.transitions.filter((entry) => entry.startsWith("c=")), ["c=Blocked", "c=In progress", "c=In review"]);
-  const descendant = backlog.bodies("c").filter((body) => body.includes("waiting for dependencies: b"));
-  assert.equal(descendant.length, 1, JSON.stringify(backlog.bodies("c")));
-  assert.match(descendant[0]!, /## Factory blocked/);
   assert.equal(backlog.bodiesWith("b", "factory:failure:issue-22:attempts-1").length, 1, "one exhausted-attempt report is never repeated");
   assert.equal(backlog.bodies("a").filter((body) => body.includes("## Factory pull request")).length, 1, "an already published issue is commented on once");
   for (const id of ["b", "c"] as const) {
@@ -368,6 +384,16 @@ test("an exhausted issue publishes its reviewed ancestor, parks its descendants 
   const extended = snapshot.results.find((result) => result.included.length === 3)!;
   assert.deepEqual(extended.included.map((entry) => entry.ticketId), ["a", "b", "c"]);
   assert.equal(extended.pullRequestNumber, 100, "the extension updated the tracked draft");
+  const actualHead = (await runCommand("git", ["--git-dir", remote, "rev-parse", `refs/heads/${extended.head}`], "reading extended draft head")).trim();
+  assert.equal(extended.sourceSha, actualHead, "the ledger records the actual tracked draft head, not an intermediate candidate");
+  assert.equal(await processDependencyCycle(config, state), "no-runnable", "the third cycle accepts the extended publication");
+  const restarted = createDependencyWorkflowState();
+  assert.equal(await processDependencyCycle(config, restarted), "no-runnable", "restart reconciles only the latest revision of the draft");
+  assert.deepEqual([...restarted.blocked], []);
+  assert.deepEqual([...restarted.published].sort(), ["a", "b", "c"]);
+  assert.equal([...restarted.publications.values()][0]!.sourceSha, actualHead);
+  assert.equal(creates.length, 1);
+  assert.equal(patches.length, 1, "reconciliation never rewrites an unchanged draft");
 });
 
 test("an unresolvable integration conflict publishes each reviewed leaf on its own subset draft, settled once per issue", async () => {
@@ -442,6 +468,7 @@ test("a merged draft is verified from its real merge-result commit and settles i
     if (request.name.startsWith("plan-groups-")) return planAll(request);
     if (request.name.startsWith("implement-")) {
       const id = request.promptArgs.TICKET_ID!;
+      if (id === "c") assert.equal(await readFile(join(request.cwd, "b.txt"), "utf8"), "b\n", "the new child starts from its parent's verified merge result");
       await writeFile(join(request.cwd, `${id}.txt`), `${id}\n`);
       return { message: `feat(${id}): implement ${id}` };
     }
@@ -479,6 +506,15 @@ test("a merged draft is verified from its real merge-result commit and settles i
   const snapshot = await ledger.load();
   assert.deepEqual(snapshot.settlements, [], "every settlement completed, so nothing awaits replay");
   assert.equal(snapshot.results.length, 1, "a settled publication stays recorded");
+
+  backlog.seed({ id: "c", number: 43, status: "Ready for development", dependencies: ["b"] });
+  assert.equal(await processDependencyCycle(config, state), "processed", "a closed merged parent satisfies a newly authored child");
+  assert.equal(backlog.statusOf("c"), "In review");
+  assert.equal(backlog.statusOf("b"), "Done");
+  assert.equal(creates.length, 2, "the child publishes new work without republishing the merged draft");
+  assert.match(creates[1]!.body, /Included: c \(c\)/);
+  assert.ok(!creates[1]!.body.includes("b (b)"), "the merged dependency is not included in the new publication");
+  assert.equal(state.blocked.has("c"), false);
 });
 
 test("startup reconciliation retires a vanished draft, replays unfinished settlements, and blocks an issue In review with no record", async () => {
@@ -546,7 +582,8 @@ test("startup reconciliation retires a vanished draft, replays unfinished settle
 
     assert.match(state.blocked.get("lost")!, /pull request 100 for lost is no longer an open draft/);
     assert.match(state.blocked.get("orphan")!, /In review with no recorded pull request/);
-    assert.deepEqual(backlog.transitions, ["lost=In progress", "lost=Blocked", "orphan=Blocked"], "the replayed settlement needed no board write, and reconciliation parked both reconciled issues");
+    assert.deepEqual(backlog.transitions, ["lost=Ready for development", "orphan=Blocked"], "the retired publication restores development eligibility without overwriting it as Blocked");
+    assert.equal(backlog.statusOf("lost"), "Ready for development");
     const resumed = backlog.bodiesWith("lost", "factory:comment:issue-51:pull-request-100");
     assert.equal(resumed.length, 1, JSON.stringify(backlog.bodies("lost")));
     assert.match(resumed[0]!, /## Factory resumed/);
@@ -564,8 +601,7 @@ test("startup reconciliation retires a vanished draft, replays unfinished settle
     assert.deepEqual(retired.settlements, [], "the replayed settlement record is consumed once its effect is confirmed");
     assert.equal(retired.corrupt.length, 1);
 
-    // The operator queues the resumed issue again; un-reconciled work is never silently republished.
-    backlog.moveTo("lost", "Ready for development");
+    // Retirement restores Ready for development, but this process defers it until restart.
     outcome = await processDependencyCycle(config, state);
   } finally {
     console.log = originalLog;
@@ -575,5 +611,129 @@ test("startup reconciliation retires a vanished draft, replays unfinished settle
   assert.equal(outcome, "no-runnable");
   assert.equal(creates.length, 0, "a retired publication waits for operator reconciliation, it is never republished silently");
   assert.equal(backlog.bodiesWith("lost", "factory:comment:issue-51:pull-request-100").length, 1, "the resume is reported exactly once");
-  assert.equal(backlog.bodies("lost").filter((body) => body.includes("## Factory blocked")).length, 1, JSON.stringify(backlog.bodies("lost")));
+  assert.equal(backlog.bodies("lost").filter((body) => body.includes("## Factory blocked")).length, 0, JSON.stringify(backlog.bodies("lost")));
+});
+
+test("restart restores a published parent's baseline for a new child and recovers a lost extension result without creating another draft", async () => {
+  const { remote, factoryRoot, backlog, ledger, workflow, logger, providers, creates, patches } = await fixture([
+    { id: "a", number: 61, status: "Ready for development" },
+  ]);
+  const implemented: string[] = [];
+  const runAgent = successfulRunner(logger, async (request) => {
+    const id = request.promptArgs.TICKET_ID!;
+    implemented.push(id);
+    if (id === "b") assert.equal(await readFile(join(request.cwd, "a.txt"), "utf8"), "a\n", "restart recovers the published parent, not main, as the child's baseline");
+  });
+  const config: ProcessConfig = { factoryRoot, harness: "pi", logger, providers, backlog, workflow, ledger, runAgent, maxParallel: 1, ticketAttemptsPerCycle: 1 };
+  assert.equal(await processDependencyCycle(config, createDependencyWorkflowState()), "processed");
+  const parent = (await ledger.load()).results[0]!;
+
+  backlog.seed({ id: "b", number: 62, status: "Ready for development", dependencies: ["a"] });
+  const restarted = createDependencyWorkflowState();
+  assert.equal(await processDependencyCycle(config, restarted), "processed");
+  assert.deepEqual(implemented, ["a", "b"], "the already published parent is not implemented again");
+  assert.equal(backlog.statusOf("b"), "In review");
+  assert.deepEqual([...restarted.blocked], []);
+  assert.equal(creates.length, 1, "the recovered parent and new child share the original draft");
+  assert.equal(patches.length, 1);
+  const extended = (await ledger.load()).results.find((result) => result.included.length === 2)!;
+  assert.equal(extended.pullRequestNumber, parent.pullRequestNumber);
+  assert.equal(extended.head, parent.head);
+  const actualHead = (await runCommand("git", ["--git-dir", remote, "rev-parse", `refs/heads/${extended.head}`], "reading recovered draft head")).trim();
+  assert.equal(extended.sourceSha, actualHead);
+  assert.match(patches[0]!.body, /Included: a \(a\), b \(b\)/);
+
+  // Simulate a process losing its result write after the provider accepted the extension.
+  // Keep the intent, real remote branch, pull request, and historical parent result intact.
+  await rm(join(ledger.directory, `publication-result-${extended.operationKey}.json`));
+  const recovering = createDependencyWorkflowState();
+  assert.equal(await processDependencyCycle(config, recovering), "no-runnable");
+  assert.deepEqual([...recovering.blocked], []);
+  assert.deepEqual([...recovering.published].sort(), ["a", "b"]);
+  assert.deepEqual(implemented, ["a", "b"]);
+  assert.equal(creates.length, 1, "the unmatched intent adopts the provider write instead of creating a duplicate");
+  assert.equal(patches.length, 1, "intent recovery does not rewrite the provider");
+  const recovered = (await ledger.load()).results.find((result) => result.operationKey === extended.operationKey)!;
+  assert.equal(recovered.pullRequestNumber, 100);
+  assert.equal(recovered.sourceSha, actualHead);
+  assert.deepEqual(recovered.included.map((entry) => entry.ticketId), ["a", "b"]);
+});
+
+test("fresh discovery evicts cached tickets whose authored metadata becomes invalid or duplicated", async () => {
+  const { factoryRoot, backlog, ledger, workflow, logger, providers, creates } = await fixture([
+    { id: "invalid", number: 71, status: "Staging" },
+    { id: "duplicate", number: 72, status: "Staging" },
+    { id: "unrelated", number: 74, status: "Staging" },
+  ]);
+  const implemented: string[] = [];
+  const runAgent = successfulRunner(logger, async (request) => { implemented.push(request.promptArgs.TICKET_ID!); });
+  const config: ProcessConfig = { factoryRoot, harness: "pi", logger, providers, backlog, workflow, ledger, runAgent, maxParallel: 1, ticketAttemptsPerCycle: 1 };
+  const state = createDependencyWorkflowState();
+  assert.equal(await processDependencyCycle(config, state), "no-runnable");
+  assert.equal(state.tickets.has("invalid"), true);
+  assert.equal(state.tickets.has("duplicate"), true);
+
+  const duplicateBody = backlog.issues.find((issue) => issue.number === 72)!.body;
+  backlog.rewrite("invalid", "# Metadata was removed by its author");
+  backlog.seed({ id: "duplicate-copy", number: 73, status: "Ready for development", body: duplicateBody });
+  backlog.moveTo("invalid", "Ready for development");
+  backlog.moveTo("duplicate", "Ready for development");
+  backlog.moveTo("unrelated", "Ready for development");
+  assert.equal(await processDependencyCycle(config, state), "processed");
+  assert.deepEqual(implemented, ["unrelated"], "neither stale cached ticket is dispatched after fresh discovery rejects it");
+  assert.equal(backlog.statusOf("unrelated"), "In review");
+  assert.equal(backlog.statusOf("invalid"), "Ready for development");
+  assert.equal(backlog.statusOf("duplicate"), "Blocked");
+  assert.deepEqual(backlog.bodies("invalid"), []);
+  assert.ok(backlog.bodies("duplicate").some((body) => body.includes("duplicate open ticket identity")));
+  assert.equal(backlog.statusOf("duplicate-copy"), "Blocked");
+  assert.equal(creates.length, 1);
+  assert.match(creates[0]!.body, /Included: unrelated \(unrelated\)/);
+});
+
+test("an ordinary provider publication failure is isolated and unrelated work still publishes next cycle", async () => {
+  const { factoryRoot, backlog, ledger, workflow, logger, providers, creates, failNextCreate } = await fixture([
+    { id: "failed", number: 81, status: "Ready for development" },
+    { id: "unrelated", number: 82, status: "Staging" },
+  ]);
+  const runAgent = successfulRunner(logger);
+  const config: ProcessConfig = { factoryRoot, harness: "pi", logger, providers, backlog, workflow, ledger, runAgent, maxParallel: 1, ticketAttemptsPerCycle: 1 };
+  const state = createDependencyWorkflowState();
+  failNextCreate();
+  assert.equal(await processDependencyCycle(config, state), "processed", "a provider rejection is reported rather than escaping the coordinator");
+  assert.equal(creates.length, 0);
+  assert.notEqual(backlog.statusOf("failed"), "In review");
+  assert.equal((await ledger.load()).results.length, 0);
+
+  backlog.moveTo("unrelated", "Ready for development");
+  assert.equal(await processDependencyCycle(config, state), "processed");
+  assert.equal(backlog.statusOf("unrelated"), "In review");
+  assert.equal(creates.length, 1);
+  assert.match(creates[0]!.body, /Included: unrelated \(unrelated\)/);
+  assert.ok(!creates[0]!.body.includes("failed (failed)"), "failed publication does not contaminate an unrelated draft");
+});
+
+test("authorization withdrawal preserves the human's board status on the next cycle", async () => {
+  const { factoryRoot, backlog, ledger, workflow, logger, providers, creates } = await fixture([
+    { id: "withdrawn", number: 91, status: "Ready for development" },
+  ]);
+  let implementations = 0;
+  const runAgent = successfulRunner(logger, async () => {
+    implementations++;
+    backlog.moveTo("withdrawn", "Staging");
+  });
+  const config: ProcessConfig = { factoryRoot, harness: "pi", logger, providers, backlog, workflow, ledger, runAgent, maxParallel: 1, ticketAttemptsPerCycle: 1 };
+  const state = createDependencyWorkflowState();
+  assert.equal(await processDependencyCycle(config, state), "processed");
+  assert.equal(backlog.statusOf("withdrawn"), "Staging");
+  const preservation = backlog.bodies("withdrawn").filter((body) => body.includes("## Factory preserved unreviewed work"));
+  assert.equal(preservation.length, 1);
+  assert.match(preservation[0]!, /Authorization was withdrawn/);
+  assert.equal(await processDependencyCycle(config, state), "no-runnable");
+  assert.equal(backlog.statusOf("withdrawn"), "Staging", "reporting the cached withdrawal must not move the human's status to Blocked");
+  assert.deepEqual(backlog.transitions, ["withdrawn=In progress"]);
+  assert.equal(backlog.bodies("withdrawn").filter((body) => body.includes("## Factory blocked")).length, 0);
+  assert.equal(backlog.bodies("withdrawn").filter((body) => body.includes("## Factory preserved unreviewed work")).length, 1);
+  assert.equal(implementations, 1);
+  assert.equal(creates.length, 0);
 });

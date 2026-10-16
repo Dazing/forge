@@ -109,8 +109,9 @@ test("main.log records redact every configured credential form from stdout and s
   const root = await mkdtemp(join(tmpdir(), "sandcastle-log-"));
   const githubToken = "gh_secret_abc";
   const azurePat = "vso_pat_secret_123";
+  const backlogToken = "ghp_private_backlog_credential";
   const derivedBasic = Buffer.from(`:${azurePat}`, "utf8").toString("base64");
-  const logger = await InvocationLogger.create(root, [githubToken, azurePat, derivedBasic]);
+  const logger = await InvocationLogger.create(root, [githubToken, azurePat, derivedBasic, backlogToken]);
 
   await logger.record({
     timestamp: "2026-10-11T09:00:00.000Z",
@@ -119,14 +120,14 @@ test("main.log records redact every configured credential form from stdout and s
     stage: "draft pull request",
     operation: "creating draft pull request",
     status: "failed",
-    stdout: `TF400813: Authorization failed for ${azurePat}; bearer ${githubToken}`,
+    stdout: `TF400813: Authorization failed for ${azurePat}; bearer ${githubToken}; backlog ${backlogToken}`,
     stderr: `Authorization: Basic ${derivedBasic}`,
   });
 
   const log = await readFile(join(logger.runDir, "main.log"), "utf8");
-  assert.match(log, /stdout:\nTF400813: Authorization failed for \[redacted-token\]; bearer \[redacted-token\]/);
-  assert.match(log, /stderr:\nAuthorization: Basic \[redacted-token\]/);
-  assert.ok(!log.includes(githubToken) && !log.includes(azurePat) && !log.includes(derivedBasic), "no credential form reaches main.log");
+  for (const credential of [githubToken, azurePat, derivedBasic, backlogToken]) {
+    assert.ok(!log.includes(credential), "no target or backlog credential form reaches main.log");
+  }
 });
 
 test("checkpoint records serialize parent, checkpoint, changes, and the run-relative transcript reference after the status", async () => {

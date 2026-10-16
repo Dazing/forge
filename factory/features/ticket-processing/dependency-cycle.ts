@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { parseAuthoredIssueSnapshot, type BacklogStatusName, type Ticket } from "../tickets/index.js";
-import { runGit } from "../../infrastructure/git-provider/git.js";
+import { runGit, toCommandFailure } from "../../infrastructure/git-provider/git.js";
 import { type ProviderName, type PullRequestRecord } from "../../infrastructure/git-provider/git-provider.js";
 import { planGroups, type PlannedGroup } from "../plan-tickets/index.js";
-import { publishPullRequest } from "../publish-pull-request/index.js";
+import { publishPullRequest, PublicationError } from "../publish-pull-request/index.js";
 import { buildDependencyGraph, type DependencyGraph } from "./dependency-graph.js";
 import { executeReviewedAttempt, type ReviewedCheckpoint } from "./execute-attempt.js";
-import { integrateCandidates, type ReviewedCandidate } from "./integrate-candidates.js";
+import { integrateCandidates, type IntegrationCheckpoint, type ReviewedCandidate } from "./integrate-candidates.js";
 import type { ProcessConfig } from "./process-config.js";
 import { logBacklogFailure, reportBlocked } from "./settle-attempt.js";
 import { cloneTargetRepository, verifyMergedPublication } from "./reconcile-publication.js";
@@ -17,6 +17,7 @@ import type { WorkspaceBaseline } from "./workspace.js";
 import { detectAuthorizationLapse, preserveAttemptWorkspace } from "./authorization-lapse.js";
 import { createIssueAuthorizationReader, createStageAuthorization, isAuthorizationWithdrawn, type StageAuthorization } from "./authorization-guard.js";
 import { branchBrowserUrl } from "../../infrastructure/git-provider/create-git-provider.js";
+import { redactSecrets } from "../../shared/redact-secret.js";
 
 // The private-GitHub backlog is the only ticket source. Scheduling reads open Project issues; every
 // lifecycle fact the runner owes the operator is settled on the issue itself, durably recorded in the
@@ -55,6 +56,9 @@ export interface DependencyWorkflowState {
   readonly reviewed: Map<string, ReviewedCheckpoint>;
   readonly blocked: Map<string, string>;
   readonly retryable: Map<string, string>;
+  readonly withdrawn: Set<string>;
+  readonly publishedBaselines: Map<string, WorkspaceBaseline>;
+  readonly retired: Set<string>;
   readonly integrationConflicts: Map<string, readonly Readonly<{ path: string; disposition: string }>[]>;
   readonly publications: Map<string, PublicationFact>;
   readonly groupIdsByTicket: Map<string, string>;
@@ -72,6 +76,9 @@ export function createDependencyWorkflowState(): DependencyWorkflowState {
     reviewed: new Map(),
     blocked: new Map(),
     retryable: new Map(),
+    withdrawn: new Set(),
+    publishedBaselines: new Map(),
+    retired: new Set(),
     integrationConflicts: new Map(),
     publications: new Map(),
     groupIdsByTicket: new Map(),
@@ -125,18 +132,36 @@ async function discover(config: ProcessConfig, state: DependencyWorkflowState): 
   }
   for (const duplicate of discovery.duplicates) {
     console.error(`Ticket ${duplicate.ticketId} is declared by open issues ${duplicate.issueNumbers.join(", ")}; none of them are scheduled.`);
+    const reason = `duplicate open ticket identity ${duplicate.ticketId}; operator reconciliation required`;
+    for (const number of duplicate.issueNumbers) {
+      try {
+        const issue = await config.backlog.getIssue(number);
+        if (issue === undefined || issue.state !== "open") continue;
+        const snapshot = parseAuthoredIssueSnapshot({
+          backlogRepository: config.backlog.repository, number, nodeId: issue.nodeId, url: issue.url,
+        }, issue.body, config.providers);
+        await reportBlocked(config, snapshot.ticket, reason);
+        await reportSettlement(config, duplicate.ticketId, "duplicate identity", () => config.workflow.blocked({
+          identity: snapshot.identity, ticketId: snapshot.ticket.id,
+          requirementsHash: snapshot.ticket.requirementsHash, title: snapshot.ticket.title,
+        }, reason, blockingReasonKey(reason)));
+      } catch (error) {
+        await logBacklogFailure(config, duplicate.ticketId, "duplicate identity", error);
+      }
+    }
   }
   for (const number of discovery.unboarded) {
     console.error(`Backlog issue #${number} has no item in the configured Project; it is never scheduled.`);
   }
 
-  const found = new Map<string, BacklogTicket>();
-  for (const entry of discovery.tickets) {
-    if (found.delete(entry.ticket.id)) {
-      state.blocked.set(entry.ticket.id, "the ticket ID is declared by more than one open issue; operator reconciliation required");
-      continue;
-    }
-    found.set(entry.ticket.id, entry);
+  const found = new Map(discovery.tickets.map((entry) => [entry.ticket.id, entry]));
+  for (const id of state.issues.keys()) {
+    if (found.has(id)) continue;
+    state.issues.delete(id);
+    state.tickets.delete(id);
+    state.reviewed.delete(id);
+    state.published.delete(id);
+    state.publishedBaselines.delete(id);
   }
   for (const [id, entry] of found) {
     const known = state.issues.get(id);
@@ -148,6 +173,11 @@ async function discover(config: ProcessConfig, state: DependencyWorkflowState): 
       state.blocked.set(id, `requirements changed after successful checkpoint; author a new ticket instead of reusing ${id}`);
     }
     state.issues.set(id, entry);
+    if (state.withdrawn.has(id) && entry.status === "Ready for development") {
+      state.withdrawn.delete(id);
+      state.blocked.delete(id);
+      state.reviewed.delete(id);
+    }
     state.tickets.set(id, entry.ticket);
   }
   if (!state.startupChecked) {
@@ -165,11 +195,14 @@ async function settleRecordedEffects(config: ProcessConfig, state: DependencyWor
   for (const entry of await config.workflow.recover()) {
     console.log(`[startup] Replayed the recorded settlement ${entry.detail} for issue #${entry.issueNumber}.`);
   }
-  const snapshot = await config.ledger.load();
+  let snapshot = await config.ledger.load();
+  await recoverPublicationIntents(config, state, snapshot.intents, snapshot.results);
+  snapshot = await config.ledger.load();
+  const results = currentPublicationResults(snapshot.results);
   for (const record of snapshot.corrupt) {
     console.error(`[startup] Unreadable ledger record ${record.file} requires operator reconciliation; it is never rewritten or deleted.`);
   }
-  for (const result of snapshot.results) {
+  for (const result of results) {
     await reconcileResult(config, state, result);
   }
 
@@ -183,7 +216,7 @@ async function settleRecordedEffects(config: ProcessConfig, state: DependencyWor
       console.log(`Issue #${entry.snapshot.identity.number} (${ticketId}) was reopened after its recorded closure; it is scheduled as fresh work.`);
     }
     if (state.settled.has(ticketId)) continue;
-    const result = snapshot.results.find((candidate) => includedIds(candidate).includes(ticketId));
+    const result = results.find((candidate) => includedIds(candidate).includes(ticketId));
     switch (entry.status) {
       case "In review": {
         if (result === undefined) {
@@ -209,6 +242,51 @@ async function settleRecordedEffects(config: ProcessConfig, state: DependencyWor
       }
       default:
         break;
+    }
+  }
+}
+
+/** Historical revisions remain durable evidence, but only the newest revision owns settlement. */
+function currentPublicationResults(results: readonly PublicationResult[]): PublicationResult[] {
+  const current = new Map<string, PublicationResult>();
+  for (const result of [...results].sort((left, right) => left.publishedAt.localeCompare(right.publishedAt))) {
+    current.set(`${result.provider}\0${result.repository}\0${result.pullRequestNumber}`, result);
+  }
+  return [...current.values()];
+}
+
+async function recoverPublicationIntents(config: ProcessConfig, state: DependencyWorkflowState, intents: readonly PublicationIntent[], results: readonly PublicationResult[]): Promise<void> {
+  const completed = new Set(results.map((result) => result.operationKey));
+  for (const intent of intents) {
+    if (completed.has(intent.operationKey)) continue;
+    try {
+      const provider = config.providers.resolve(intent.repository);
+      let record = await provider.findPullRequest({ repository: intent.repository, head: intent.head, base: intent.baseBranch });
+      if (record !== undefined && provider.getPullRequest !== undefined) {
+        const details = await provider.getPullRequest(intent.repository, record.number);
+        if (details === undefined) throw new Error("the located publication could not be read back");
+        record = { ...record, sourceSha: details.sourceSha, title: details.title, body: details.body,
+          draft: details.draft, state: details.state, headBranch: details.head, baseBranch: details.base,
+          mergeMethod: details.squashPreference === "configured" ? "squash" : "unknown",
+          mergeCommitSha: details.mergeResultSha };
+      }
+      if (record === undefined) {
+        // Exact branch lookup found no PR: a push alone has no publication to adopt.
+        await config.ledger.retirePublication(intent.operationKey);
+        continue;
+      }
+      if (record.sourceSha !== intent.sourceSha || record.title !== intent.title || record.body !== intent.body
+        || record.headBranch !== intent.head || record.baseBranch !== intent.baseBranch
+        || (record.state === "open" && !record.draft) || (provider.mergeStrategySupport === "configured" && record.mergeMethod !== "squash")) {
+        throw new Error("the publication intent does not match the remote pull-request identity");
+      }
+      await config.ledger.writeResult({
+        ...intent, pullRequestNumber: record.number, pullRequestUrl: record.url,
+        squashPreference: provider.mergeStrategySupport, publishedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      const reason = `uncertain publication requires operator reconciliation: ${error instanceof Error ? error.message : String(error)}`;
+      for (const included of intent.included) state.blocked.set(included.ticketId, reason);
     }
   }
 }
@@ -252,12 +330,19 @@ async function reconcileResult(config: ProcessConfig, state: DependencyWorkflowS
   const subject = `pull-request-${result.pullRequestNumber}`;
   let record: PullRequestRecord | undefined;
   try {
-    record = await config.providers.resolve(result.repository).findPullRequest({
-      repository: result.repository,
-      base: result.baseBranch,
-      head: result.head,
-      sourceSha: result.sourceSha,
-    });
+    const provider = config.providers.resolve(result.repository);
+    if (provider.getPullRequest !== undefined) {
+      const details = await provider.getPullRequest(result.repository, result.pullRequestNumber);
+      record = details === undefined ? undefined : {
+        provider: provider.name, repository: result.repository, number: details.number, url: details.url,
+        baseBranch: details.base, headBranch: details.head, sourceSha: details.sourceSha,
+        title: details.title, body: details.body, draft: details.draft, state: details.state,
+        mergeMethod: details.squashPreference === "configured" ? "squash" : "unknown",
+        mergeCommitSha: details.mergeResultSha,
+      };
+    } else {
+      record = await provider.findPullRequest({ repository: result.repository, base: result.baseBranch, head: result.head });
+    }
   } catch (error) {
     const reason = `pull-request reconciliation failed: ${error instanceof Error ? error.message : String(error)}`;
     for (const ticketId of includedIds(result)) blockDescendants(state, ticketId, reason);
@@ -265,11 +350,18 @@ async function reconcileResult(config: ProcessConfig, state: DependencyWorkflowS
   }
 
   if (record === undefined || record.state === "closed") {
-    await config.ledger.retirePublication(result.operationKey);
+    for (const revision of (await config.ledger.load()).results) {
+      if (revision.provider === result.provider && revision.repository === result.repository && revision.pullRequestNumber === result.pullRequestNumber) {
+        await config.ledger.retirePublication(revision.operationKey);
+      }
+    }
     state.publications.delete(result.groupId);
-    console.error(`Pull request ${result.pullRequestUrl} is ${record === undefined ? "absent" : "closed"}; its recorded publication is retired and its tickets resume as In progress.`);
+    console.error(`Pull request ${result.pullRequestUrl} is ${record === undefined ? "absent" : "closed"}; its recorded publication is retired and its tickets return to Ready for development pending restart.`);
     for (const ticketId of includedIds(result)) {
       state.published.delete(ticketId);
+      state.retired.add(ticketId);
+      state.publishedBaselines.delete(ticketId);
+      state.blocked.set(ticketId, "retired publication requires operator reconciliation until restart");
       const entry = state.issues.get(ticketId);
       if (entry?.status === "In review") {
         await reportSettlement(config, ticketId, "resume", () => config.workflow.resume(targetOf(entry), subject));
@@ -277,11 +369,40 @@ async function reconcileResult(config: ProcessConfig, state: DependencyWorkflowS
     }
     return;
   }
+  if (record.sourceSha !== result.sourceSha || record.headBranch !== result.head || record.baseBranch !== result.baseBranch
+    || record.title !== result.title || record.body !== result.body || (record.state === "open" && !record.draft)) {
+    for (const ticketId of includedIds(result)) {
+      state.blocked.set(ticketId, `pull request ${result.pullRequestNumber} changed externally; operator reconciliation required`);
+    }
+    return;
+  }
 
   const tracked = state.publications.get(result.groupId);
   state.publications.set(result.groupId, publicationOf(result, tracked?.workspacePath));
   if (record.state !== "merged") {
-    for (const ticketId of includedIds(result)) state.published.add(ticketId);
+    try {
+      let baseline = state.publishedBaselines.get(includedIds(result)[0]!);
+      if (baseline?.sha !== result.sourceSha) {
+        const repositoryPath = tracked?.workspacePath ?? await cloneTargetRepository(result.repository, result.baseBranch);
+        await runGit(repositoryPath, ["fetch", "origin", `refs/heads/${result.head}`], "recovering published dependency baseline");
+        const sha = (await runGit(repositoryPath, ["rev-parse", "FETCH_HEAD"], "validating published dependency SHA")).trim();
+        if (sha !== result.sourceSha) throw new Error("published dependency branch changed while recovering its baseline");
+        await runGit(repositoryPath, ["merge-base", "--is-ancestor", result.baseSha, sha], "validating published dependency ancestry");
+        baseline = { repositoryPath, sha };
+      }
+      state.publications.set(result.groupId, publicationOf(result, baseline.repositoryPath));
+      for (const included of result.included) {
+        const entry = state.issues.get(included.ticketId);
+        if (entry !== undefined && (entry.ticket.requirementsHash !== included.requirementsHash || entry.snapshot.identity.nodeId !== included.issueNodeId)) {
+          throw new Error(`published ticket ${included.ticketId} no longer matches its recorded requirements/issue`);
+        }
+        state.published.add(included.ticketId);
+        state.publishedBaselines.set(included.ticketId, baseline);
+        state.groupIdsByTicket.set(included.ticketId, result.groupId);
+      }
+    } catch (error) {
+      for (const ticketId of includedIds(result)) blockDescendants(state, ticketId, `published baseline recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     return;
   }
 
@@ -310,8 +431,14 @@ async function reconcileResult(config: ProcessConfig, state: DependencyWorkflowS
     }
     return;
   }
-  for (const [satisfiedId, baseline] of state.mergedSatisfied) {
-    state.mergedSatisfied.set(satisfiedId, { sha: refreshedSha, repositoryPath: baseline.repositoryPath.length > 0 ? baseline.repositoryPath : verifyPath });
+  for (const prior of (await config.ledger.load()).results) {
+    if (prior.repository !== result.repository || prior.baseBranch !== result.baseBranch) continue;
+    for (const id of includedIds(prior)) {
+      const baseline = state.mergedSatisfied.get(id);
+      if (baseline === undefined) continue;
+      const reachable = await runGit(verifyPath, ["merge-base", "--is-ancestor", baseline.sha, refreshedSha], "checking refreshed prerequisite reachability").then(() => true, () => false);
+      if (reachable) state.mergedSatisfied.set(id, { sha: refreshedSha, repositoryPath: verifyPath });
+    }
   }
   for (const ticketId of includedIds(result)) {
     state.mergedSatisfied.set(ticketId, { sha: refreshedSha, repositoryPath: verifyPath });
@@ -322,6 +449,7 @@ async function reconcileResult(config: ProcessConfig, state: DependencyWorkflowS
     if (!settled) continue;
     state.settled.add(ticketId);
     state.published.delete(ticketId);
+    state.reviewed.delete(ticketId);
     state.issues.delete(ticketId);
     state.tickets.delete(ticketId);
     console.log(`Issue #${entry.snapshot.identity.number} (${ticketId}) is merged at ${refreshedSha}; recorded as Done and closed.`);
@@ -368,6 +496,8 @@ function baselineFor(ticket: Ticket, state: DependencyWorkflowState): WorkspaceB
   const parentId = ticket.dependsOnTickets[0]!;
   const merged = state.mergedSatisfied.get(parentId);
   if (merged !== undefined) return merged;
+  const published = state.publishedBaselines.get(parentId);
+  if (published !== undefined) return published;
   const parent = state.reviewed.get(parentId);
   if (parent === undefined) throw new Error(`Ticket ${ticket.id} dependency ${parentId} is not reviewed.`);
   return { sha: parent.reviewCheckpoint.checkpointSha, repositoryPath: parent.workspacePath };
@@ -383,6 +513,7 @@ async function runTicket(ticket: Ticket, state: DependencyWorkflowState, config:
     if (result.status === "withdrawn") {
       const reason = `authorization was withdrawn at ${result.stage}: ${result.observed}`;
       state.blocked.set(ticket.id, reason);
+      state.withdrawn.add(ticket.id);
       await reportSettlement(config, ticket.id, "withdrawn", () =>
         config.workflow.withdrawn(target, `attempt-${result.attemptId}`, {
           attemptId: result.attemptId,
@@ -395,6 +526,8 @@ async function runTicket(ticket: Ticket, state: DependencyWorkflowState, config:
           workspacePath: result.workspacePath,
           pushed: result.preserved?.pushed ?? false,
           pushFailure: result.preserved?.pushFailure ?? "the preserved workspace HEAD could not be pushed",
+          captureComplete: result.preserved?.captureComplete ?? false,
+          captureFailure: result.preserved?.captureFailure ?? "the workspace could not be captured",
           reviewed: false,
         }));
       return "blocked";
@@ -467,9 +600,17 @@ async function prepareMultiParentBaselines(
       baselines.set(ticket.id, mergedBaseline!);
       continue;
     }
-    const parents = unmergedParentIds
-      .map((id) => state.reviewed.get(id))
-      .filter((candidate): candidate is ReviewedCheckpoint => candidate !== undefined);
+    const parents = unmergedParentIds.map((id): IntegrationCheckpoint | undefined => {
+      const reviewed = state.reviewed.get(id);
+      if (reviewed !== undefined) return reviewed;
+      const baseline = state.publishedBaselines.get(id);
+      const publication = [...state.publications.values()].find((item) => item.includedTicketIds.includes(id));
+      const ticket = state.tickets.get(id);
+      return baseline === undefined || publication === undefined || ticket === undefined ? undefined : {
+        ticket, workspacePath: baseline.repositoryPath, branch: publication.head,
+        reviewCheckpoint: { checkpointSha: baseline.sha },
+      };
+    }).filter((parent): parent is IntegrationCheckpoint => parent !== undefined);
     if (parents.length !== unmergedParentIds.length) continue;
     if (parents.length === 1 && mergedBaseline === undefined) {
       baselines.set(ticket.id, { sha: parents[0]!.reviewCheckpoint.checkpointSha, repositoryPath: parents[0]!.workspacePath });
@@ -497,15 +638,15 @@ async function publishReviewedSubset(
   const candidate = integrated ?? await integrateCandidates(groupId, checkpoints, config, undefined, authorize);
   const includedSet = new Set<string>();
   for (const checkpoint of checkpoints) dependencyClosure(checkpoint.ticket.id, state.tickets, includedSet);
-  const includedTicketIds = [...includedSet].filter((id) => state.reviewed.has(id)).sort();
+  const includedTicketIds = [...includedSet].filter((id) => !state.mergedSatisfied.has(id) && (state.reviewed.has(id) || state.published.has(id))).sort();
   const representative = checkpoints[0]!.ticket;
-  const graph = buildDependencyGraph([...state.tickets.values()]);
+  const graph = buildDependencyGraph([...state.tickets.values()], new Set(state.mergedSatisfied.keys()));
   const groupMembers = graph.groups.find((group) => group.memberIds.includes(representative.id))?.memberIds ?? includedTicketIds;
   const tracked = state.publications.get(groupId);
   const publicationAttemptId = `group-${groupId}-${candidate.sha.slice(0, 12)}`;
   const baseSha = (await runGit(candidate.workspacePath, ["rev-parse", `origin/${representative.baseBranch}`], "reading publication base SHA")).trim();
   const provider = config.providers.resolve(representative.repository);
-  const intent: PublicationIntent = {
+  let intent: PublicationIntent = {
     version: PUBLICATION_RECORD_VERSION,
     operationKey: operationKey("publication", `group-${groupId}`, candidate.sha),
     groupId,
@@ -524,8 +665,6 @@ async function publishReviewedSubset(
     }),
     recordedAt: new Date().toISOString(),
   };
-  // The intent is durable before the first remote write, so a crash between push and record is recoverable.
-  await config.ledger.writeIntent(intent);
   const result = await publishPullRequest({
     ticket: representative,
     workspacePath: candidate.workspacePath,
@@ -536,6 +675,10 @@ async function publishReviewedSubset(
     ...(authorize === undefined ? {} : { authorize }),
     gitProvider: provider,
     forbiddenSecrets: config.providers.secrets,
+    onPublicationIntent: async (facts) => {
+      intent = { ...intent, ...facts };
+      await config.ledger.writeIntent(intent);
+    },
     onContentComplete: (head, logReference) => config.logger.record({
       timestamp: new Date().toISOString(),
       ticketId: representative.id,
@@ -573,6 +716,8 @@ async function publishReviewedSubset(
 
   const published: PublicationResult = {
     ...intent,
+    head: result.head,
+    sourceSha: result.finalSha,
     pullRequestNumber: result.pullRequest.number,
     pullRequestUrl: result.pullRequest.url,
     squashPreference: result.squashPreference,
@@ -599,7 +744,7 @@ async function publishReviewedSubset(
 }
 
 async function publishGroup(groupId: string, state: DependencyWorkflowState, config: ProcessConfig): Promise<void> {
-  const graph = buildDependencyGraph([...state.tickets.values()]);
+  const graph = buildDependencyGraph([...state.tickets.values()], new Set(state.mergedSatisfied.keys()));
   const group = deliveryGroups(graph, state).find((candidate) => candidate.id === groupId);
   if (group === undefined) return;
   const reviewedIds = group.memberIds.filter((id) => state.reviewed.has(id) && !state.blocked.has(id));
@@ -619,12 +764,19 @@ async function publishGroup(groupId: string, state: DependencyWorkflowState, con
     }
     return;
   }
-  const authorize = groupAuthorization(reviewedIds, state, config);
+  const authorizingIds = [...new Set(reviewedIds.flatMap((id) => [...dependencyClosure(id, state.tickets)]))]
+    .filter((id) => !state.mergedSatisfied.has(id));
+  const authorize = groupAuthorization(authorizingIds, state, config);
   const withdraw = async (stage: string, observed: string, branch: string, commitSha: string, workspacePath: string): Promise<void> => {
     for (const checkpoint of leafCheckpoints) {
       const entry = state.issues.get(checkpoint.ticket.id);
       if (entry === undefined) continue;
       state.blocked.set(checkpoint.ticket.id, `authorization was withdrawn at ${stage}: ${observed}`);
+      state.withdrawn.add(checkpoint.ticket.id);
+      const preserved = await preserveAttemptWorkspace({
+        attemptId: checkpoint.attemptId, repository: checkpoint.ticket.repository,
+        baseBranch: checkpoint.ticket.baseBranch, branch, workspacePath, secrets: config.providers.secrets,
+      }).catch(() => undefined);
       await reportSettlement(config, checkpoint.ticket.id, "withdrawn", () =>
         config.workflow.withdrawn(targetOf(entry), `group-${groupId}`, {
           attemptId: checkpoint.attemptId,
@@ -632,11 +784,13 @@ async function publishGroup(groupId: string, state: DependencyWorkflowState, con
           repository: checkpoint.ticket.repository,
           branch,
           branchUrl: branchBrowserUrl(checkpoint.ticket.repository, branch),
-          commitSha,
+          commitSha: preserved?.commitSha ?? commitSha,
           baseBranch: checkpoint.ticket.baseBranch,
           workspacePath,
-          pushed: false,
-          pushFailure: "the group stopped before its publication push",
+          pushed: preserved?.pushed ?? false,
+          pushFailure: preserved?.pushFailure ?? "the workspace could not be preserved",
+          captureComplete: preserved?.captureComplete ?? false,
+          captureFailure: preserved?.captureFailure ?? "the workspace could not be captured",
           reviewed: true,
         }));
     }
@@ -650,24 +804,69 @@ async function publishGroup(groupId: string, state: DependencyWorkflowState, con
       await withdraw(error.stage, error.observed, only.branch, only.reviewCheckpoint.checkpointSha, only.workspacePath);
       return;
     }
-    if (leafCheckpoints.length === 1) throw error;
+    if (leafCheckpoints.length === 1) {
+      await settlePublicationFailure(config, state, leafCheckpoints, error);
+      return;
+    }
     for (const checkpoint of leafCheckpoints) {
       const subsetId = `${groupId}-${checkpoint.ticket.id}`;
-      if (!state.publications.has(subsetId)) await publishReviewedSubset(subsetId, [checkpoint], state, config, undefined, authorize);
+      if (!state.publications.has(subsetId)) {
+        try {
+          await publishReviewedSubset(subsetId, [checkpoint], state, config, undefined, authorize);
+        } catch (failure) {
+          const cause = failure instanceof PublicationError ? failure.cause : failure;
+          if (isAuthorizationWithdrawn(cause)) {
+            await withdraw(cause.stage, cause.observed, checkpoint.branch, checkpoint.reviewCheckpoint.checkpointSha, checkpoint.workspacePath);
+          } else {
+            await settlePublicationFailure(config, state, [checkpoint], failure);
+          }
+        }
+      }
     }
     return;
   }
   try {
     await publishReviewedSubset(groupId, leafCheckpoints, state, config, candidate, authorize);
   } catch (error) {
-    if (!isAuthorizationWithdrawn(error)) throw error;
-    await withdraw(error.stage, error.observed, candidate.branch, candidate.sha, candidate.workspacePath);
+    const cause = error instanceof PublicationError ? error.cause : error;
+    if (isAuthorizationWithdrawn(cause)) {
+      await withdraw(cause.stage, cause.observed, candidate.branch, candidate.sha, candidate.workspacePath);
+    } else {
+      await settlePublicationFailure(config, state, leafCheckpoints, error);
+    }
+  }
+}
+
+async function settlePublicationFailure(config: ProcessConfig, state: DependencyWorkflowState, checkpoints: readonly ReviewedCheckpoint[], error: unknown): Promise<void> {
+  const stage = error instanceof PublicationError ? error.substage : "integration";
+  const cause = error instanceof PublicationError ? error.cause : error;
+  const failure = toCommandFailure(cause, stage);
+  const reason = redactSecrets(config.providers.secrets, `${stage}: ${failure.stderr}`);
+  for (const checkpoint of checkpoints) {
+    state.blocked.set(checkpoint.ticket.id, reason);
+    await logBacklogFailure(config, checkpoint.ticket.id, stage, cause);
+    const entry = state.issues.get(checkpoint.ticket.id);
+    if (entry !== undefined) {
+      if (detectAuthorizationLapse(failure.stderr, config.providers.secrets) !== undefined) {
+        const preserved = await preserveAttemptWorkspace({
+          attemptId: checkpoint.attemptId, branch: checkpoint.branch, repository: checkpoint.ticket.repository,
+          baseBranch: checkpoint.ticket.baseBranch, workspacePath: checkpoint.workspacePath, secrets: config.providers.secrets,
+        }).catch(() => undefined);
+        if (preserved !== undefined) {
+          await reportSettlement(config, checkpoint.ticket.id, stage, () => config.workflow.preserved(targetOf(entry), blockingReasonKey(reason), {
+            ...preserved, branchUrl: branchBrowserUrl(checkpoint.ticket.repository, preserved.branch), reviewed: true,
+          }));
+          continue;
+        }
+      }
+      await reportSettlement(config, checkpoint.ticket.id, stage, () => config.workflow.blocked(targetOf(entry), reason, blockingReasonKey(reason)));
+    }
   }
 }
 
 /** Re-reconcile every recorded publication, so a merge observed mid-cycle settles before descendants publish. */
 async function reconcileRecordedPublications(config: ProcessConfig, state: DependencyWorkflowState): Promise<void> {
-  for (const result of (await config.ledger.load()).results) {
+  for (const result of currentPublicationResults((await config.ledger.load()).results)) {
     await reconcileResult(config, state, result);
   }
 }
@@ -680,13 +879,14 @@ export async function processDependencyCycle(config: ProcessConfig, state: Depen
   state.cycle++;
   await discover(config, state);
   await reconcileRecordedPublications(config, state);
-  const graph = buildDependencyGraph([...state.tickets.values()]);
+  const graph = buildDependencyGraph([...state.tickets.values()], new Set(state.mergedSatisfied.keys()));
+  for (const [ticketId, reason] of graph.invalidDependencies) state.blocked.set(ticketId, reason);
 
   for (const [ticketId, reason] of [...state.blocked]) {
     if (reason.startsWith("missing dependencies:") && !graph.missingDependencies.has(ticketId)) state.blocked.delete(ticketId);
   }
   for (const [ticketId, reason] of [...state.blocked]) {
-    if (reason.startsWith("waiting for dependencies:") && state.tickets.get(ticketId)?.dependsOnTickets.every((id) => state.reviewed.has(id) || state.published.has(id))) state.blocked.delete(ticketId);
+    if (reason.startsWith("waiting for dependencies:") && state.tickets.get(ticketId)?.dependsOnTickets.every((id) => state.reviewed.has(id) || state.published.has(id) || state.mergedSatisfied.has(id))) state.blocked.delete(ticketId);
   }
   for (const [ticketId, missing] of graph.missingDependencies) {
     if (!state.blocked.has(ticketId) || state.blocked.get(ticketId)?.startsWith("missing dependencies:")) {
@@ -710,8 +910,14 @@ export async function processDependencyCycle(config: ProcessConfig, state: Depen
   for (const [ticketId, reason] of state.blocked) {
     const entry = state.issues.get(ticketId);
     if (entry === undefined) continue;
+    if (state.withdrawn.has(ticketId) || state.retired.has(ticketId)) continue;
     const ticket = entry.ticket;
     await reportBlocked(config, ticket, reason);
+    if (reason.startsWith("waiting for dependencies:") && ticket.dependsOnTickets.every((id) => {
+      const dependency = state.issues.get(id);
+      return state.mergedSatisfied.has(id) || state.reviewed.has(id) || state.published.has(id)
+        || (!state.blocked.has(id) && (dependency?.status === "Ready for development" || dependency?.status === "In progress"));
+    })) continue;
     await reportSettlement(config, ticketId, "blocked", () => config.workflow.blocked(targetOf(entry), reason, blockingReasonKey(reason)));
   }
 
@@ -730,7 +936,7 @@ export async function processDependencyCycle(config: ProcessConfig, state: Depen
     const deferred = new Set<string>();
     for (;;) {
       for (const [ticketId, reason] of [...state.blocked]) {
-        if (reason.startsWith("waiting for dependencies:") && state.tickets.get(ticketId)?.dependsOnTickets.every((id) => state.reviewed.has(id) || state.published.has(id))) state.blocked.delete(ticketId);
+        if (reason.startsWith("waiting for dependencies:") && state.tickets.get(ticketId)?.dependsOnTickets.every((id) => state.reviewed.has(id) || state.published.has(id) || state.mergedSatisfied.has(id))) state.blocked.delete(ticketId);
       }
       const currentReady = graph
         .readyTicketIds(new Set([...state.reviewed.keys(), ...state.published]), new Set([...state.blocked.keys(), ...deferred, ...nonSchedulableStatuses(state)]))
@@ -751,7 +957,7 @@ export async function processDependencyCycle(config: ProcessConfig, state: Depen
     for (const ticketId of group.memberIds) {
       const ticket = state.tickets.get(ticketId)!;
       if (!state.reviewed.has(ticketId) && !state.retryable.has(ticketId) && !state.blocked.has(ticketId)) {
-        const waiting = ticket.dependsOnTickets.filter((id) => !state.reviewed.has(id) && !state.published.has(id));
+        const waiting = ticket.dependsOnTickets.filter((id) => !state.reviewed.has(id) && !state.published.has(id) && !state.mergedSatisfied.has(id));
         if (waiting.length > 0) state.blocked.set(ticketId, `waiting for dependencies: ${waiting.join(", ")}`);
       }
     }

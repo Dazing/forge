@@ -76,6 +76,16 @@ test("rewritten requirements withdraw authorization", async (t) => {
   });
 });
 
+test("malformed replacement requirements withdraw authorization rather than failing as a work error", async () => {
+  const { backlog, guard } = fixture();
+  backlog.rewrite("alpha", "These requirements no longer have authored ticket metadata.");
+  await assert.rejects(guard("claiming the backlog issue"), (error: unknown) => {
+    assert.ok(error instanceof AuthorizationWithdrawnError);
+    assert.match(error.observed, /authored requirements changed/);
+    return true;
+  });
+});
+
 test("a group guard stops at the first member that withdrew", async (t) => {
   const { backlog, identity, requirementsHash, read, guard } = fixture();
   backlog.seed({ id: "beta", number: 8, status: "In progress", dependencies: ["alpha"] });

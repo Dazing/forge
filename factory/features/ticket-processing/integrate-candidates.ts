@@ -3,8 +3,15 @@ import { CommandFailedError, currentBranch, requireCleanRepository, requireNoUnm
 import { integrateTickets } from "../integrate-tickets/index.js";
 import type { ProcessConfig } from "./process-config.js";
 import { createWorkspace, reserveAttempt, type WorkspaceBaseline } from "./workspace.js";
-import type { ReviewedCheckpoint } from "./execute-attempt.js";
+import type { Ticket } from "../tickets/index.js";
 import type { StageAuthorization } from "./authorization-guard.js";
+
+export type IntegrationCheckpoint = Readonly<{
+  ticket: Ticket;
+  workspacePath: string;
+  branch: string;
+  reviewCheckpoint: Readonly<{ checkpointSha: string }>;
+}>;
 
 export type ReviewedCandidate = Readonly<{
   groupId: string;
@@ -17,7 +24,7 @@ export type ReviewedCandidate = Readonly<{
 
 export async function integrateCandidates(
   groupId: string,
-  candidates: readonly ReviewedCheckpoint[],
+  candidates: readonly IntegrationCheckpoint[],
   config: ProcessConfig,
   baseline?: WorkspaceBaseline,
   authorize?: StageAuthorization,
@@ -38,6 +45,10 @@ export async function integrateCandidates(
 
   for (const candidate of pending) {
     await runGit(workspace.workspacePath, ["fetch", "--no-tags", candidate.workspacePath, candidate.reviewCheckpoint.checkpointSha], `importing reviewed checkpoint ${candidate.ticket.id}`);
+    if ((await runGit(workspace.workspacePath, ["merge-base", "--is-ancestor", candidate.reviewCheckpoint.checkpointSha, "HEAD"], "checking integrated ancestry").then(() => true, () => false))) {
+      included.push(candidate.ticket.id);
+      continue;
+    }
     const parent = (await runGit(workspace.workspacePath, ["rev-parse", "HEAD"], "reading integration parent")).trim();
     let conflictPaths: string[] = [];
     try {

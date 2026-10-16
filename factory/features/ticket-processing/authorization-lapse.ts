@@ -1,4 +1,4 @@
-import { runGit, runGitAsRunner } from "../../infrastructure/git-provider/git.js";
+import { requireCleanRepository, runGit, runGitAsRunner, snapshotHeadAndBranch } from "../../infrastructure/git-provider/git.js";
 import { redactSecrets } from "../../shared/redact-secret.js";
 
 // An authorization lapse is a credential/permission failure, not a work failure: retrying it burns
@@ -69,9 +69,11 @@ export type PreservedAttempt = Readonly<{
   commitSha: string;
   pushed: boolean;
   pushFailure: string | undefined;
+  captureComplete: boolean;
+  captureFailure: string | undefined;
 }>;
 
-/** Push one preserved attempt branch (never a pull request) and report the facts the issue comment must carry. */
+/** Capture unfinished work in a distinct runner commit, then push non-force without publishing a pull request. */
 export async function preserveAttemptWorkspace(input: Readonly<{
   attemptId: string;
   branch: string;
@@ -80,13 +82,77 @@ export async function preserveAttemptWorkspace(input: Readonly<{
   workspacePath: string;
   secrets: readonly string[];
 }>): Promise<PreservedAttempt> {
-  const commitSha = (await runGit(input.workspacePath, ["rev-parse", "HEAD"], "reading the preserved commit SHA")).trim();
+  const entry = await snapshotHeadAndBranch(input.workspacePath);
+  const facts = {
+    attemptId: input.attemptId,
+    branch: input.branch,
+    repository: input.repository,
+    baseBranch: input.baseBranch,
+    workspacePath: input.workspacePath,
+  };
+  let commitSha = entry.head;
+  let captureComplete = false;
+  let captureFailure: string | undefined;
+  const diagnostic = (error: unknown): string => redactSecrets(input.secrets, error instanceof Error ? error.message : String(error)).slice(0, 240);
+  const validatedBlobs = new Set<string>();
+  const validateSecrets = async (tree: string, message: string): Promise<void> => {
+    const secrets = input.secrets.filter((secret) => secret.length > 0);
+    if (secrets.length === 0) return;
+    if (secrets.some((secret) => message.includes(secret))) throw new Error("Preservation message contains credential material.");
+    const entries = await runGit(input.workspacePath, ["ls-tree", "-r", "-z", tree], "inspecting preservation tree");
+    for (const entry of entries.split("\0")) {
+      if (entry.length === 0) continue;
+      if (secrets.some((secret) => entry.includes(secret))) throw new Error("Preservation path contains credential material.");
+      const [metadata] = entry.split("\t");
+      const [, kind, object] = metadata!.split(" ");
+      if (kind !== "blob" || object === undefined || validatedBlobs.has(object)) continue;
+      const content = await runGit(input.workspacePath, ["cat-file", "blob", object], "validating preservation content");
+      if (secrets.some((secret) => content.includes(secret))) throw new Error("Preservation content contains credential material.");
+      validatedBlobs.add(object);
+    }
+  };
   try {
-    await runGitAsRunner(input.workspacePath, ["push", "origin", `HEAD:refs/heads/${input.branch}`], "preserving the attempt branch");
-    return { ...input, commitSha, pushed: true, pushFailure: undefined };
+    if (entry.branch !== input.branch) throw new Error("Preservation workspace is no longer on the expected attempt branch.");
+    const message = await runGit(input.workspacePath, ["log", "-1", "--format=%B", commitSha], "reading preserved commit message");
+    await validateSecrets(commitSha, message);
   } catch (error) {
-    const report = error instanceof Error ? error.message : String(error);
-    return { ...input, commitSha, pushed: false, pushFailure: redactSecrets(input.secrets, report).slice(0, 240) };
+    return { ...facts, commitSha, captureComplete: false, captureFailure: diagnostic(error), pushed: false, pushFailure: "Preservation push withheld because the committed workspace could not be validated." };
+  }
+  try {
+    const unmerged = await runGit(input.workspacePath, ["ls-files", "--unmerged", "-z"], "inspecting preservation conflicts");
+    if (unmerged.length > 0) throw new Error("Unresolved merge conflicts prevent capturing unfinished work; only the last committed HEAD is preserved remotely.");
+    const dirty = (await runGit(input.workspacePath, ["status", "--porcelain", "--untracked-files=all"], "inspecting unfinished preservation work")).trim();
+    if (dirty.length > 0) {
+      const message = "chore: preserve unfinished factory work";
+      await runGit(input.workspacePath, ["add", "--all"], "staging unfinished preservation work");
+      const tree = (await runGit(input.workspacePath, ["write-tree"], "reading preservation tree")).trim();
+      await validateSecrets(tree, message);
+      const beforeCommit = await snapshotHeadAndBranch(input.workspacePath);
+      if (beforeCommit.branch !== input.branch || beforeCommit.head !== entry.head) throw new Error("Preservation workspace branch or HEAD changed during capture.");
+      const parentTree = (await runGit(input.workspacePath, ["rev-parse", `${entry.head}^{tree}`], "reading preserved parent tree")).trim();
+      if (tree !== parentTree) {
+        await runGitAsRunner(input.workspacePath, ["commit", "-m", message], "committing unfinished preservation work");
+        const after = await snapshotHeadAndBranch(input.workspacePath);
+        if (after.branch !== input.branch) throw new Error("Preservation commit changed the attempt branch.");
+        const parents = (await runGit(input.workspacePath, ["rev-list", "--parents", "-n", "1", after.head], "verifying preservation commit parents")).trim().split(" ");
+        if (parents.length !== 2 || parents[1] !== entry.head) throw new Error("Preservation commit does not have the expected single parent.");
+        const committedTree = (await runGit(input.workspacePath, ["rev-parse", `${after.head}^{tree}`], "verifying preservation commit tree")).trim();
+        if (committedTree !== tree) throw new Error("Preservation commit differs from the validated tree.");
+        commitSha = after.head;
+      }
+    }
+    await requireCleanRepository(input.workspacePath, "Preservation capture");
+    const captured = await snapshotHeadAndBranch(input.workspacePath);
+    if (captured.branch !== input.branch || captured.head !== commitSha) throw new Error("Preservation workspace branch or HEAD changed before capture completed.");
+    captureComplete = true;
+  } catch (error) {
+    captureFailure = diagnostic(error);
+  }
+  try {
+    await runGitAsRunner(input.workspacePath, ["push", "origin", `${commitSha}:refs/heads/${input.branch}`], "preserving the attempt branch");
+    return { ...facts, commitSha, captureComplete, captureFailure, pushed: true, pushFailure: undefined };
+  } catch (error) {
+    return { ...facts, commitSha, captureComplete, captureFailure, pushed: false, pushFailure: diagnostic(error) };
   }
 }
 

@@ -36,6 +36,8 @@ export interface PublishPullRequestInput {
   /** Aggregate credential material of every configured provider; pull-request content carrying any of it is rejected. */
   readonly forbiddenSecrets: readonly string[];
   readonly onContentComplete: (head: string, logReference: string) => Promise<void>;
+  /** Persist exact remote identity and content before each publication push. */
+  readonly onPublicationIntent?: (facts: Readonly<{ head: string; sourceSha: string; title: string; body: string }>) => Promise<void>;
   readonly delivery?: Readonly<{
     included: readonly Readonly<{ id: string; title: string }>[];
     retryable: readonly Readonly<{ id: string; reason: string }>[];
@@ -114,6 +116,19 @@ export async function publishPullRequest(input: PublishPullRequestInput): Promis
     throw new PublicationError("final SHA", error);
   }
   let extendTracked = false;
+  const evidence = input.delivery === undefined ? "" : [
+    "",
+    "## Factory delivery",
+    `Included: ${input.delivery.included.map((ticket) => `${ticket.id} (${ticket.title})`).join(", ") || "none"}`,
+    `Retryable: ${input.delivery.retryable.map((ticket) => `${ticket.id} — ${ticket.reason}`).join("; ") || "none"}`,
+    `Blocked: ${input.delivery.blocked.map((ticket) => `${ticket.id} — ${ticket.reason}`).join("; ") || "none"}`,
+    `Integration-excluded: ${input.delivery.integrationExcluded.map((ticket) => `${ticket.id} — ${ticket.reason}`).join("; ") || "none"}`,
+    "Conflict resolutions:",
+    ...(input.delivery.conflicts.length === 0 ? ["- none"] : input.delivery.conflicts.map((conflict) => `- ${conflict.path}: ${conflict.disposition}`)),
+  ].join("\n");
+  const suffix = `${evidence}${input.gitProvider.mergeStrategySupport === "unsupported" ? squashNote : ""}`;
+  if (suffix.length > MAX_BODY_CHARS) throw new PublicationError("pull-request content", new Error(`Runner-owned delivery evidence exceeds the ${MAX_BODY_CHARS}-character pull-request body limit.`));
+  const body = `${content.body.slice(0, MAX_BODY_CHARS - suffix.length)}${suffix}`;
 
   await input.authorize?.(`pushing branch ${input.branch} for ticket ${input.ticket.id}`);
   try {
@@ -129,6 +144,7 @@ export async function publishPullRequest(input: PublishPullRequestInput): Promis
         && current.body === input.trackedPublication.body
         && current.squashPreference === input.gitProvider.mergeStrategySupport;
     }
+    await input.onPublicationIntent?.({ head: extendTracked ? input.trackedPublication!.head : input.branch, sourceSha: finalSha, title: content.title, body });
     await runGit(
       input.workspacePath,
       extendTracked ? ["push", "origin", `HEAD:${input.trackedPublication!.head}`] : ["push", "--set-upstream", "origin", input.branch],
@@ -140,19 +156,6 @@ export async function publishPullRequest(input: PublishPullRequestInput): Promis
 
   await input.authorize?.(`publishing the draft pull request for ticket ${input.ticket.id}`);
   try {
-    const evidence = input.delivery === undefined ? "" : [
-      "",
-      "## Factory delivery",
-      `Included: ${input.delivery.included.map((ticket) => `${ticket.id} (${ticket.title})`).join(", ") || "none"}`,
-      `Retryable: ${input.delivery.retryable.map((ticket) => `${ticket.id} — ${ticket.reason}`).join("; ") || "none"}`,
-      `Blocked: ${input.delivery.blocked.map((ticket) => `${ticket.id} — ${ticket.reason}`).join("; ") || "none"}`,
-      `Integration-excluded: ${input.delivery.integrationExcluded.map((ticket) => `${ticket.id} — ${ticket.reason}`).join("; ") || "none"}`,
-      "Conflict resolutions:",
-      ...(input.delivery.conflicts.length === 0 ? ["- none"] : input.delivery.conflicts.map((conflict) => `- ${conflict.path}: ${conflict.disposition}`)),
-    ].join("\n");
-    const suffix = `${evidence}${input.gitProvider.mergeStrategySupport === "unsupported" ? squashNote : ""}`;
-    if (suffix.length > MAX_BODY_CHARS) throw new Error(`Runner-owned delivery evidence exceeds the ${MAX_BODY_CHARS}-character pull-request body limit.`);
-    const body = `${content.body.slice(0, MAX_BODY_CHARS - suffix.length)}${suffix}`;
     if (extendTracked && input.trackedPublication !== undefined && input.gitProvider.updateDraftPullRequest !== undefined && input.gitProvider.getPullRequest !== undefined) {
       try {
         const pullRequest = await input.gitProvider.updateDraftPullRequest({
@@ -174,7 +177,10 @@ export async function publishPullRequest(input: PublishPullRequestInput): Promis
           const pullRequest = { number: reconciled.number, url: reconciled.url, squashPreference: reconciled.squashPreference };
           return { finalSha, pullRequest, squashPreference: pullRequest.squashPreference, head: input.trackedPublication.head, title: content.title, body };
         }
+        await input.authorize?.(`pushing fallback branch ${input.branch} for ticket ${input.ticket.id}`);
+        await input.onPublicationIntent?.({ head: input.branch, sourceSha: finalSha, title: content.title, body });
         await runGit(input.workspacePath, ["push", "--set-upstream", "origin", input.branch], "pushing fresh fallback branch after pull-request update failure");
+        await input.authorize?.(`publishing fallback draft for ticket ${input.ticket.id}`);
         const fallback = await input.gitProvider.createDraftPullRequest({
           repositoryUrl: input.ticket.repository,
           head: input.branch,

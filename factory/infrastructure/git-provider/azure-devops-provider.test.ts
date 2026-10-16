@@ -306,12 +306,14 @@ test("findPullRequest matches the exact open draft via api-version 7.1 with enco
     mergeMethod: "unknown",
     mergeCommitSha: undefined,
   });
-  assert.equal(seam.calls[0]!.url, "https://dev.azure.com/Contoso%20Team/Web%20App/_apis/git/repositories/fix-login/pullrequests?searchCriteria/status=all&api-version=7.1");
+  assert.equal(new URL(seam.calls[0]!.url).searchParams.get("searchCriteria.status"), "all");
+  assert.equal(new URL(seam.calls[0]!.url).pathname, "/Contoso%20Team/Web%20App/_apis/git/repositories/fix-login/pullrequests");
+  assert.equal(new URL(seam.calls[0]!.url).searchParams.get("api-version"), "7.1");
   assert.deepEqual((seam.calls[0]!.init.headers as Record<string, string>).Authorization, `Basic ${basicAuth}`);
 });
 
 test("the same findPullRequest lookup discovers merged and closed pull requests with their merge facts", async () => {
-  const merged = await new AzureDevOpsProvider(pat, recordingFetch(200, "OK", JSON.stringify({ value: [pullRecord({ status: "completed", mergeCommitId: "b".repeat(40), completionOptions: { mergeStrategy: "squash" } })] })).fetch)
+  const merged = await new AzureDevOpsProvider(pat, recordingFetch(200, "OK", JSON.stringify({ value: [pullRecord({ status: "completed", lastMergeCommit: { commitId: "b".repeat(40) }, completionOptions: { mergeStrategy: "squash" } })] })).fetch)
     .findPullRequest({ repository: request.repositoryUrl, head: request.head, base: request.base });
   assert.equal(merged?.state, "merged");
   assert.equal(merged?.mergeCommitSha, "b".repeat(40));

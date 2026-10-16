@@ -8,6 +8,7 @@ import { commitStage, type StageCommitInput } from "./stage-commit.js";
 
 const BRANCH = "agent-tickets/fix-login-1a2b3c";
 const SECRET = "ghp_supersecrettoken";
+const BACKLOG_SECRET = "ghp_private_backlog_credential";
 
 
 function git(cwd: string, args: string[], operation?: string): Promise<string> {
@@ -93,7 +94,7 @@ test("checkpoint rejects credential material before writing the message to Git",
   await writeFile(join(path, "login.ts"), "export const redirect = true;\n");
 
   await assert.rejects(
-    commitStage(input(path, entryHead, { message: `fix(login): redirect using token ${SECRET}` })),
+    commitStage(input(path, entryHead, { message: `fix(login): redirect using token ${BACKLOG_SECRET}`, forbiddenSecrets: [SECRET, BACKLOG_SECRET] })),
     /checkpoint message contains provider credential material/,
   );
   assert.equal((await git(path, ["rev-parse", "HEAD"], "reading HEAD commit")).trim(), entryHead);

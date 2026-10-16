@@ -22,8 +22,34 @@ test("dependency graph keeps missing references blocked without invalidating unr
   assert.deepEqual(graph.readyTicketIds(new Set()), ["ready"]);
 });
 
-test("dependency graph rejects duplicate IDs, cycles, and incompatible edges", () => {
+test("dependency graph rejects duplicate IDs", () => {
   assert.throws(() => buildDependencyGraph([ticket("a"), ticket("a")]), /Duplicate ticket ID a/);
-  assert.throws(() => buildDependencyGraph([ticket("a", ["b"]), ticket("b", ["a"])]), /cycle.*a.*b/i);
-  assert.throws(() => buildDependencyGraph([ticket("a"), ticket("b", ["a"], "git@github.com:acme/other.git")]), /repository\/base branch/i);
+});
+
+test("cycles and incompatible edges block only their own dependency chains", () => {
+  const graph = buildDependencyGraph([
+    ticket("a", ["b"]),
+    ticket("b", ["a"]),
+    ticket("cycle-child", ["a"]),
+    ticket("parent"),
+    ticket("wrong-repository", ["parent"], "git@github.com:acme/other.git"),
+    ticket("wrong-base", ["parent"], undefined, "release"),
+    ticket("ready"),
+  ]);
+  assert.match(graph.invalidDependencies.get("a")!, /cycle.*a.*b/i);
+  assert.match(graph.invalidDependencies.get("b")!, /cycle.*a.*b/i);
+  assert.match(graph.invalidDependencies.get("wrong-repository")!, /repository\/base branch/i);
+  assert.match(graph.invalidDependencies.get("wrong-base")!, /repository\/base branch/i);
+  assert.equal(graph.invalidDependencies.has("parent"), false);
+  assert.equal(graph.invalidDependencies.has("ready"), false);
+  assert.deepEqual(graph.readyTicketIds(new Set()), ["parent", "ready"]);
+  assert.deepEqual(graph.readyTicketIds(new Set(["parent"])), ["ready"]);
+});
+
+test("a merged parent absent from discovery satisfies a new child's dependency", () => {
+  const graph = buildDependencyGraph([ticket("child", ["merged"]), ticket("grandchild", ["child"])], new Set(["merged"]));
+  assert.deepEqual([...graph.missingDependencies], []);
+  assert.deepEqual([...graph.invalidDependencies], []);
+  assert.deepEqual(graph.readyTicketIds(new Set()), ["child"]);
+  assert.deepEqual(graph.readyTicketIds(new Set(["child"])), ["grandchild"]);
 });

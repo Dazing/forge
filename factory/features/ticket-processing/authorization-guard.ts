@@ -1,4 +1,4 @@
-import { parseAuthoredIssueSnapshot, type BacklogStatusName, type IssueIdentity } from "../tickets/index.js";
+import { parseAuthoredIssueSnapshot, TicketMetadataError, type BacklogStatusName, type IssueIdentity } from "../tickets/index.js";
 import type { GitHubBacklog } from "../../infrastructure/github-backlog/index.js";
 import type { GitProviderRegistry } from "../../infrastructure/git-provider/git-provider.js";
 
@@ -40,7 +40,12 @@ export function createIssueAuthorizationReader(input: Readonly<{ backlog: GitHub
     const item = await input.backlog.findProjectItem(identity.nodeId);
     const status = item?.status?.name as BacklogStatusName | undefined;
     if (issue.state !== "open") return { open: false, status, requirementsHash: undefined };
-    return { open: true, status, requirementsHash: parseAuthoredIssueSnapshot(identity, issue.body, input.providers).ticket.requirementsHash };
+    try {
+      return { open: true, status, requirementsHash: parseAuthoredIssueSnapshot(identity, issue.body, input.providers).ticket.requirementsHash };
+    } catch (error) {
+      if (!(error instanceof TicketMetadataError)) throw error;
+      return { open: true, status, requirementsHash: undefined };
+    }
   };
 }
 

@@ -11,6 +11,7 @@ import type { AgentRunRequest, AgentRunResult, AgentRunner } from "../../infrast
 
 import { processTickets, type ProcessConfig } from "./index.js";
 import { BacklogWorkflow } from "./backlog-workflow.js";
+import { createIssueAuthorizationReader } from "./authorization-guard.js";
 import { PublicationLedger } from "./publication-ledger.js";
 import { TEST_GITHUB_TOKEN, TestBacklog } from "./test-backlog.js";
 
@@ -31,7 +32,7 @@ async function daemonConfig(factoryRoot: string, backlog: TestBacklog, runAgent:
     logger: await InvocationLogger.create(factoryRoot, [...providers.secrets, ...backlog.secrets]),
     providers,
     backlog,
-    workflow: new BacklogWorkflow(backlog, ledger),
+    workflow: new BacklogWorkflow(backlog, ledger, undefined, undefined, createIssueAuthorizationReader({ backlog, providers })),
     ledger,
     runAgent,
     maxParallel: 1,

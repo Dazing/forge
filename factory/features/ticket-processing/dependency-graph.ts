@@ -12,10 +12,11 @@ export type DependencyGraph = Readonly<{
   tickets: ReadonlyMap<string, Ticket>;
   groups: readonly DeliveryGroup[];
   missingDependencies: ReadonlyMap<string, readonly string[]>;
+  invalidDependencies: ReadonlyMap<string, string>;
   readyTicketIds(completed: ReadonlySet<string>, excluded?: ReadonlySet<string>): string[];
 }>;
 
-export function buildDependencyGraph(tickets: readonly Ticket[]): DependencyGraph {
+export function buildDependencyGraph(tickets: readonly Ticket[], satisfied: ReadonlySet<string> = new Set()): DependencyGraph {
   const byId = new Map<string, Ticket>();
   for (const ticket of tickets) {
     if (byId.has(ticket.id)) throw new Error(`Duplicate ticket ID ${ticket.id}.`);
@@ -23,15 +24,16 @@ export function buildDependencyGraph(tickets: readonly Ticket[]): DependencyGrap
   }
 
   const missingDependencies = new Map<string, readonly string[]>();
+  const invalidDependencies = new Map<string, string>();
   const dependents = new Map<string, string[]>();
   for (const ticket of tickets) {
-    const missing = ticket.dependsOnTickets.filter((dependencyId) => !byId.has(dependencyId));
+    const missing = ticket.dependsOnTickets.filter((dependencyId) => !byId.has(dependencyId) && !satisfied.has(dependencyId));
     if (missing.length > 0) missingDependencies.set(ticket.id, missing);
     for (const dependencyId of ticket.dependsOnTickets) {
       const dependency = byId.get(dependencyId);
       if (dependency === undefined) continue;
       if (dependency.repository !== ticket.repository || dependency.baseBranch !== ticket.baseBranch) {
-        throw new Error(`Ticket ${ticket.id} dependency ${dependencyId} has an incompatible repository/base branch edge.`);
+        invalidDependencies.set(ticket.id, `Ticket ${ticket.id} dependency ${dependencyId} has an incompatible repository/base branch edge.`);
       }
       const children = dependents.get(dependencyId) ?? [];
       children.push(ticket.id);
@@ -43,7 +45,11 @@ export function buildDependencyGraph(tickets: readonly Ticket[]): DependencyGrap
   const visited = new Set<string>();
   const visit = (ticketId: string): void => {
     const cycleAt = visiting.indexOf(ticketId);
-    if (cycleAt >= 0) throw new Error(`Ticket dependency cycle: ${[...visiting.slice(cycleAt), ticketId].join(" -> ")}.`);
+    if (cycleAt >= 0) {
+      const cycle = [...visiting.slice(cycleAt), ticketId];
+      for (const id of cycle) invalidDependencies.set(id, `Ticket dependency cycle: ${cycle.join(" -> ")}.`);
+      return;
+    }
     if (visited.has(ticketId)) return;
     visiting.push(ticketId);
     for (const dependencyId of byId.get(ticketId)?.dependsOnTickets ?? []) {
@@ -86,12 +92,14 @@ export function buildDependencyGraph(tickets: readonly Ticket[]): DependencyGrap
     tickets: byId,
     groups,
     missingDependencies,
+    invalidDependencies,
     readyTicketIds(completed, excluded = new Set()) {
       return [...byId.values()]
         .filter((ticket) => !completed.has(ticket.id)
           && !excluded.has(ticket.id)
           && !missingDependencies.has(ticket.id)
-          && ticket.dependsOnTickets.every((dependencyId) => completed.has(dependencyId)))
+          && !invalidDependencies.has(ticket.id)
+          && ticket.dependsOnTickets.every((dependencyId) => completed.has(dependencyId) || satisfied.has(dependencyId)))
         .map((ticket) => ticket.id)
         .sort();
     },

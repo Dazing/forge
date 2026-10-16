@@ -51,7 +51,6 @@ const pullListSchema = z.object({
     creationDate: z.string(),
     lastMergeSourceCommit: z.object({ commitId: z.string() }),
     lastMergeCommit: z.object({ commitId: z.string() }).optional(),
-    mergeCommitId: z.string().optional(),
     completionOptions: z.object({ mergeStrategy: z.string().optional() }).optional(),
   })).default([]),
 });
@@ -256,14 +255,14 @@ export class AzureDevOpsProvider implements GitProvider {
     };
   }
 
-  /** Exact-match restart lookup over the pull-request list with `searchCriteria/status=all` so closed and abandoned pull requests remain discoverable; newest match wins. */
+  /** Exact-match restart lookup including completed and abandoned pull requests; newest match wins. */
   async findPullRequest(ref: PullRequestRef): Promise<PullRequestRecord | undefined> {
     const ssh = azureSshUrl.exec(ref.repository);
     if (!ssh) throw new Error(`Repository must be a git@ssh.dev.azure.com:v3/<organization>/<project>/<repository> SSH URL; got ${ref.repository}.`);
     const organization = encodeURIComponent(ssh[1]!);
     const project = encodeURIComponent(ssh[2]!);
     const repository = encodeURIComponent(ssh[3]!);
-    const path = `/${organization}/${project}/_apis/git/repositories/${repository}/pullrequests?searchCriteria/status=all&api-version=7.1`;
+    const path = `/${organization}/${project}/_apis/git/repositories/${repository}/pullrequests?searchCriteria.status=all&api-version=7.1`;
     const displayCommand = `GET ${API_BASE}${path}`;
     const encodedPat = Buffer.from(`:${this.credential}`, "utf8").toString("base64");
     let response: Response;
@@ -303,7 +302,7 @@ export class AzureDevOpsProvider implements GitProvider {
       draft: newest.isDraft,
       state,
       mergeMethod: MERGE_METHOD_BY_STRATEGY[newest.completionOptions?.mergeStrategy ?? ""] ?? "unknown",
-      mergeCommitSha: state === "merged" ? newest.mergeCommitId : undefined,
+      mergeCommitSha: state === "merged" ? newest.lastMergeCommit?.commitId : undefined,
     };
   }
 
