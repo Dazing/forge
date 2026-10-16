@@ -1,12 +1,25 @@
 import { z } from "zod";
 import { CommandFailedError } from "./git.js";
-import { redactSecret } from "../../shared/redact-secret.js";
-import type { DraftPullRequest, DraftPullRequestRequest, Fetch, GitProvider, PullRequestDetails, UpdateDraftPullRequestRequest } from "./git-provider.js";
+import { redactSecrets } from "../../shared/redact-secret.js";
+import type { DraftPullRequest, DraftPullRequestRequest, Fetch, GitProvider, PullRequestDetails, PullRequestRecord, PullRequestRef, PullRequestState, UpdateDraftPullRequestRequest } from "./git-provider.js";
 
 // GitHub draft pull-request creation through the REST API, split from orchestration.
 
 const API_BASE = "https://api.github.com";
+
 const githubSshUrl = /^git@github\.com:([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\.git$/;
+
+/** Canonical `git@github.com:<owner>/<repository>.git` SSH form, shared by the adapter and the provider registry. */
+export function isGitHubRepositoryUrl(repositoryUrl: string): boolean {
+  return githubSshUrl.test(repositoryUrl);
+}
+
+/** Browser-facing link to one branch of a canonical GitHub repository, in the web UI's tree form. */
+export function githubBranchUrl(repositoryUrl: string, branch: string): string | undefined {
+  const match = githubSshUrl.exec(repositoryUrl);
+  if (match === null) return undefined;
+  return `https://github.com/${match[1]}/${match[2]}/tree/${branch.split("/").map(encodeURIComponent).join("/")}`;
+}
 
 const pullResponseSchema = z.object({
   number: z.number().int(),
@@ -24,6 +37,19 @@ const pullDetailsSchema = z.object({
   head: z.object({ ref: z.string(), sha: z.string() }),
   base: z.object({ ref: z.string() }),
 });
+const pullListItemSchema = z.array(z.object({
+  number: z.number().int(),
+  html_url: z.string().url().min(1),
+  state: z.enum(["open", "closed"]),
+  draft: z.boolean(),
+  merged_at: z.string().nullable().optional(),
+  merge_commit_sha: z.string().nullable().optional(),
+  title: z.string(),
+  body: z.string().nullable(),
+  created_at: z.string(),
+  head: z.object({ ref: z.string(), sha: z.string() }),
+  base: z.object({ ref: z.string() }),
+}));
 
 
 /** GitHub provider: canonical `git@github.com:<owner>/<repository>.git` SSH URLs and the GitHub REST pulls endpoint. */
@@ -44,7 +70,7 @@ export class GitHubProvider implements GitProvider {
 
   /** Require the exact GitHub SSH form; HTTPS, GitHub Enterprise, ssh://, and missing `.git` are rejected. */
   validateRepository(repositoryUrl: string): void {
-    if (!githubSshUrl.test(repositoryUrl)) {
+    if (!isGitHubRepositoryUrl(repositoryUrl)) {
       throw new Error(`Repository must be a git@github.com:<owner>/<repository>.git SSH URL; got ${repositoryUrl}.`);
     }
   }
@@ -85,7 +111,7 @@ export class GitHubProvider implements GitProvider {
           command: displayCommand,
           exitCode: 1,
           stdout: "",
-          stderr: redactSecret(this.credential, error instanceof Error ? error.message : String(error)),
+          stderr: redactSecrets(this.secrets(), error instanceof Error ? error.message : String(error)),
         },
         error instanceof Error ? error : new Error(String(error)),
       );
@@ -98,7 +124,7 @@ export class GitHubProvider implements GitProvider {
           operation: "creating draft pull request",
           command: displayCommand,
           exitCode,
-          stdout: redactSecret(this.credential, text),
+          stdout: redactSecrets(this.secrets(), text),
           stderr: `HTTP ${response.status} ${response.statusText}`,
         },
         cause,
@@ -125,16 +151,16 @@ export class GitHubProvider implements GitProvider {
       method: "GET",
       headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.credential}`, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "sandcastle-runner" },
     }).catch((error: unknown) => {
-      throw new CommandFailedError({ operation: "reading pull request", command: `GET ${API_BASE}${path}`, exitCode: 1, stdout: "", stderr: redactSecret(this.credential, error instanceof Error ? error.message : String(error)) }, error instanceof Error ? error : new Error(String(error)));
+      throw new CommandFailedError({ operation: "reading pull request", command: `GET ${API_BASE}${path}`, exitCode: 1, stdout: "", stderr: redactSecrets(this.secrets(), error instanceof Error ? error.message : String(error)) }, error instanceof Error ? error : new Error(String(error)));
     });
     const text = await response.text();
     if (response.status === 404) return undefined;
-    if (!response.ok) throw new CommandFailedError({ operation: "reading pull request", command: `GET ${API_BASE}${path}`, exitCode: response.status, stdout: redactSecret(this.credential, text), stderr: `HTTP ${response.status} ${response.statusText}` }, new Error(`GitHub pull-request lookup failed with HTTP ${response.status}.`));
+    if (!response.ok) throw new CommandFailedError({ operation: "reading pull request", command: `GET ${API_BASE}${path}`, exitCode: response.status, stdout: redactSecrets(this.secrets(), text), stderr: `HTTP ${response.status} ${response.statusText}` }, new Error(`GitHub pull-request lookup failed with HTTP ${response.status}.`));
     let parsed: z.infer<typeof pullDetailsSchema>;
     try {
       parsed = pullDetailsSchema.parse(JSON.parse(text));
     } catch (error) {
-      throw new CommandFailedError({ operation: "reading pull request", command: `GET ${API_BASE}${path}`, exitCode: response.status, stdout: redactSecret(this.credential, text), stderr: "Malformed GitHub pull-request response." }, error instanceof Error ? error : new Error(String(error)));
+      throw new CommandFailedError({ operation: "reading pull request", command: `GET ${API_BASE}${path}`, exitCode: response.status, stdout: redactSecrets(this.secrets(), text), stderr: "Malformed GitHub pull-request response." }, error instanceof Error ? error : new Error(String(error)));
     }
     return {
       number: parsed.number,
@@ -148,6 +174,55 @@ export class GitHubProvider implements GitProvider {
       body: parsed.body ?? "",
       squashPreference: "unsupported",
       ...(parsed.merge_commit_sha ? { mergeResultSha: parsed.merge_commit_sha } : {}),
+    };
+  }
+
+  /** Exact-match restart lookup over the pulls list with `state=all` so closed and merged pull requests remain discoverable; newest match wins. */
+  async findPullRequest(ref: PullRequestRef): Promise<PullRequestRecord | undefined> {
+    const ssh = githubSshUrl.exec(ref.repository);
+    if (!ssh) throw new Error(`Repository must be a git@github.com:<owner>/<repository>.git SSH URL; got ${ref.repository}.`);
+    const path = `/repos/${ssh[1]}/${ssh[2]}/pulls?state=all&base=${encodeURIComponent(ref.base)}&head=${encodeURIComponent(`${ssh[1]}:${ref.head}`)}&per_page=100`;
+    const displayCommand = `GET ${API_BASE}${path}`;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${API_BASE}${path}`, {
+        method: "GET",
+        headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${this.credential}`, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "sandcastle-runner" },
+      });
+    } catch (error) {
+      throw new CommandFailedError({ operation: "finding pull request", command: displayCommand, exitCode: 1, stdout: "", stderr: redactSecrets(this.secrets(), error instanceof Error ? error.message : String(error)) }, error instanceof Error ? error : new Error(String(error)));
+    }
+    const text = await response.text();
+    const failure = (cause: Error): CommandFailedError =>
+      new CommandFailedError({ operation: "finding pull request", command: displayCommand, exitCode: response.status, stdout: redactSecrets(this.secrets(), text), stderr: `HTTP ${response.status} ${response.statusText}` }, cause);
+    if (response.status === 404) return undefined;
+    if (!response.ok) throw failure(new Error(`GitHub pull-request lookup failed with HTTP ${response.status}.`));
+    let items: z.infer<typeof pullListItemSchema>;
+    try {
+      items = pullListItemSchema.parse(JSON.parse(text));
+    } catch (error) {
+      throw failure(new Error(`GitHub pull-request list is missing valid entries: ${error instanceof Error ? error.message : String(error)}`));
+    }
+    const newest = items
+      .filter((item) => item.head.ref === ref.head && item.base.ref === ref.base && (ref.sourceSha === undefined || item.head.sha === ref.sourceSha))
+      .sort((left, right) => right.created_at.localeCompare(left.created_at))[0];
+    if (newest === undefined) return undefined;
+    const state: PullRequestState = newest.merged_at !== null && newest.merged_at !== undefined ? "merged" : newest.state;
+    return {
+      provider: this.name,
+      repository: ref.repository,
+      number: newest.number,
+      url: newest.html_url,
+      baseBranch: newest.base.ref,
+      headBranch: newest.head.ref,
+      sourceSha: newest.head.sha,
+      title: newest.title,
+      body: newest.body ?? "",
+      draft: newest.draft,
+      state,
+      // GitHub REST exposes no per-pull-request merge method; the repository setting is never readable per PR.
+      mergeMethod: "unknown",
+      mergeCommitSha: state === "merged" ? newest.merge_commit_sha ?? undefined : undefined,
     };
   }
 
@@ -166,7 +241,7 @@ export class GitHubProvider implements GitProvider {
       body: JSON.stringify({ title: request.title, body: request.body, base: request.base }),
     });
     const text = await response.text();
-    if (!response.ok) throw new CommandFailedError({ operation: "updating draft pull request", command: `PATCH ${API_BASE}${path}`, exitCode: response.status, stdout: redactSecret(this.credential, text), stderr: `HTTP ${response.status} ${response.statusText}` }, new Error(`GitHub rejected pull-request update with HTTP ${response.status}.`));
+    if (!response.ok) throw new CommandFailedError({ operation: "updating draft pull request", command: `PATCH ${API_BASE}${path}`, exitCode: response.status, stdout: redactSecrets(this.secrets(), text), stderr: `HTTP ${response.status} ${response.statusText}` }, new Error(`GitHub rejected pull-request update with HTTP ${response.status}.`));
     const parsed = pullResponseSchema.parse(JSON.parse(text));
     return { number: parsed.number, url: parsed.html_url, squashPreference: "unsupported" };
   }

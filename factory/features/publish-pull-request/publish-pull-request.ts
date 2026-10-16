@@ -33,7 +33,8 @@ export interface PublishPullRequestInput {
   readonly harness: AgentHarness;
   readonly runAgent: AgentRunner;
   readonly gitProvider: GitProvider;
-  /** Record verified read-only content at its entry SHA before any publication side effects. */
+  /** Aggregate credential material of every configured provider; pull-request content carrying any of it is rejected. */
+  readonly forbiddenSecrets: readonly string[];
   readonly onContentComplete: (head: string, logReference: string) => Promise<void>;
   readonly delivery?: Readonly<{
     included: readonly Readonly<{ id: string; title: string }>[];
@@ -49,6 +50,8 @@ export interface PublishPullRequestInput {
     title: string;
     body: string;
   }>;
+  /** Called before the push and before the provider write; throws when the authority that authorized this work has withdrawn it. */
+  authorize?: (stage: string) => Promise<void>;
 }
 
 export interface PublishResult {
@@ -77,7 +80,7 @@ export async function publishPullRequest(input: PublishPullRequestInput): Promis
     });
     content = result.handoff;
     contentReference = result.logReference;
-    if (input.gitProvider.secrets().some((secret) => secret.length > 0 && (content.title.includes(secret) || content.body.includes(secret)))) {
+    if (input.forbiddenSecrets.some((secret) => secret.length > 0 && (content.title.includes(secret) || content.body.includes(secret)))) {
       throw new Error("pull-request content contains provider credential material.");
     }
     requireUnchanged("pull-request content stage", "ticket workspace", beforeContent, await snapshotRepository(input.workspacePath));
@@ -112,6 +115,7 @@ export async function publishPullRequest(input: PublishPullRequestInput): Promis
   }
   let extendTracked = false;
 
+  await input.authorize?.(`pushing branch ${input.branch} for ticket ${input.ticket.id}`);
   try {
     if (input.trackedPublication !== undefined && input.gitProvider.getPullRequest !== undefined && input.gitProvider.updateDraftPullRequest !== undefined) {
       const current = await input.gitProvider.getPullRequest(input.ticket.repository, input.trackedPublication.number);
@@ -134,6 +138,7 @@ export async function publishPullRequest(input: PublishPullRequestInput): Promis
     throw new PublicationError("push", error);
   }
 
+  await input.authorize?.(`publishing the draft pull request for ticket ${input.ticket.id}`);
   try {
     const evidence = input.delivery === undefined ? "" : [
       "",

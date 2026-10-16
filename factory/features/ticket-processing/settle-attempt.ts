@@ -1,21 +1,17 @@
-import { resolve } from "node:path";
 import { toCommandFailure } from "../../infrastructure/git-provider/git.js";
-import { annotateFailure, moveTicket, type Ticket } from "../tickets/index.js";
+import type { Ticket } from "../tickets/index.js";
 import type { ProcessConfig } from "./process-config.js";
 import type { MainLogRecord } from "../../infrastructure/logging/invocation-log.js";
-import { redactSecret } from "../../shared/redact-secret.js";
+import { redactSecrets } from "../../shared/redact-secret.js";
 
-// Guarded metadata and publication settlement diagnostics; no recursive retries.
+// Guarded settlement diagnostics; a failed record never changes an already settled outcome and never retries recursively.
 
 /** Logging failure must not prevent terminal settlement or change an already published outcome. */
 async function recordSettlement(config: ProcessConfig, record: MainLogRecord): Promise<void> {
   try {
     await config.logger.record(record);
   } catch (error) {
-    let diagnostic = JSON.stringify({ ...record, loggingError: error instanceof Error ? error.message : String(error) });
-    for (const secret of config.gitProvider.secrets()) {
-      diagnostic = redactSecret(secret, diagnostic);
-    }
+    const diagnostic = redactSecrets(config.providers.secrets, JSON.stringify({ ...record, loggingError: error instanceof Error ? error.message : String(error) }));
     console.error(diagnostic);
   }
 }
@@ -35,12 +31,23 @@ async function logSettlementFailure(config: ProcessConfig, ticket: Ticket, attem
   });
 }
 
+/** Record one backlog effect failure (issue comment, status, closure) in `main.log` without recursion. */
+export async function logBacklogFailure(config: ProcessConfig, ticketId: string, stage: string, error: unknown): Promise<void> {
+  const failure = toCommandFailure(error, stage);
+  await recordSettlement(config, {
+    timestamp: new Date().toISOString(),
+    ticketId,
+    stage,
+    operation: failure.operation,
+    status: "failed",
+    stdout: failure.stdout,
+    stderr: failure.stderr,
+  });
+}
+
 /** Record and surface one scheduling block without exposing provider credentials. */
 async function reportBlocked(config: ProcessConfig, ticket: Ticket, reason: string): Promise<void> {
-  let safeReason = reason;
-  for (const secret of config.gitProvider.secrets()) {
-    safeReason = redactSecret(secret, safeReason);
-  }
+  const safeReason = redactSecrets(config.providers.secrets, reason);
   await recordSettlement(config, {
     timestamp: new Date().toISOString(),
     ticketId: ticket.id,
@@ -51,25 +58,5 @@ async function reportBlocked(config: ProcessConfig, ticket: Ticket, reason: stri
   });
   console.error(`Ticket ${ticket.id} is blocked: ${safeReason}`);
 }
-
-/** Settle one unreadable ticket: record, annotate the failure, and move it to `failed/` so the poll continues. */
-export async function settleMetadataFailure(path: string, error: unknown, config: ProcessConfig): Promise<void> {
-  const timestamp = new Date().toISOString();
-  const failure = toCommandFailure(error, "ticket metadata");
-  await recordSettlement(config, { timestamp, stage: "ticket metadata", operation: "loading ticket", status: "failed", stdout: failure.stdout, stderr: failure.stderr });
-  try {
-    await annotateFailure(path, { timestamp, attemptId: "", stage: "ticket metadata", command: failure.command, exitCode: failure.exitCode, stdout: failure.stdout, stderr: failure.stderr, secret: config.gitProvider.credential });
-  } catch (annotationError) {
-    await recordSettlement(config, { timestamp, stage: "failure annotation", operation: "annotating failure", status: "failed", stderr: String(annotationError) });
-  }
-  try {
-    const destination = await moveTicket(path, resolve(config.ticketsDir, "failed"), "");
-    console.log(`Ticket ${path} failed metadata validation; moved to ${destination}.`);
-  } catch (movementError) {
-    await recordSettlement(config, { timestamp, stage: "terminal movement", operation: "moving ticket to failed directory", status: "failed", stderr: String(movementError) });
-    console.log(`Ticket ${path} failed metadata validation; movement to failed/ failed: ${String(movementError)}`);
-  }
-}
-
 
 export { logSettlementFailure, reportBlocked };

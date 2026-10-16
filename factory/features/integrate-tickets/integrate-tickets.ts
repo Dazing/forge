@@ -17,6 +17,8 @@ export interface IntegrateTicketsInput {
   readonly task: "resolve-and-review" | "combined-review";
   readonly harness: AgentHarness;
   readonly runAgent: AgentRunner;
+  /** Called before every repair run; throws when the authority that authorized this work has withdrawn it. */
+  authorize?: (stage: string) => Promise<void>;
 }
 
 export type IntegrateTicketsOutcome = Readonly<{
@@ -31,6 +33,7 @@ export async function integrateTickets(input: IntegrateTicketsInput): Promise<In
   if (await currentBranch(input.workspacePath) !== input.branch) throw new Error(`Integration workspace must remain on ${input.branch}.`);
   let lastFailure: unknown = new Error("integration agent produced no result");
   for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
+    await input.authorize?.(`integration run ${iteration} for group ${input.groupId}`);
     try {
       const result = await input.runAgent<IntegrateStageResult>({
         cwd: input.workspacePath,

@@ -144,3 +144,82 @@ test("reads and safely updates the exact unchanged open draft pull request", asy
   assert.deepEqual(calls.map((call) => call.init.method), ["GET", "GET", "PATCH"]);
   assert.deepEqual(JSON.parse(calls[2]!.init.body as string), { title: "Updated", body: "Updated body", base: "main" });
 });
+
+function pullItem(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    number: 7,
+    html_url: "https://github.com/acme/app/pull/7",
+    state: "open",
+    draft: true,
+    merged_at: null,
+    merge_commit_sha: null,
+    title: request.title,
+    body: request.body,
+    created_at: "2026-10-11T08:00:00Z",
+    head: { ref: request.head, sha: "a".repeat(40) },
+    base: { ref: request.base },
+    ...overrides,
+  };
+}
+
+test("findPullRequest matches the exact open draft and queries the pulls list with state=all", async () => {
+  const seam = recordingFetch(200, "OK", JSON.stringify([pullItem()]));
+  const found = await new GitHubProvider("gh_secret_abc", seam.fetch).findPullRequest({ repository: request.repositoryUrl, head: request.head, base: request.base, sourceSha: "a".repeat(40) });
+  assert.deepEqual(found, {
+    provider: "github",
+    repository: request.repositoryUrl,
+    number: 7,
+    url: "https://github.com/acme/app/pull/7",
+    baseBranch: "main",
+    headBranch: request.head,
+    sourceSha: "a".repeat(40),
+    title: request.title,
+    body: request.body,
+    draft: true,
+    state: "open",
+    mergeMethod: "unknown",
+    mergeCommitSha: undefined,
+  });
+  const url = new URL(seam.calls[0]!.url);
+  assert.equal(url.pathname, "/repos/acme/app/pulls");
+  assert.equal(url.searchParams.get("state"), "all", "closed and merged pull requests must stay discoverable after restart");
+  assert.equal(url.searchParams.get("base"), "main");
+  assert.equal(url.searchParams.get("head"), `acme:${request.head}`);
+  assert.equal(url.searchParams.get("per_page"), "100");
+});
+
+test("the same findPullRequest lookup discovers merged and closed pull requests, reporting the merge commit only when merged", async () => {
+  const merged = await new GitHubProvider("gh_secret_abc", recordingFetch(200, "OK", JSON.stringify([pullItem({ state: "closed", merged_at: "2026-10-12T08:00:00Z", merge_commit_sha: "b".repeat(40) })])).fetch)
+    .findPullRequest({ repository: request.repositoryUrl, head: request.head, base: request.base });
+  assert.equal(merged?.state, "merged");
+  assert.equal(merged?.mergeCommitSha, "b".repeat(40));
+  const closed = await new GitHubProvider("gh_secret_abc", recordingFetch(200, "OK", JSON.stringify([pullItem({ state: "closed" })])).fetch)
+    .findPullRequest({ repository: request.repositoryUrl, head: request.head, base: request.base });
+  assert.equal(closed?.state, "closed");
+  assert.equal(closed?.mergeCommitSha, undefined);
+});
+
+test("findPullRequest refuses a pull request whose head SHA differs from the required source SHA", async () => {
+  const seam = recordingFetch(200, "OK", JSON.stringify([pullItem({ head: { ref: request.head, sha: "c".repeat(40) } })]));
+  const found = await new GitHubProvider("gh_secret_abc", seam.fetch).findPullRequest({ repository: request.repositoryUrl, head: request.head, base: request.base, sourceSha: "a".repeat(40) });
+  assert.equal(found, undefined);
+});
+
+test("an empty pulls list and a missing repository resolve to no pull request", async () => {
+  const empty = await new GitHubProvider("gh_secret_abc", recordingFetch(200, "OK", "[]").fetch).findPullRequest({ repository: request.repositoryUrl, head: request.head, base: request.base });
+  assert.equal(empty, undefined);
+  const missing = await new GitHubProvider("gh_secret_abc", recordingFetch(404, "Not Found", '{"message":"Not Found"}').fetch).findPullRequest({ repository: request.repositoryUrl, head: request.head, base: request.base });
+  assert.equal(missing, undefined);
+});
+
+test("a findPullRequest HTTP failure is a structured failure with credentials redacted", async () => {
+  const providerWithFetch = new GitHubProvider("gh_secret_abc", recordingFetch(502, "Bad Gateway", "upstream rejected gh_secret_abc").fetch);
+  await assert.rejects(
+    providerWithFetch.findPullRequest({ repository: request.repositoryUrl, head: request.head, base: request.base }),
+    (error: unknown) => error instanceof CommandFailedError
+      && error.failure.exitCode === 502
+      && error.failure.stdout.includes("[redacted-token]")
+      && !error.failure.stdout.includes("gh_secret_abc")
+      && !JSON.stringify(error.failure).includes("gh_secret_abc"),
+  );
+});

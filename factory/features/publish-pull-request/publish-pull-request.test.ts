@@ -100,13 +100,14 @@ function providerStub(outcome: "ok" | "http-failure", support: "configured" | "u
       }
       return { number: 7, url: "https://github.com/acme/app/pull/7", squashPreference: support } satisfies DraftPullRequest;
     },
+    findPullRequest: async () => undefined,
     secrets: () => ["gh_secret_abc"],
   };
   return { provider, requests };
 }
 
-function input(workspacePath: string, runAgent: AgentRunner, gitProvider: GitProvider, onContentComplete: (head: string, logReference: string) => Promise<void> = async () => {}): PublishPullRequestInput {
-  return { ticket, workspacePath, branch: BRANCH, attemptId: "1", harness: "pi", runAgent, gitProvider, onContentComplete };
+function input(workspacePath: string, runAgent: AgentRunner, gitProvider: GitProvider, onContentComplete: (head: string, logReference: string) => Promise<void> = async () => {}, forbiddenSecrets: readonly string[] = gitProvider.secrets()): PublishPullRequestInput {
+  return { ticket, workspacePath, branch: BRANCH, attemptId: "1", harness: "pi", runAgent, gitProvider, forbiddenSecrets, onContentComplete };
 }
 
 test("publication pushes the branch and returns the final SHA, draft pull request, and squash preference", async () => {
@@ -200,6 +201,16 @@ test("content containing provider credential material fails before push or provi
   await assert.rejects(runCommand("git", ["-C", remote, "rev-parse", `refs/heads/${BRANCH}`], "reading pushed branch"));
 });
 
+test("the aggregate forbiddenSecrets, not the publishing provider's own secrets, drive credential rejection", async () => {
+  const workspace = await workspaceWithRemote();
+  const { provider, requests } = providerStub("ok");
+  const error = await publishPullRequest(input(workspace, contentAgent("Leaked vso_pat_secret_123"), provider, async () => {}, ["gh_secret_abc", "vso_pat_secret_123"])).catch((value) => value as PublicationError);
+  assert.ok(error instanceof PublicationError);
+  assert.equal(error.substage, "pull-request content");
+  assert.match(String(error.cause), /credential material/);
+  assert.equal(requests.length, 0);
+});
+
 test("a branch with no commits ahead of the base branch cannot publish", async () => {
   const root = await mkdtemp(join(tmpdir(), "sandcastle-publish-"));
   const remote = join(root, "remote.git");
@@ -259,4 +270,46 @@ test("an initial repository snapshot failure keeps the content substage and Git 
   });
   assert.equal(agentStarted, false);
   assert.deepEqual(requests, []);
+});
+
+test("withdrawn authorization stops publication before the push and before any provider write", async () => {
+  const workspace = await workspaceWithRemote();
+  const { provider, requests } = providerStub("ok");
+  const withdrawn = new Error("authorization withdrawn: its Project status is Blocked, not In progress");
+  const observed: string[] = [];
+  const content: string[] = [];
+  await assert.rejects(
+    publishPullRequest({
+      ...input(workspace, contentAgent(), provider, async () => { content.push("recorded"); }),
+      authorize: async (stage) => {
+        observed.push(stage);
+        throw withdrawn;
+      },
+    }),
+    (error: unknown) => error === withdrawn,
+  );
+  assert.deepEqual(observed, [`pushing branch ${BRANCH} for ticket ${ticket.id}`], "the push boundary is the first guarded side effect");
+  assert.deepEqual(requests, [], "no draft pull request is created");
+  assert.deepEqual(content, ["recorded"], "content completion is recorded before remote operations and is never rolled back");
+  const remote = join(workspace, "..", "remote.git");
+  await assert.rejects(runCommand("git", ["-C", remote, "rev-parse", `refs/heads/${BRANCH}`], "reading pushed branch"), "the branch is never pushed");
+});
+
+test("publication re-authorizes immediately before the provider write", async () => {
+  const workspace = await workspaceWithRemote();
+  const withdrawn = new Error("authorization withdrawn: its authored requirements changed");
+  const pushProvider = providerStub("ok");
+  const observed: string[] = [];
+  await assert.rejects(
+    publishPullRequest({
+      ...input(workspace, contentAgent(), pushProvider.provider),
+      authorize: async (stage) => {
+        observed.push(stage);
+        if (stage.startsWith("publishing")) throw withdrawn;
+      },
+    }),
+    (error: unknown) => error === withdrawn,
+  );
+  assert.deepEqual(observed, [`pushing branch ${BRANCH} for ticket ${ticket.id}`, `publishing the draft pull request for ticket ${ticket.id}`]);
+  assert.deepEqual(pushProvider.requests, [], "the provider write is guarded, not merely preceded by a push");
 });

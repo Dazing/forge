@@ -1,12 +1,25 @@
 import { z } from "zod";
 import { CommandFailedError } from "./git.js";
-import { redactSecret } from "../../shared/redact-secret.js";
-import type { DraftPullRequest, DraftPullRequestRequest, Fetch, GitProvider, PullRequestDetails, UpdateDraftPullRequestRequest } from "./git-provider.js";
+import { redactSecrets } from "../../shared/redact-secret.js";
+import type { DraftPullRequest, DraftPullRequestRequest, Fetch, GitProvider, PullRequestDetails, PullRequestRecord, PullRequestRef, PullRequestState, UpdateDraftPullRequestRequest } from "./git-provider.js";
 
 // Azure DevOps draft pull-request creation through the REST API, mirroring the GitHub provider's failure shape.
 
 const API_BASE = "https://dev.azure.com";
 const azureSshUrl = /^git@ssh\.dev\.azure\.com:v3\/([^/]+)\/([^/]+)\/([^/]+)$/;
+
+/** Canonical `git@ssh.dev.azure.com:v3/<organization>/<project>/<repository>` SSH form, shared by the adapter and the provider registry. */
+export function isAzureDevOpsRepositoryUrl(repositoryUrl: string): boolean {
+  return azureSshUrl.test(repositoryUrl);
+}
+
+/** Browser-facing link to one branch of a canonical Azure DevOps repository, using the Git branch ref the web UI expects. */
+export function azureDevOpsBranchUrl(repositoryUrl: string, branch: string): string | undefined {
+  const match = azureSshUrl.exec(repositoryUrl);
+  if (match === null) return undefined;
+  const [organization, project, repository] = [match[1]!, match[2]!, match[3]!];
+  return `https://dev.azure.com/${encodeURIComponent(organization)}/${encodeURIComponent(project)}/_git/${encodeURIComponent(repository)}?version=GB${encodeURIComponent(branch)}`;
+}
 
 const pullResponseSchema = z.object({
   pullRequestId: z.number().int(),
@@ -25,6 +38,25 @@ const pullDetailsSchema = z.object({
   lastMergeCommit: z.object({ commitId: z.string() }).optional(),
   completionOptions: z.object({ mergeStrategy: z.string() }).optional(),
 });
+
+const pullListSchema = z.object({
+  value: z.array(z.object({
+    pullRequestId: z.number().int(),
+    status: z.enum(["active", "completed", "abandoned"]),
+    isDraft: z.boolean(),
+    sourceRefName: z.string(),
+    targetRefName: z.string(),
+    title: z.string(),
+    description: z.string().optional().default(""),
+    creationDate: z.string(),
+    lastMergeSourceCommit: z.object({ commitId: z.string() }),
+    lastMergeCommit: z.object({ commitId: z.string() }).optional(),
+    mergeCommitId: z.string().optional(),
+    completionOptions: z.object({ mergeStrategy: z.string().optional() }).optional(),
+  })).default([]),
+});
+
+const MERGE_METHOD_BY_STRATEGY: Record<string, PullRequestRecord["mergeMethod"]> = { squash: "squash", noFastForward: "merge", rebase: "rebase" };
 
 
 /** Azure DevOps provider: canonical `git@ssh.dev.azure.com:v3/<organization>/<project>/<repository>` SSH URLs and the 7.1 REST pulls endpoint. */
@@ -45,14 +77,8 @@ export class AzureDevOpsProvider implements GitProvider {
 
   /** Require the exact current Azure SSH form; HTTPS URLs, legacy `ssh.visualstudio.com` hosts, and empty segments are rejected. */
   validateRepository(repositoryUrl: string): void {
-    const segments = azureSshUrl.exec(repositoryUrl);
-    if (!segments) {
+    if (!isAzureDevOpsRepositoryUrl(repositoryUrl)) {
       throw new Error(`Repository must be a git@ssh.dev.azure.com:v3/<organization>/<project>/<repository> SSH URL; got ${repositoryUrl}.`);
-    }
-    for (const segment of [segments[1]!, segments[2]!, segments[3]!]) {
-      if (segment.length === 0) {
-        throw new Error(`Repository URL has an empty organization, project, or repository segment; got ${repositoryUrl}.`);
-      }
     }
   }
 
@@ -67,7 +93,7 @@ export class AzureDevOpsProvider implements GitProvider {
     const repository = encodeURIComponent(ssh[3]!);
     const encodedPat = Buffer.from(`:${this.credential}`, "utf8").toString("base64");
     // The encoded Basic value is a derived credential: redact it alongside the raw PAT in every diagnostic.
-    const redact = (text: string): string => redactSecret(encodedPat, redactSecret(this.credential, text));
+    const redact = (text: string): string => redactSecrets(this.secrets(), text);
 
     const path = `/${organization}/${project}/_apis/git/repositories/${repository}/pullrequests?api-version=7.1`;
     const displayCommand = `POST ${API_BASE}${path}`;
@@ -203,10 +229,10 @@ export class AzureDevOpsProvider implements GitProvider {
     const path = `/${organization}/${project}/_apis/git/repositories/${repository}/pullrequests/${number}?api-version=7.1`;
     const encodedPat = Buffer.from(`:${this.credential}`, "utf8").toString("base64");
     const response = await this.fetchImpl(`${API_BASE}${path}`, { method: "GET", headers: { Accept: "application/json", Authorization: `Basic ${encodedPat}` } }).catch((error: unknown) => {
-      throw new CommandFailedError({ operation: "reading pull request", command: `GET ${API_BASE}${path}`, exitCode: 1, stdout: "", stderr: redactSecret(encodedPat, redactSecret(this.credential, error instanceof Error ? error.message : String(error))) }, error instanceof Error ? error : new Error(String(error)));
+      throw new CommandFailedError({ operation: "reading pull request", command: `GET ${API_BASE}${path}`, exitCode: 1, stdout: "", stderr: redactSecrets(this.secrets(), error instanceof Error ? error.message : String(error)) }, error instanceof Error ? error : new Error(String(error)));
     });
     const text = await response.text();
-    const safeText = redactSecret(encodedPat, redactSecret(this.credential, text));
+    const safeText = redactSecrets(this.secrets(), text);
     if (response.status === 404) return undefined;
     if (!response.ok) throw new CommandFailedError({ operation: "reading pull request", command: `GET ${API_BASE}${path}`, exitCode: response.status, stdout: safeText, stderr: `HTTP ${response.status} ${response.statusText}` }, new Error(`Azure DevOps pull-request lookup failed with HTTP ${response.status}.`));
     let parsed: z.infer<typeof pullDetailsSchema>;
@@ -230,6 +256,57 @@ export class AzureDevOpsProvider implements GitProvider {
     };
   }
 
+  /** Exact-match restart lookup over the pull-request list with `searchCriteria/status=all` so closed and abandoned pull requests remain discoverable; newest match wins. */
+  async findPullRequest(ref: PullRequestRef): Promise<PullRequestRecord | undefined> {
+    const ssh = azureSshUrl.exec(ref.repository);
+    if (!ssh) throw new Error(`Repository must be a git@ssh.dev.azure.com:v3/<organization>/<project>/<repository> SSH URL; got ${ref.repository}.`);
+    const organization = encodeURIComponent(ssh[1]!);
+    const project = encodeURIComponent(ssh[2]!);
+    const repository = encodeURIComponent(ssh[3]!);
+    const path = `/${organization}/${project}/_apis/git/repositories/${repository}/pullrequests?searchCriteria/status=all&api-version=7.1`;
+    const displayCommand = `GET ${API_BASE}${path}`;
+    const encodedPat = Buffer.from(`:${this.credential}`, "utf8").toString("base64");
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${API_BASE}${path}`, { method: "GET", headers: { Accept: "application/json", Authorization: `Basic ${encodedPat}` } });
+    } catch (error) {
+      throw new CommandFailedError({ operation: "finding pull request", command: displayCommand, exitCode: 1, stdout: "", stderr: redactSecrets(this.secrets(), error instanceof Error ? error.message : String(error)) }, error instanceof Error ? error : new Error(String(error)));
+    }
+    const text = await response.text();
+    const safeText = redactSecrets(this.secrets(), text);
+    const failure = (cause: Error): CommandFailedError =>
+      new CommandFailedError({ operation: "finding pull request", command: displayCommand, exitCode: response.status, stdout: safeText, stderr: `HTTP ${response.status} ${response.statusText}` }, cause);
+    if (response.status === 404) return undefined;
+    if (!response.ok) throw failure(new Error(`Azure DevOps pull-request lookup failed with HTTP ${response.status}.`));
+    let parsed: z.infer<typeof pullListSchema>;
+    try {
+      parsed = pullListSchema.parse(JSON.parse(text));
+    } catch (error) {
+      throw failure(new Error(`Malformed Azure DevOps pull-request list: ${error instanceof Error ? error.message : String(error)}`));
+    }
+    const newest = parsed.value
+      .filter((pull) => pull.sourceRefName === `refs/heads/${ref.head}` && pull.targetRefName === `refs/heads/${ref.base}`
+        && (ref.sourceSha === undefined || pull.lastMergeSourceCommit.commitId === ref.sourceSha))
+      .sort((left, right) => right.creationDate.localeCompare(left.creationDate))[0];
+    if (newest === undefined) return undefined;
+    const state: PullRequestState = newest.status === "active" ? "open" : newest.status === "completed" ? "merged" : "closed";
+    return {
+      provider: this.name,
+      repository: ref.repository,
+      number: newest.pullRequestId,
+      url: `${API_BASE}/${organization}/${project}/_git/${repository}/pullrequest/${newest.pullRequestId}`,
+      baseBranch: newest.targetRefName.replace(/^refs\/heads\//, ""),
+      headBranch: newest.sourceRefName.replace(/^refs\/heads\//, ""),
+      sourceSha: newest.lastMergeSourceCommit.commitId,
+      title: newest.title,
+      body: newest.description,
+      draft: newest.isDraft,
+      state,
+      mergeMethod: MERGE_METHOD_BY_STRATEGY[newest.completionOptions?.mergeStrategy ?? ""] ?? "unknown",
+      mergeCommitSha: state === "merged" ? newest.mergeCommitId : undefined,
+    };
+  }
+
   async updateDraftPullRequest(request: UpdateDraftPullRequestRequest): Promise<DraftPullRequest> {
     const current = await this.getPullRequest(request.repositoryUrl, request.number);
     if (current === undefined) throw new Error(`Azure DevOps pull request ${request.number} no longer exists.`);
@@ -250,7 +327,7 @@ export class AzureDevOpsProvider implements GitProvider {
       body: JSON.stringify({ title: request.title, description: request.body, isDraft: true, completionOptions: { mergeStrategy: "squash", deleteSourceBranch: false, bypassPolicy: false } }),
     });
     const text = await response.text();
-    if (!response.ok) throw new CommandFailedError({ operation: "updating draft pull request", command: `PATCH ${API_BASE}${path}`, exitCode: response.status, stdout: redactSecret(encodedPat, redactSecret(this.credential, text)), stderr: `HTTP ${response.status} ${response.statusText}` }, new Error(`Azure DevOps rejected pull-request update with HTTP ${response.status}.`));
+    if (!response.ok) throw new CommandFailedError({ operation: "updating draft pull request", command: `PATCH ${API_BASE}${path}`, exitCode: response.status, stdout: redactSecrets(this.secrets(), text), stderr: `HTTP ${response.status} ${response.statusText}` }, new Error(`Azure DevOps rejected pull-request update with HTTP ${response.status}.`));
     const parsed = pullResponseSchema.parse(JSON.parse(text));
     if (!parsed.isDraft || parsed.completionOptions?.mergeStrategy !== "squash") throw new Error(`Azure DevOps update did not preserve draft squash state for pull request ${request.number}.`);
     return { number: parsed.pullRequestId, url: `${API_BASE}/${organization}/${project}/_git/${repository}/pullrequest/${parsed.pullRequestId}`, squashPreference: "configured" };

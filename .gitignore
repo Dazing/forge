@@ -15,4 +15,6 @@ bin/
 .logs/
 .workspaces/
 .ticket-queue/
+.factory-state/
+*.submission.json
 Im

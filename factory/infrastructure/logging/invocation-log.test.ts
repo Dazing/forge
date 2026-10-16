@@ -9,7 +9,7 @@ const INSTANCE = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-[0-9a-f]{6}$/;
 
 test("the invocation directory is a sortable UTC stamp with a random suffix and holds main.log at its root", async () => {
   const root = await mkdtemp(join(tmpdir(), "sandcastle-log-"));
-  const logger = await InvocationLogger.create(root, "gh_secret_abc");
+  const logger = await InvocationLogger.create(root, ["gh_secret_abc"]);
 
   await logger.record({ timestamp: "2026-10-11T09:00:00.000Z", stage: "planner", operation: "running planner", status: "completed" });
 
@@ -22,7 +22,7 @@ test("the invocation directory is a sortable UTC stamp with a random suffix and 
 
 test("simultaneous invocations never select the same instance directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "sandcastle-log-"));
-  const [left, right] = await Promise.all([InvocationLogger.create(root, "gh_secret_abc"), InvocationLogger.create(root, "gh_secret_abc")]);
+  const [left, right] = await Promise.all([InvocationLogger.create(root, ["gh_secret_abc"]), InvocationLogger.create(root, ["gh_secret_abc"])]);
 
   assert.notEqual(left.runDir, right.runDir);
   assert.equal((await readdir(join(root, ".logs"))).length, 2);
@@ -30,7 +30,7 @@ test("simultaneous invocations never select the same instance directory", async 
 
 test("planner cycles allocate zero-padded ordered files under planner/ and never share a file with stages", async () => {
   const root = await mkdtemp(join(tmpdir(), "sandcastle-log-"));
-  const logger = await InvocationLogger.create(root, "gh_secret_abc");
+  const logger = await InvocationLogger.create(root, ["gh_secret_abc"]);
 
   const first = await logger.allocate({ scope: "sequence", directory: "planner", cycle: 1 });
   const second = await logger.allocate({ scope: "sequence", directory: "planner", cycle: 2 });
@@ -48,7 +48,7 @@ test("planner cycles allocate zero-padded ordered files under planner/ and never
 
 test("one attempt ID binds one timestamped directory and every later run reuses it", async () => {
   const root = await mkdtemp(join(tmpdir(), "sandcastle-log-"));
-  const logger = await InvocationLogger.create(root, "gh_secret_abc");
+  const logger = await InvocationLogger.create(root, ["gh_secret_abc"]);
 
   const implement = await logger.allocate({ scope: "attempt", attemptId: "1a2b3c", stage: "implement" });
   const retry = await logger.allocate({ scope: "attempt", attemptId: "1a2b3c", stage: "implement" });
@@ -63,7 +63,7 @@ test("one attempt ID binds one timestamped directory and every later run reuses 
 
 test("concurrent allocations for one attempt and stage produce unique files in one directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "sandcastle-log-"));
-  const logger = await InvocationLogger.create(root, "gh_secret_abc");
+  const logger = await InvocationLogger.create(root, ["gh_secret_abc"]);
 
   const allocations = await Promise.all(
     Array.from({ length: 5 }, () => logger.allocate({ scope: "attempt", attemptId: "1a2b3c", stage: "integrate" })),
@@ -80,7 +80,7 @@ test("concurrent allocations for one attempt and stage produce unique files in o
 
 test("unsafe log targets fail before any directory is created outside the instance root", async () => {
   const root = await mkdtemp(join(tmpdir(), "sandcastle-log-"));
-  const logger = await InvocationLogger.create(root, "gh_secret_abc");
+  const logger = await InvocationLogger.create(root, ["gh_secret_abc"]);
   await logger.record({ timestamp: "2026-10-11T09:00:00.000Z", stage: "planner", operation: "running planner", status: "completed" });
 
   const targets: LogTarget[] = [
@@ -105,9 +105,12 @@ test("unsafe log targets fail before any directory is created outside the instan
   assert.deepEqual(await readdir(join(root, ".logs")), [basename(logger.runDir)]);
 });
 
-test("main.log records redact the provider credential from recorded output", async () => {
+test("main.log records redact every configured credential form from stdout and stderr", async () => {
   const root = await mkdtemp(join(tmpdir(), "sandcastle-log-"));
-  const logger = await InvocationLogger.create(root, "vso_pat_secret_123");
+  const githubToken = "gh_secret_abc";
+  const azurePat = "vso_pat_secret_123";
+  const derivedBasic = Buffer.from(`:${azurePat}`, "utf8").toString("base64");
+  const logger = await InvocationLogger.create(root, [githubToken, azurePat, derivedBasic]);
 
   await logger.record({
     timestamp: "2026-10-11T09:00:00.000Z",
@@ -116,19 +119,19 @@ test("main.log records redact the provider credential from recorded output", asy
     stage: "draft pull request",
     operation: "creating draft pull request",
     status: "failed",
-    stdout: "TF400813: Authorization failed for vso_pat_secret_123",
-    stderr: "HTTP 401 Unauthorized",
+    stdout: `TF400813: Authorization failed for ${azurePat}; bearer ${githubToken}`,
+    stderr: `Authorization: Basic ${derivedBasic}`,
   });
 
   const log = await readFile(join(logger.runDir, "main.log"), "utf8");
-  assert.match(log, /2026-10-11T09:00:00\.000Z ticket=0123456789abcdef attempt=1a2b3c stage=draft pull request operation=creating draft pull request status=failed/);
-  assert.match(log, /stdout:\nTF400813: Authorization failed for \[redacted-token\]/);
-  assert.ok(!log.includes("vso_pat_secret_123"), "the literal credential never reaches main.log");
+  assert.match(log, /stdout:\nTF400813: Authorization failed for \[redacted-token\]; bearer \[redacted-token\]/);
+  assert.match(log, /stderr:\nAuthorization: Basic \[redacted-token\]/);
+  assert.ok(!log.includes(githubToken) && !log.includes(azurePat) && !log.includes(derivedBasic), "no credential form reaches main.log");
 });
 
 test("checkpoint records serialize parent, checkpoint, changes, and the run-relative transcript reference after the status", async () => {
   const root = await mkdtemp(join(tmpdir(), "sandcastle-log-"));
-  const logger = await InvocationLogger.create(root, "gh_secret_abc");
+  const logger = await InvocationLogger.create(root, ["gh_secret_abc"]);
 
   await logger.record({
     timestamp: "2026-10-11T09:05:00.000Z",

@@ -16,6 +16,8 @@ export interface ImplementTicketInput {
   harness: AgentHarness;
   runAgent: AgentRunner;
   dependencies?: readonly Readonly<{ id: string; title: string; checkpointSha: string; summary: string }>[];
+  /** Called before every agent run; throws when the authority that authorized this work has withdrawn it. */
+  authorize?: (stage: string) => Promise<void>;
 }
 
 /** Validated stage message plus the HEAD the stage started from, which the checkpoint verifies against. */
@@ -40,6 +42,7 @@ export async function implementTicket(input: ImplementTicketInput): Promise<Impl
 
   let lastFailure: unknown = new Error("the implementation agent produced no result");
   for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
+    await input.authorize?.(`implementation run ${iteration} for ticket ${input.ticket.id}`);
     try {
       const request: AgentRunRequest<ImplementStageResult> = {
         cwd: input.workspacePath,

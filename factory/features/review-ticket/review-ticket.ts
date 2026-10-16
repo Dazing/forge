@@ -15,6 +15,8 @@ export interface ReviewTicketInput {
   attemptId: string;
   harness: AgentHarness;
   runAgent: AgentRunner;
+  /** Called before every agent run; throws when the authority that authorized this work has withdrawn it. */
+  authorize?: (stage: string) => Promise<void>;
 }
 
 /** Validated stage message plus the HEAD the stage started from, which the checkpoint verifies against. */
@@ -39,6 +41,7 @@ export async function reviewTicket(input: ReviewTicketInput): Promise<ReviewOutc
 
   let lastFailure: unknown = new Error("the review agent produced no result");
   for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
+    await input.authorize?.(`review run ${iteration} for ticket ${input.ticket.id}`);
     try {
       const request: AgentRunRequest<ReviewStageResult> = {
         cwd: input.workspacePath,

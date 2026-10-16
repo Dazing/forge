@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { appendFile, mkdir } from "node:fs/promises";
 import { posix, resolve } from "node:path";
-import { redactSecret } from "../../shared/redact-secret.js";
+import { redactSecrets } from "../../shared/redact-secret.js";
 
 /** One allocated agent transcript: the absolute path to write and the invocation-relative reference recorded in checkpoint commits, ticket annotations, and main.log. */
 export type AllocatedTranscript = Readonly<{ path: string; reference: string }>;
@@ -52,11 +52,11 @@ class InvocationLogger {
   private constructor(
     readonly runDir: string,
     readonly mainLogPath: string,
-    private readonly secret: string,
+    private readonly secrets: readonly string[],
   ) {}
 
-  /** Create one fresh instance directory `.logs/<utc-stamp>-<6-hex>/` with `main.log` at its root; collisions regenerate the random suffix. */
-  static async create(factoryRoot: string, secret: string): Promise<InvocationLogger> {
+  /** Create one fresh instance directory `.logs/<utc-stamp>-<6-hex>/` with `main.log` at its root; collisions regenerate the random suffix. Every recorded stdout/stderr is redacted with the aggregate credential set. */
+  static async create(factoryRoot: string, secrets: readonly string[]): Promise<InvocationLogger> {
     const logsRoot = resolve(factoryRoot, ".logs");
     await mkdir(logsRoot, { recursive: true });
     const stamp = utcStamp();
@@ -64,7 +64,7 @@ class InvocationLogger {
       const runDir = resolve(logsRoot, `${stamp}-${randomBytes(3).toString("hex")}`);
       try {
         await mkdir(runDir);
-        return new InvocationLogger(runDir, resolve(runDir, "main.log"), secret);
+        return new InvocationLogger(runDir, resolve(runDir, "main.log"), secrets);
       } catch (error) {
         if (error instanceof Error && "code" in error && error.code === "EEXIST") continue;
         throw error;
@@ -114,8 +114,8 @@ class InvocationLogger {
     if (record.agentLogReference !== undefined) fields.push(`agent-log=${record.agentLogReference}`);
     const line = `${fields.join(" ")}\n`;
     const output: string[] = [];
-    if (record.stdout !== undefined) output.push(`stdout:\n${redactSecret(this.secret, record.stdout)}`);
-    if (record.stderr !== undefined) output.push(`stderr:\n${redactSecret(this.secret, record.stderr)}`);
+    if (record.stdout !== undefined) output.push(`stdout:\n${redactSecrets(this.secrets, record.stdout)}`);
+    if (record.stderr !== undefined) output.push(`stderr:\n${redactSecrets(this.secrets, record.stderr)}`);
     await appendFile(this.mainLogPath, `${line}${output.length === 0 ? "" : `${output.join("\n")}\n`}`);
   }
 }

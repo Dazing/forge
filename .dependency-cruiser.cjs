@@ -44,9 +44,29 @@ module.exports = {
     {
       name: "features-host-free",
       severity: "error",
-      comment: "features cannot import main.ts or CLI",
+      comment: "features cannot import main.ts, tickets-main.ts, or CLI",
       from: { path: "^factory/features/" },
-      to: { path: "^factory/(main\\.ts|cli)" },
+      to: { path: "^factory/(main\\.ts|tickets-main\\.ts|cli)" },
+    },
+    {
+      name: "tickets-entry",
+      severity: "error",
+      comment: "the submission host enters features only through index.ts and never the server host, ticket-processing, or a stage feature",
+      from: { path: "^factory/tickets-main\\.ts$" },
+      to: {
+        path: "^factory/",
+        pathNot: "^(factory/cli/|factory/features/(submit-tickets|tickets)/index\\.[jt]s$|factory/infrastructure/)",
+      },
+    },
+    {
+      name: "submit-tickets-boundaries",
+      severity: "error",
+      comment: "submit-tickets enters tickets only through index.ts and never the host, CLI, ticket-processing, or a stage feature",
+      from: { path: "^factory/features/submit-tickets/" },
+      to: {
+        path: "^factory/",
+        pathNot: "^(factory/features/submit-tickets/|factory/features/tickets/index\\.[jt]s$|factory/shared/|factory/infrastructure/)",
+      },
     },
     {
       name: "not-to-unresolvable",

@@ -1,10 +1,8 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
 import type { CommandFailure } from "../../infrastructure/git-provider/git.js";
-import type { GitProvider } from "../../infrastructure/git-provider/git-provider.js";
+import type { GitProviderRegistry } from "../../infrastructure/git-provider/git-provider.js";
 
 // Ticket front-matter parsing and identity: the ticket is defined by its complete source.
 
@@ -61,7 +59,7 @@ function metadataFailure(path: string, operation: string, detail: string): Comma
   return { operation, command: `read ${path}`, exitCode: 1, stdout: "", stderr: detail };
 }
 
-/** Parse exactly one ticket file; throws TicketMetadataError with structured stage details for any metadata violation, including a repository URL the selected provider rejects. */
+/** Drop every runner-owned lifecycle record from a body so re-annotated sources hash as their authored content. */
 function authoredBody(body: string): string {
   const lines = body.split("\n");
   const authored: string[] = [];
@@ -93,20 +91,12 @@ function authoredBody(body: string): string {
   return authored.join("\n");
 }
 
-export async function loadTicket(path: string, provider: GitProvider): Promise<Ticket> {
-  const ticketPath = resolve(path);
-  if (!ticketPath.toLowerCase().endsWith(".md")) {
-    throw new TicketMetadataError(ticketPath, metadataFailure(ticketPath, "reading ticket file", "Ticket must be a Markdown file."), undefined);
-  }
-
-  let source: string;
-  try {
-    source = await readFile(ticketPath, "utf8");
-  } catch (error) {
-    throw new TicketMetadataError(ticketPath, metadataFailure(ticketPath, "reading ticket file", `Could not read ticket: ${ticketPath}`), error);
-  }
+/** Parse one complete authored ticket source. `origin` labels the source in diagnostics and becomes the ticket path; file loading stays in `loadTicket`.
+ * Throws TicketMetadataError with structured stage details for any metadata violation, including a repository URL no configured provider accepts. */
+export function parseTicketSource(source: string, providers: GitProviderRegistry, origin: string): Ticket {
+  const ticketPath = origin;
   if (source.trim().length === 0) {
-    throw new TicketMetadataError(ticketPath, metadataFailure(ticketPath, "reading ticket file", "Ticket is empty."), undefined);
+    throw new TicketMetadataError(ticketPath, metadataFailure(ticketPath, "reading ticket source", "Ticket is empty."), undefined);
   }
 
   const frontMatterMatch = source.match(/^---\n([\s\S]*?)\n---\n?/);
@@ -154,7 +144,7 @@ export async function loadTicket(path: string, provider: GitProvider): Promise<T
   }
 
   try {
-    provider.validateRepository(validated.data.repository);
+    providers.resolve(validated.data.repository);
   } catch (error) {
     throw new TicketMetadataError(
       ticketPath,
@@ -176,4 +166,18 @@ export async function loadTicket(path: string, provider: GitProvider): Promise<T
     repository: validated.data.repository,
     baseBranch: validated.data.baseBranch,
   };
+}
+
+/** The target repository one authored source declares, read far enough to route it to the provider that validates it. Undefined when the front matter is missing, malformed, or names no repository. */
+export function declaredRepository(source: string): string | undefined {
+  const frontMatter = /^---\n([\s\S]*?)\n---/.exec(source);
+  if (frontMatter === null) return undefined;
+  let data: unknown;
+  try {
+    data = parse(frontMatter[1] ?? "");
+  } catch {
+    return undefined;
+  }
+  const repository = (data as { repository?: unknown } | null)?.repository;
+  return typeof repository === "string" && repository.trim().length > 0 ? repository.trim() : undefined;
 }

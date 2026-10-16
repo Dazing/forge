@@ -4,6 +4,7 @@ import { integrateTickets } from "../integrate-tickets/index.js";
 import type { ProcessConfig } from "./process-config.js";
 import { createWorkspace, reserveAttempt, type WorkspaceBaseline } from "./workspace.js";
 import type { ReviewedCheckpoint } from "./execute-attempt.js";
+import type { StageAuthorization } from "./authorization-guard.js";
 
 export type ReviewedCandidate = Readonly<{
   groupId: string;
@@ -19,6 +20,7 @@ export async function integrateCandidates(
   candidates: readonly ReviewedCheckpoint[],
   config: ProcessConfig,
   baseline?: WorkspaceBaseline,
+  authorize?: StageAuthorization,
 ): Promise<ReviewedCandidate> {
   if (candidates.length === 0) throw new Error(`Cannot integrate empty group ${groupId}.`);
   const ordered = [...candidates].sort((left, right) => left.ticket.id.localeCompare(right.ticket.id));
@@ -60,11 +62,12 @@ export async function integrateCandidates(
       task: conflictPaths.length > 0 ? "resolve-and-review" : "combined-review",
       harness: config.harness,
       runAgent: config.runAgent,
+      ...(authorize === undefined ? {} : { authorize }),
     });
     await requireNoUnmergedEntries(workspace.workspacePath, "integration finalization");
     if (await currentBranch(workspace.workspacePath) !== workspace.branch) throw new Error(`Integration finalization changed branch ${workspace.branch}.`);
     if ((await runGit(workspace.workspacePath, ["rev-parse", "HEAD"], "checking integration parent")).trim() !== parent) throw new Error("Integration agent changed HEAD before finalization.");
-    if (config.gitProvider.secrets().some((secret) => secret.length > 0 && outcome.message.includes(secret))) throw new Error("Integration message contains provider credential material.");
+    if (config.providers.secrets.some((secret) => secret.length > 0 && outcome.message.includes(secret))) throw new Error("Integration message contains provider credential material.");
     await runGit(workspace.workspacePath, ["add", "--all"], "staging integration result");
     const changes = (await runGit(workspace.workspacePath, ["diff", "--cached", "--name-only"], "classifying integration tree outcome")).trim().length > 0 ? "changed" : "unchanged";
     await runGitAsRunner(workspace.workspacePath, ["commit", "-m", `${outcome.message}\n\nFactory-Group: ${groupId}\nFactory-Stage: integration\nFactory-Included: ${[...included, candidate.ticket.id].join(",")}\nFactory-Changes: ${changes}\nFactory-Agent-Log: ${outcome.logReference}`], "committing reviewed integration");

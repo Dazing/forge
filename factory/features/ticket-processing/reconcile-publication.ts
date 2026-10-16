@@ -1,13 +1,21 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runGit } from "../../infrastructure/git-provider/git.js";
+import { runGit, runGitAsRunner } from "../../infrastructure/git-provider/git.js";
 
 export interface PublishedDelta {
   readonly workspacePath: string;
   readonly baseBranch: string;
   readonly baseSha: string;
   readonly publishedSha: string;
+}
+
+/** Clone the published target repository at its base branch so a merge result can be verified after a restart, when no attempt workspace remains. */
+export async function cloneTargetRepository(repository: string, baseBranch: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "sandcastle-publication-verify-"));
+  const workspacePath = join(root, "repository");
+  await runGitAsRunner(root, ["clone", "--single-branch", "--branch", baseBranch, repository, workspacePath], `cloning ${repository} to verify merged work`);
+  return workspacePath;
 }
 
 /** Verify a provider-reported merge result by applying the exact published delta to its first parent and comparing trees. */

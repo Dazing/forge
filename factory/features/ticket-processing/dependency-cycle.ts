@@ -1,48 +1,60 @@
-import { resolve } from "node:path";
-import {
-  annotateBlocked,
-  annotateCompletion,
-  annotatePublication,
-  annotateRetryable,
-  inspectTicketLifecycle,
-  listRelevantTicketPaths,
-  listTicketPaths,
-  loadTicket,
-  moveTicket,
-  type Ticket,
-} from "../tickets/index.js";
+import { createHash } from "node:crypto";
+import { parseAuthoredIssueSnapshot, type BacklogStatusName, type Ticket } from "../tickets/index.js";
 import { runGit } from "../../infrastructure/git-provider/git.js";
+import { type ProviderName, type PullRequestRecord } from "../../infrastructure/git-provider/git-provider.js";
 import { planGroups, type PlannedGroup } from "../plan-tickets/index.js";
 import { publishPullRequest } from "../publish-pull-request/index.js";
 import { buildDependencyGraph, type DependencyGraph } from "./dependency-graph.js";
 import { executeReviewedAttempt, type ReviewedCheckpoint } from "./execute-attempt.js";
 import { integrateCandidates, type ReviewedCandidate } from "./integrate-candidates.js";
 import type { ProcessConfig } from "./process-config.js";
-import { logSettlementFailure, reportBlocked, settleMetadataFailure } from "./settle-attempt.js";
-import { verifyMergedPublication } from "./reconcile-publication.js";
+import { logBacklogFailure, reportBlocked } from "./settle-attempt.js";
+import { cloneTargetRepository, verifyMergedPublication } from "./reconcile-publication.js";
+import { discoverBacklogTickets, type BacklogTicket } from "./backlog-discovery.js";
+import { type BacklogTarget, type ReviewPublication } from "./backlog-workflow.js";
+import { PUBLICATION_RECORD_VERSION, REQUESTED_MERGE_STRATEGY, operationKey, type PublicationIntent, type PublicationResult } from "./publication-record.js";
 import type { WorkspaceBaseline } from "./workspace.js";
+import { detectAuthorizationLapse, preserveAttemptWorkspace } from "./authorization-lapse.js";
+import { createIssueAuthorizationReader, createStageAuthorization, isAuthorizationWithdrawn, type StageAuthorization } from "./authorization-guard.js";
+import { branchBrowserUrl } from "../../infrastructure/git-provider/create-git-provider.js";
 
+// The private-GitHub backlog is the only ticket source. Scheduling reads open Project issues; every
+// lifecycle fact the runner owes the operator is settled on the issue itself, durably recorded in the
+// publication ledger first. Nothing here writes ticket files, and a settlement failure never republishes.
+
+/** One published draft, tracked from ledger facts so a restart can extend or retire it identically. */
 export type PublicationFact = Readonly<{
   groupId: string;
   includedTicketIds: readonly string[];
   number: number;
   url: string;
+  provider: ProviderName;
+  repository: string;
+  baseBranch: string;
+  baseSha: string;
   head: string;
   sourceSha: string;
   title: string;
   body: string;
-  candidate: ReviewedCandidate;
-  baseSha: string;
+  squashPreference: "configured" | "unsupported";
+  workspacePath: string | undefined;
 }>;
+
+/** The ticket identities one recorded publication covers. */
+function includedIds(result: PublicationResult): readonly string[] {
+  return result.included.map((entry) => entry.ticketId);
+}
 
 export interface DependencyWorkflowState {
   cycle: number;
   startupChecked: boolean;
   readonly tickets: Map<string, Ticket>;
+  readonly issues: Map<string, BacklogTicket>;
+  readonly published: Set<string>;
+  readonly settled: Set<string>;
   readonly reviewed: Map<string, ReviewedCheckpoint>;
   readonly blocked: Map<string, string>;
   readonly retryable: Map<string, string>;
-  readonly blockedAnnotations: Map<string, string>;
   readonly integrationConflicts: Map<string, readonly Readonly<{ path: string; disposition: string }>[]>;
   readonly publications: Map<string, PublicationFact>;
   readonly groupIdsByTicket: Map<string, string>;
@@ -54,10 +66,12 @@ export function createDependencyWorkflowState(): DependencyWorkflowState {
     cycle: 0,
     startupChecked: false,
     tickets: new Map(),
+    issues: new Map(),
+    published: new Set(),
+    settled: new Set(),
     reviewed: new Map(),
     blocked: new Map(),
     retryable: new Map(),
-    blockedAnnotations: new Map(),
     integrationConflicts: new Map(),
     publications: new Map(),
     groupIdsByTicket: new Map(),
@@ -65,44 +79,272 @@ export function createDependencyWorkflowState(): DependencyWorkflowState {
   };
 }
 
+function targetOf(entry: BacklogTicket): BacklogTarget {
+  return {
+    identity: entry.snapshot.identity,
+    ticketId: entry.ticket.id,
+    requirementsHash: entry.ticket.requirementsHash,
+    title: entry.ticket.title,
+  };
+}
+
+/** The Project board is the authority: every side-effect boundary re-reads the issue, its status, and its requirements. */
+function authorizationFor(ticketId: string, claimStatus: BacklogStatusName, state: DependencyWorkflowState, config: ProcessConfig): StageAuthorization | undefined {
+  const entry = state.issues.get(ticketId);
+  if (entry === undefined) return undefined;
+  return createStageAuthorization({
+    ticketId,
+    identity: entry.snapshot.identity,
+    requirementsHash: entry.ticket.requirementsHash,
+    claimStatus,
+    read: createIssueAuthorizationReader({ backlog: config.backlog, providers: config.providers }),
+  });
+}
+
+/**
+ * Guard a group side effect. Each member's claim status is resolved when the guard runs, not when it
+ * is built: a member the runner has published by then is authorized by the status its publication
+ * moved it to (`In review`), and everything else must still sit on the claimed `In progress`. A group
+ * can publish several subsets in one cycle, so an earlier subset changes what the next one requires.
+ */
+function groupAuthorization(ticketIds: readonly string[], state: DependencyWorkflowState, config: ProcessConfig): StageAuthorization | undefined {
+  const members = ticketIds.filter((id) => state.issues.has(id));
+  if (members.length === 0) return undefined;
+  return async (stage) => {
+    for (const ticketId of members) {
+      const guard = authorizationFor(ticketId, state.published.has(ticketId) ? "In review" : "In progress", state, config);
+      if (guard !== undefined) await guard(stage);
+    }
+  };
+}
+
 async function discover(config: ProcessConfig, state: DependencyWorkflowState): Promise<void> {
-  const activePaths = new Set(await listTicketPaths(config.ticketsDir));
-  const paths = state.startupChecked ? [...activePaths] : await listRelevantTicketPaths(config.ticketsDir);
-  const found = new Map<string, Ticket>();
-  for (const path of paths) {
-    let ticket: Ticket;
-    try {
-      ticket = await loadTicket(path, config.gitProvider);
-    } catch (error) {
-      if (activePaths.has(path)) await settleMetadataFailure(path, error, config);
+  const discovery = await discoverBacklogTickets(config.backlog, config.providers);
+  for (const failure of discovery.failures) {
+    console.error(`Backlog issue #${failure.issueNumber} (${failure.issueUrl}) is not a schedulable ticket: ${failure.reason}`);
+  }
+  for (const duplicate of discovery.duplicates) {
+    console.error(`Ticket ${duplicate.ticketId} is declared by open issues ${duplicate.issueNumbers.join(", ")}; none of them are scheduled.`);
+  }
+  for (const number of discovery.unboarded) {
+    console.error(`Backlog issue #${number} has no item in the configured Project; it is never scheduled.`);
+  }
+
+  const found = new Map<string, BacklogTicket>();
+  for (const entry of discovery.tickets) {
+    if (found.delete(entry.ticket.id)) {
+      state.blocked.set(entry.ticket.id, "the ticket ID is declared by more than one open issue; operator reconciliation required");
       continue;
     }
-    const prior = found.get(ticket.id);
-    if (prior !== undefined && prior.path !== ticket.path) {
-      if (activePaths.has(prior.path) && activePaths.has(ticket.path)) throw new Error(`Duplicate ticket ID ${ticket.id} in ${prior.path} and ${ticket.path}.`);
-      const lifecyclePath = activePaths.has(ticket.path) ? prior.path : ticket.path;
-      const evidence = await inspectTicketLifecycle(lifecyclePath);
-      state.blocked.set(ticket.id, `prior factory evidence requires operator reconciliation${evidence.artifactReferences.length > 0 ? `: ${evidence.artifactReferences.join(", ")}` : ""}`);
-      if (activePaths.has(ticket.path)) found.set(ticket.id, ticket);
-      continue;
+    found.set(entry.ticket.id, entry);
+  }
+  for (const [id, entry] of found) {
+    const known = state.issues.get(id);
+    if (known !== undefined && known.snapshot.identity.number !== entry.snapshot.identity.number) {
+      state.blocked.set(id, `ticket ${id} was rediscovered on issue #${entry.snapshot.identity.number} after issue #${known.snapshot.identity.number}; operator reconciliation required`);
     }
-    found.set(ticket.id, ticket);
-    if (!state.startupChecked) {
-      const evidence = await inspectTicketLifecycle(path);
-      if (!activePaths.has(path) || evidence.hasAttempt || evidence.hasCheckpoint || evidence.hasPublication) {
-        const references = evidence.artifactReferences.length > 0 ? `: ${evidence.artifactReferences.join(", ")}` : "";
-        state.blocked.set(ticket.id, `prior factory evidence requires operator reconciliation${references}`);
+    const checkpoint = state.reviewed.get(id);
+    if (checkpoint !== undefined && checkpoint.requirementsHash !== entry.ticket.requirementsHash) {
+      state.blocked.set(id, `requirements changed after successful checkpoint; author a new ticket instead of reusing ${id}`);
+    }
+    state.issues.set(id, entry);
+    state.tickets.set(id, entry.ticket);
+  }
+  if (!state.startupChecked) {
+    await settleRecordedEffects(config, state);
+    state.startupChecked = true;
+  }
+}
+
+/**
+ * One startup pass over durable evidence: unfinished settlements are replayed, recorded publications
+ * are reconciled with their provider, and each discovered issue's board status decides what happens
+ * to it. Closure is terminal; an issue reopened after its recorded closure is fresh work.
+ */
+async function settleRecordedEffects(config: ProcessConfig, state: DependencyWorkflowState): Promise<void> {
+  for (const entry of await config.workflow.recover()) {
+    console.log(`[startup] Replayed the recorded settlement ${entry.detail} for issue #${entry.issueNumber}.`);
+  }
+  const snapshot = await config.ledger.load();
+  for (const record of snapshot.corrupt) {
+    console.error(`[startup] Unreadable ledger record ${record.file} requires operator reconciliation; it is never rewritten or deleted.`);
+  }
+  for (const result of snapshot.results) {
+    await reconcileResult(config, state, result);
+  }
+
+  const closures = new Map(snapshot.settlements.filter((record) => record.kind === "close").map((record) => [record.issueNumber, record.operationKey]));
+  for (const [ticketId, entry] of [...state.issues]) {
+    const closeKey = closures.get(entry.snapshot.identity.number);
+    if (closeKey !== undefined) {
+      // The runner closed this issue and it is open again, so an author reopened it: the closure is retired and the work is fresh.
+      await config.ledger.completeSettlement(closeKey);
+      closures.delete(entry.snapshot.identity.number);
+      console.log(`Issue #${entry.snapshot.identity.number} (${ticketId}) was reopened after its recorded closure; it is scheduled as fresh work.`);
+    }
+    if (state.settled.has(ticketId)) continue;
+    const result = snapshot.results.find((candidate) => includedIds(candidate).includes(ticketId));
+    switch (entry.status) {
+      case "In review": {
+        if (result === undefined) {
+          state.blocked.set(ticketId, "the issue is In review with no recorded pull request; operator reconciliation required");
+        } else if (!state.publications.has(result.groupId) && !state.settled.has(ticketId)) {
+          state.blocked.set(ticketId, `pull request ${result.pullRequestNumber} for ${ticketId} is no longer an open draft; operator reconciliation required`);
+        } else {
+          state.published.add(ticketId);
+        }
+        break;
+      }
+      case "In progress": {
+        const publication = result !== undefined ? state.publications.get(result.groupId) : undefined;
+        if (publication !== undefined) {
+          await reportSettlement(config, ticketId, "in review", () => config.workflow.inReview([targetOf(entry)], publicationFacts(publication), `group-${publication.groupId}`));
+        }
+        console.log(`Issue #${entry.snapshot.identity.number} (${ticketId}) is In progress; its work resumes with a fresh attempt.`);
+        break;
+      }
+      case "Blocked": {
+        console.log(`Issue #${entry.snapshot.identity.number} (${ticketId}) is Blocked; the runner leaves it parked.`);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+}
+
+function publicationFacts(publication: PublicationFact): ReviewPublication {
+  return {
+    number: publication.number,
+    url: publication.url,
+    head: publication.head,
+    sourceSha: publication.sourceSha,
+    mergeStrategy: "squash",
+    squashPreference: publication.squashPreference,
+    title: publication.title,
+  };
+}
+
+/** One backlog settlement whose failure is recorded and reported but never changes already-published code. */
+async function reportSettlement(config: ProcessConfig, ticketId: string, stage: string, effect: () => Promise<void>): Promise<boolean> {
+  try {
+    await effect();
+    return true;
+  } catch (error) {
+    await logBacklogFailure(config, ticketId, stage, error);
+    console.error(`Ticket ${ticketId} backlog settlement failed at ${stage}: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
+function blockDescendants(state: DependencyWorkflowState, ticketId: string, reason: string): void {
+  for (const ticket of state.tickets.values()) {
+    if (ticket.dependsOnTickets.includes(ticketId)) state.blocked.set(ticket.id, reason);
+  }
+}
+
+/**
+ * Reconcile one recorded publication with its provider: a merged pull request is verified and its
+ * tickets closed out, a retired pull request is un-recorded so its work can be published again, and
+ * an open draft is tracked so a reviewed descendant can extend it.
+ */
+async function reconcileResult(config: ProcessConfig, state: DependencyWorkflowState, result: PublicationResult): Promise<void> {
+  const subject = `pull-request-${result.pullRequestNumber}`;
+  let record: PullRequestRecord | undefined;
+  try {
+    record = await config.providers.resolve(result.repository).findPullRequest({
+      repository: result.repository,
+      base: result.baseBranch,
+      head: result.head,
+      sourceSha: result.sourceSha,
+    });
+  } catch (error) {
+    const reason = `pull-request reconciliation failed: ${error instanceof Error ? error.message : String(error)}`;
+    for (const ticketId of includedIds(result)) blockDescendants(state, ticketId, reason);
+    return;
+  }
+
+  if (record === undefined || record.state === "closed") {
+    await config.ledger.retirePublication(result.operationKey);
+    state.publications.delete(result.groupId);
+    console.error(`Pull request ${result.pullRequestUrl} is ${record === undefined ? "absent" : "closed"}; its recorded publication is retired and its tickets resume as In progress.`);
+    for (const ticketId of includedIds(result)) {
+      state.published.delete(ticketId);
+      const entry = state.issues.get(ticketId);
+      if (entry?.status === "In review") {
+        await reportSettlement(config, ticketId, "resume", () => config.workflow.resume(targetOf(entry), subject));
       }
     }
+    return;
   }
-  for (const [id, ticket] of found) {
-    const checkpoint = state.reviewed.get(id);
-    if (checkpoint !== undefined && checkpoint.requirementsHash !== ticket.requirementsHash) {
-      state.blocked.set(id, `requirements changed after successful checkpoint; author a new ticket ID instead of reusing ${id}`);
+
+  const tracked = state.publications.get(result.groupId);
+  state.publications.set(result.groupId, publicationOf(result, tracked?.workspacePath));
+  if (record.state !== "merged") {
+    for (const ticketId of includedIds(result)) state.published.add(ticketId);
+    return;
+  }
+
+  if (record.mergeCommitSha === undefined) {
+    for (const ticketId of includedIds(result)) {
+      blockDescendants(state, ticketId, `merged pull request ${result.pullRequestNumber} has no verifiable merge-result commit`);
     }
-    state.tickets.set(id, ticket);
+    return;
   }
-  state.startupChecked = true;
+
+  let verifyPath: string;
+  try {
+    verifyPath = tracked?.workspacePath ?? (await cloneTargetRepository(result.repository, result.baseBranch));
+  } catch (error) {
+    for (const ticketId of includedIds(result)) {
+      blockDescendants(state, ticketId, `merged-work verification failed for pull request ${result.pullRequestNumber}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return;
+  }
+  let refreshedSha: string;
+  try {
+    refreshedSha = await verifyMergedPublication({ workspacePath: verifyPath, baseBranch: result.baseBranch, baseSha: result.baseSha, publishedSha: result.sourceSha }, record.mergeCommitSha);
+  } catch (error) {
+    for (const ticketId of includedIds(result)) {
+      blockDescendants(state, ticketId, `merged-work verification failed for pull request ${result.pullRequestNumber}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return;
+  }
+  for (const [satisfiedId, baseline] of state.mergedSatisfied) {
+    state.mergedSatisfied.set(satisfiedId, { sha: refreshedSha, repositoryPath: baseline.repositoryPath.length > 0 ? baseline.repositoryPath : verifyPath });
+  }
+  for (const ticketId of includedIds(result)) {
+    state.mergedSatisfied.set(ticketId, { sha: refreshedSha, repositoryPath: verifyPath });
+    const entry = state.issues.get(ticketId);
+    if (entry === undefined) continue;
+    const settled = await reportSettlement(config, ticketId, "done", () =>
+      config.workflow.done(targetOf(entry), subject, { pullRequestUrl: result.pullRequestUrl, mergeCommitSha: record!.mergeCommitSha! }));
+    if (!settled) continue;
+    state.settled.add(ticketId);
+    state.published.delete(ticketId);
+    state.issues.delete(ticketId);
+    state.tickets.delete(ticketId);
+    console.log(`Issue #${entry.snapshot.identity.number} (${ticketId}) is merged at ${refreshedSha}; recorded as Done and closed.`);
+  }
+}
+
+function publicationOf(result: PublicationResult, workspacePath: string | undefined): PublicationFact {
+  return {
+    groupId: result.groupId,
+    includedTicketIds: includedIds(result),
+    number: result.pullRequestNumber,
+    url: result.pullRequestUrl,
+    provider: result.provider,
+    repository: result.repository,
+    baseBranch: result.baseBranch,
+    baseSha: result.baseSha,
+    head: result.head,
+    sourceSha: result.sourceSha,
+    title: result.title,
+    body: result.body,
+    squashPreference: result.squashPreference,
+    workspacePath,
+  };
 }
 
 function deliveryGroups(graph: DependencyGraph, state: DependencyWorkflowState) {
@@ -132,42 +374,75 @@ function baselineFor(ticket: Ticket, state: DependencyWorkflowState): WorkspaceB
 }
 
 async function runTicket(ticket: Ticket, state: DependencyWorkflowState, config: ProcessConfig, baseline?: WorkspaceBaseline): Promise<"reviewed" | "deferred" | "blocked"> {
+  const entry = state.issues.get(ticket.id)!;
+  const target = targetOf(entry);
   for (let attempt = 1; attempt <= config.ticketAttemptsPerCycle; attempt++) {
-    const result = await executeReviewedAttempt(ticket, config, baseline);
+    const authorize = authorizationFor(ticket.id, "In progress", state, config);
+    const result = await executeReviewedAttempt(ticket, config, (attemptId, branch) =>
+      config.workflow.claim(target, attemptId, branch, ticket.repository, ticket.baseBranch), baseline, authorize);
+    if (result.status === "withdrawn") {
+      const reason = `authorization was withdrawn at ${result.stage}: ${result.observed}`;
+      state.blocked.set(ticket.id, reason);
+      await reportSettlement(config, ticket.id, "withdrawn", () =>
+        config.workflow.withdrawn(target, `attempt-${result.attemptId}`, {
+          attemptId: result.attemptId,
+          stage: result.stage,
+          repository: ticket.repository,
+          branch: result.branch,
+          branchUrl: branchBrowserUrl(ticket.repository, result.branch),
+          commitSha: result.preserved?.commitSha ?? "unrecorded",
+          baseBranch: ticket.baseBranch,
+          workspacePath: result.workspacePath,
+          pushed: result.preserved?.pushed ?? false,
+          pushFailure: result.preserved?.pushFailure ?? "the preserved workspace HEAD could not be pushed",
+          reviewed: false,
+        }));
+      return "blocked";
+    }
     if (result.status === "failed") {
       if (!result.retryable) {
-        state.blocked.set(ticket.id, `${result.stage} failed after a durable boundary; operator reconciliation required`);
+        const lapse = detectAuthorizationLapse(result.failure.stderr, config.providers.secrets);
+        if (lapse !== undefined && result.workspacePath !== undefined && result.branch !== undefined) {
+          const facts = await preserveAttemptWorkspace({
+            attemptId: result.attemptId,
+            branch: result.branch,
+            repository: ticket.repository,
+            baseBranch: ticket.baseBranch,
+            workspacePath: result.workspacePath,
+            secrets: config.providers.secrets,
+          }).catch(() => undefined);
+          if (facts !== undefined) {
+            state.blocked.set(ticket.id, `${result.stage} stopped by an authorization lapse (${lapse.source}); work is preserved on branch ${facts.branch} at ${facts.commitSha}`);
+            await reportSettlement(config, ticket.id, "preserved", () => config.workflow.preserved(target, `attempt-${result.attemptId}`, { ...facts, branchUrl: branchBrowserUrl(ticket.repository, facts.branch), reviewed: false }));
+            return "blocked";
+          }
+        }
+        const reason = `${result.stage} failed after a durable boundary; operator reconciliation required`;
+        state.blocked.set(ticket.id, reason);
+        await reportSettlement(config, ticket.id, "blocked", () => config.workflow.blocked(target, reason, `attempt-${result.attemptId}`));
         return "blocked";
       }
       if (attempt === config.ticketAttemptsPerCycle) {
         const reason = `${result.stage}: ${result.failure.stderr}`;
-        try {
-          await annotateRetryable(ticket.path, {
-            timestamp: new Date().toISOString(),
-            cycle: state.cycle,
-            attemptCount: attempt,
-            reason,
-          });
-        } catch (error) {
-          await logSettlementFailure(config, ticket, result.attemptId, "retryable annotation", error);
-          state.blocked.set(ticket.id, "retryable annotation failed; operator reconciliation required");
-          return "blocked";
-        }
         state.retryable.set(ticket.id, reason);
+        await reportSettlement(config, ticket.id, "blocked", () =>
+          config.workflow.blocked(target, `${reason}\n\nThe attempt's workspace is retained on the runner; no pull request was published.`, `attempts-${state.cycle}`));
         return "deferred";
       }
       continue;
     }
-    let current: Ticket;
+    let requirementsHash: string;
     try {
-      current = await loadTicket(ticket.path, config.gitProvider);
+      const latest = await config.backlog.getIssue(entry.snapshot.identity.number);
+      if (latest === undefined) throw new Error("the issue is no longer readable");
+      requirementsHash = parseAuthoredIssueSnapshot(entry.snapshot.identity, latest.body, config.providers).ticket.requirementsHash;
     } catch (error) {
-      await logSettlementFailure(config, ticket, result.checkpoint.attemptId, "requirements recheck", error);
-      state.blocked.set(ticket.id, "ticket requirements could not be rechecked after review; retained checkpoint was not adopted");
+      await logBacklogFailure(config, ticket.id, "requirements recheck", error);
+      state.blocked.set(ticket.id, "ticket requirements could not be rechecked after review; the retained checkpoint was not adopted");
       return "blocked";
     }
-    if (current.requirementsHash !== ticket.requirementsHash) {
-      state.blocked.set(ticket.id, `requirements changed during attempt; retained ${result.checkpoint.workspacePath} was not adopted`);
+    if (requirementsHash !== ticket.requirementsHash) {
+      state.blocked.set(ticket.id, `requirements changed during the attempt; the retained workspace was not adopted`);
       return "blocked";
     }
     state.retryable.delete(ticket.id);
@@ -201,7 +476,7 @@ async function prepareMultiParentBaselines(
       continue;
     }
     try {
-      const integrated = await integrateCandidates(`${groupId}-${ticket.id}-baseline`, parents, config, mergedBaseline);
+      const integrated = await integrateCandidates(`${groupId}-${ticket.id}-baseline`, parents, config, mergedBaseline, groupAuthorization(parents.map((parent) => parent.ticket.id), state, config));
       baselines.set(ticket.id, { sha: integrated.sha, repositoryPath: integrated.workspacePath });
       state.integrationConflicts.set(groupId, [...(state.integrationConflicts.get(groupId) ?? []), ...integrated.conflicts]);
     } catch (error) {
@@ -217,8 +492,9 @@ async function publishReviewedSubset(
   state: DependencyWorkflowState,
   config: ProcessConfig,
   integrated?: ReviewedCandidate,
+  authorize?: StageAuthorization,
 ): Promise<void> {
-  const candidate = integrated ?? await integrateCandidates(groupId, checkpoints, config);
+  const candidate = integrated ?? await integrateCandidates(groupId, checkpoints, config, undefined, authorize);
   const includedSet = new Set<string>();
   for (const checkpoint of checkpoints) dependencyClosure(checkpoint.ticket.id, state.tickets, includedSet);
   const includedTicketIds = [...includedSet].filter((id) => state.reviewed.has(id)).sort();
@@ -228,6 +504,28 @@ async function publishReviewedSubset(
   const tracked = state.publications.get(groupId);
   const publicationAttemptId = `group-${groupId}-${candidate.sha.slice(0, 12)}`;
   const baseSha = (await runGit(candidate.workspacePath, ["rev-parse", `origin/${representative.baseBranch}`], "reading publication base SHA")).trim();
+  const provider = config.providers.resolve(representative.repository);
+  const intent: PublicationIntent = {
+    version: PUBLICATION_RECORD_VERSION,
+    operationKey: operationKey("publication", `group-${groupId}`, candidate.sha),
+    groupId,
+    provider: provider.name,
+    repository: representative.repository,
+    baseBranch: representative.baseBranch,
+    baseSha,
+    head: candidate.branch,
+    sourceSha: candidate.sha,
+    title: tracked?.title ?? "",
+    body: tracked?.body ?? "",
+    mergeStrategy: REQUESTED_MERGE_STRATEGY,
+    included: includedTicketIds.map((id) => {
+      const issue = state.issues.get(id)!.snapshot.identity;
+      return { ticketId: id, issueNumber: issue.number, issueNodeId: issue.nodeId, requirementsHash: state.issues.get(id)!.ticket.requirementsHash };
+    }),
+    recordedAt: new Date().toISOString(),
+  };
+  // The intent is durable before the first remote write, so a crash between push and record is recoverable.
+  await config.ledger.writeIntent(intent);
   const result = await publishPullRequest({
     ticket: representative,
     workspacePath: candidate.workspacePath,
@@ -235,7 +533,9 @@ async function publishReviewedSubset(
     attemptId: publicationAttemptId,
     harness: config.harness,
     runAgent: config.runAgent,
-    gitProvider: config.gitProvider,
+    ...(authorize === undefined ? {} : { authorize }),
+    gitProvider: provider,
+    forbiddenSecrets: config.providers.secrets,
     onContentComplete: (head, logReference) => config.logger.record({
       timestamp: new Date().toISOString(),
       ticketId: representative.id,
@@ -271,50 +571,30 @@ async function publishReviewedSubset(
     }),
   });
 
-  const previouslyPublishedIds = new Set([...state.publications.values()].flatMap((publication) => publication.includedTicketIds));
-  state.publications.set(groupId, {
-    groupId,
-    includedTicketIds,
-    number: result.pullRequest.number,
-    url: result.pullRequest.url,
-    head: result.head,
-    sourceSha: result.finalSha,
+  const published: PublicationResult = {
+    ...intent,
+    pullRequestNumber: result.pullRequest.number,
+    pullRequestUrl: result.pullRequest.url,
+    squashPreference: result.squashPreference,
     title: result.title,
     body: result.body,
-    candidate,
-    baseSha,
-  });
-  // Publication is durable before local settlement. Never publish it again because annotation or movement fails.
-  const newlyIncludedIds = includedTicketIds.filter((id) => !previouslyPublishedIds.has(id));
+    publishedAt: new Date().toISOString(),
+  };
+  await config.ledger.writeResult(published);
+
+  // Publication is durable before backlog settlement. Never publish it again because a comment or status failed.
+  const previouslyPublished = new Set([...state.publications.values()].flatMap((publication) => publication.includedTicketIds));
+  state.publications.set(groupId, publicationOf(published, candidate.workspacePath));
+  const newlyIncludedIds = includedTicketIds.filter((id) => !previouslyPublished.has(id));
+  const targets = newlyIncludedIds.map((id) => state.issues.get(id)).filter((entry) => entry !== undefined).map(targetOf);
+  const settled = await reportSettlement(config, representative.id, "in review", () =>
+    config.workflow.inReview(targets, publicationFacts(state.publications.get(groupId)!), `group-${groupId}`));
   for (const id of newlyIncludedIds) {
-    const ticket = state.tickets.get(id)!;
-    try {
-      await annotatePublication(ticket.path, {
-        timestamp: new Date().toISOString(),
-        groupId,
-        includedTicketIds,
-        finalSha: result.finalSha,
-        pullRequestUrl: result.pullRequest.url,
-      });
-      await annotateCompletion(ticket.path, {
-        timestamp: new Date().toISOString(),
-        attemptId: publicationAttemptId,
-        workspacePath: candidate.workspacePath,
-        branch: result.head,
-        baseBranch: ticket.baseBranch,
-        finalSha: result.finalSha,
-        pullRequestUrl: result.pullRequest.url,
-        squashPreference: result.squashPreference,
-      });
-    } catch (error) {
-      await logSettlementFailure(config, ticket, publicationAttemptId, "completion annotation", error);
+    if (!settled) {
+      state.blocked.set(id, `pull request ${published.pullRequestNumber} was published but not recorded on its issue; operator reconciliation required`);
+      continue;
     }
-    try {
-      const destination = await moveTicket(ticket.path, resolve(config.ticketsDir, "done"), publicationAttemptId);
-      state.tickets.set(id, { ...ticket, path: destination });
-    } catch (error) {
-      await logSettlementFailure(config, ticket, publicationAttemptId, "terminal movement", error);
-    }
+    state.published.add(id);
   }
 }
 
@@ -339,77 +619,74 @@ async function publishGroup(groupId: string, state: DependencyWorkflowState, con
     }
     return;
   }
+  const authorize = groupAuthorization(reviewedIds, state, config);
+  const withdraw = async (stage: string, observed: string, branch: string, commitSha: string, workspacePath: string): Promise<void> => {
+    for (const checkpoint of leafCheckpoints) {
+      const entry = state.issues.get(checkpoint.ticket.id);
+      if (entry === undefined) continue;
+      state.blocked.set(checkpoint.ticket.id, `authorization was withdrawn at ${stage}: ${observed}`);
+      await reportSettlement(config, checkpoint.ticket.id, "withdrawn", () =>
+        config.workflow.withdrawn(targetOf(entry), `group-${groupId}`, {
+          attemptId: checkpoint.attemptId,
+          stage,
+          repository: checkpoint.ticket.repository,
+          branch,
+          branchUrl: branchBrowserUrl(checkpoint.ticket.repository, branch),
+          commitSha,
+          baseBranch: checkpoint.ticket.baseBranch,
+          workspacePath,
+          pushed: false,
+          pushFailure: "the group stopped before its publication push",
+          reviewed: true,
+        }));
+    }
+  };
   let candidate: ReviewedCandidate;
   try {
-    candidate = await integrateCandidates(groupId, leafCheckpoints, config);
+    candidate = await integrateCandidates(groupId, leafCheckpoints, config, undefined, authorize);
   } catch (error) {
+    if (isAuthorizationWithdrawn(error)) {
+      const only = leafCheckpoints[0]!;
+      await withdraw(error.stage, error.observed, only.branch, only.reviewCheckpoint.checkpointSha, only.workspacePath);
+      return;
+    }
     if (leafCheckpoints.length === 1) throw error;
     for (const checkpoint of leafCheckpoints) {
       const subsetId = `${groupId}-${checkpoint.ticket.id}`;
-      if (!state.publications.has(subsetId)) await publishReviewedSubset(subsetId, [checkpoint], state, config);
+      if (!state.publications.has(subsetId)) await publishReviewedSubset(subsetId, [checkpoint], state, config, undefined, authorize);
     }
     return;
   }
-  await publishReviewedSubset(groupId, leafCheckpoints, state, config, candidate);
+  try {
+    await publishReviewedSubset(groupId, leafCheckpoints, state, config, candidate, authorize);
+  } catch (error) {
+    if (!isAuthorizationWithdrawn(error)) throw error;
+    await withdraw(error.stage, error.observed, candidate.branch, candidate.sha, candidate.workspacePath);
+  }
 }
 
-async function reconcilePublications(config: ProcessConfig, state: DependencyWorkflowState): Promise<void> {
-  if (config.gitProvider.getPullRequest === undefined) return;
-  for (const publication of state.publications.values()) {
-    const repository = state.tickets.get(publication.includedTicketIds[0]!)!.repository;
-    let remote;
-    try {
-      remote = await config.gitProvider.getPullRequest(repository, publication.number);
-    } catch (error) {
-      const reason = `pull-request reconciliation failed: ${error instanceof Error ? error.message : String(error)}`;
-      for (const ticket of state.tickets.values()) {
-        if (ticket.dependsOnTickets.some((id) => publication.includedTicketIds.includes(id))) state.blocked.set(ticket.id, reason);
-      }
-      continue;
-    }
-    if (remote?.state !== "merged") continue;
-    if (remote.mergeResultSha === undefined) {
-      for (const ticket of state.tickets.values()) {
-        if (ticket.dependsOnTickets.some((id) => publication.includedTicketIds.includes(id))) {
-          state.blocked.set(ticket.id, `merged pull request ${publication.number} has no verifiable merge-result commit`);
-        }
-      }
-      continue;
-    }
-    try {
-      const firstTicket = state.tickets.get(publication.includedTicketIds[0]!)!;
-      const refreshedBaseSha = await verifyMergedPublication({
-        workspacePath: publication.candidate.workspacePath,
-        baseBranch: firstTicket.baseBranch,
-        baseSha: publication.baseSha,
-        publishedSha: publication.sourceSha,
-      }, remote.mergeResultSha);
-      for (const [ticketId] of state.mergedSatisfied) {
-        state.mergedSatisfied.set(ticketId, { sha: refreshedBaseSha, repositoryPath: publication.candidate.workspacePath });
-      }
-      for (const ticketId of publication.includedTicketIds) {
-        state.mergedSatisfied.set(ticketId, { sha: refreshedBaseSha, repositoryPath: publication.candidate.workspacePath });
-      }
-    } catch (error) {
-      const reason = `merged-work verification failed for pull request ${publication.number}: ${error instanceof Error ? error.message : String(error)}`;
-      for (const ticket of state.tickets.values()) {
-        if (ticket.dependsOnTickets.some((id) => publication.includedTicketIds.includes(id))) state.blocked.set(ticket.id, reason);
-      }
-    }
+/** Re-reconcile every recorded publication, so a merge observed mid-cycle settles before descendants publish. */
+async function reconcileRecordedPublications(config: ProcessConfig, state: DependencyWorkflowState): Promise<void> {
+  for (const result of (await config.ledger.load()).results) {
+    await reconcileResult(config, state, result);
   }
+}
+
+function blockingReasonKey(reason: string): string {
+  return `blocked-${createHash("sha256").update(reason).digest("hex").slice(0, 16)}`;
 }
 
 export async function processDependencyCycle(config: ProcessConfig, state: DependencyWorkflowState): Promise<"processed" | "no-runnable"> {
   state.cycle++;
   await discover(config, state);
-  await reconcilePublications(config, state);
+  await reconcileRecordedPublications(config, state);
   const graph = buildDependencyGraph([...state.tickets.values()]);
 
   for (const [ticketId, reason] of [...state.blocked]) {
     if (reason.startsWith("missing dependencies:") && !graph.missingDependencies.has(ticketId)) state.blocked.delete(ticketId);
   }
   for (const [ticketId, reason] of [...state.blocked]) {
-    if (reason.startsWith("waiting for dependencies:") && state.tickets.get(ticketId)?.dependsOnTickets.every((id) => state.reviewed.has(id))) state.blocked.delete(ticketId);
+    if (reason.startsWith("waiting for dependencies:") && state.tickets.get(ticketId)?.dependsOnTickets.every((id) => state.reviewed.has(id) || state.published.has(id))) state.blocked.delete(ticketId);
   }
   for (const [ticketId, missing] of graph.missingDependencies) {
     if (!state.blocked.has(ticketId) || state.blocked.get(ticketId)?.startsWith("missing dependencies:")) {
@@ -431,22 +708,15 @@ export async function processDependencyCycle(config: ProcessConfig, state: Depen
     }
   }
   for (const [ticketId, reason] of state.blocked) {
-    const ticket = state.tickets.get(ticketId);
-    if (ticket !== undefined && state.blockedAnnotations.get(ticketId) !== reason) {
-      await annotateBlocked(ticket.path, {
-        timestamp: new Date().toISOString(),
-        cycle: state.cycle,
-        attemptCount: 0,
-        reason,
-        blockedBy: ticket.dependsOnTickets,
-      });
-      await reportBlocked(config, ticket, reason);
-      state.blockedAnnotations.set(ticketId, reason);
-    }
+    const entry = state.issues.get(ticketId);
+    if (entry === undefined) continue;
+    const ticket = entry.ticket;
+    await reportBlocked(config, ticket, reason);
+    await reportSettlement(config, ticketId, "blocked", () => config.workflow.blocked(targetOf(entry), reason, blockingReasonKey(reason)));
   }
 
-  const completed = new Set(state.reviewed.keys());
-  const excluded = new Set(state.blocked.keys());
+  const completed = new Set([...state.reviewed.keys(), ...state.published]);
+  const excluded = new Set([...state.blocked.keys(), ...nonSchedulableStatuses(state)]);
   const readyIds = graph.readyTicketIds(completed, excluded);
   const groups = deliveryGroups(graph, state).filter((group) => group.memberIds.some((id) => readyIds.includes(id)));
   if (groups.length === 0) return "no-runnable" as const;
@@ -460,10 +730,10 @@ export async function processDependencyCycle(config: ProcessConfig, state: Depen
     const deferred = new Set<string>();
     for (;;) {
       for (const [ticketId, reason] of [...state.blocked]) {
-        if (reason.startsWith("waiting for dependencies:") && state.tickets.get(ticketId)?.dependsOnTickets.every((id) => state.reviewed.has(id))) state.blocked.delete(ticketId);
+        if (reason.startsWith("waiting for dependencies:") && state.tickets.get(ticketId)?.dependsOnTickets.every((id) => state.reviewed.has(id) || state.published.has(id))) state.blocked.delete(ticketId);
       }
       const currentReady = graph
-        .readyTicketIds(new Set(state.reviewed.keys()), new Set([...state.blocked.keys(), ...deferred]))
+        .readyTicketIds(new Set([...state.reviewed.keys(), ...state.published]), new Set([...state.blocked.keys(), ...deferred, ...nonSchedulableStatuses(state)]))
         .filter((id) => group.memberIds.includes(id))
         .map((id) => state.tickets.get(id)!);
       if (currentReady.length === 0) break;
@@ -481,12 +751,17 @@ export async function processDependencyCycle(config: ProcessConfig, state: Depen
     for (const ticketId of group.memberIds) {
       const ticket = state.tickets.get(ticketId)!;
       if (!state.reviewed.has(ticketId) && !state.retryable.has(ticketId) && !state.blocked.has(ticketId)) {
-        const waiting = ticket.dependsOnTickets.filter((id) => !state.reviewed.has(id));
+        const waiting = ticket.dependsOnTickets.filter((id) => !state.reviewed.has(id) && !state.published.has(id));
         if (waiting.length > 0) state.blocked.set(ticketId, `waiting for dependencies: ${waiting.join(", ")}`);
       }
     }
-    await reconcilePublications(config, state);
+    await reconcileRecordedPublications(config, state);
     await publishGroup(group.id, state, config);
   }
   return "processed" as const;
+}
+
+/** Issues whose board status is not an instruction to develop: they are never scheduled. */
+function nonSchedulableStatuses(state: DependencyWorkflowState): readonly string[] {
+  return [...state.issues].filter(([, entry]) => entry.status !== "Ready for development" && entry.status !== "In progress").map(([ticketId]) => ticketId);
 }

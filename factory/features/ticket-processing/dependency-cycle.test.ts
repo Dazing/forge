@@ -1,4 +1,4 @@
-import { access, chmod, mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
@@ -6,71 +6,199 @@ import { test } from "node:test";
 import type { AgentRunRequest, AgentRunner, AgentRunResult } from "../../infrastructure/agent-runtime/agent-runtime.js";
 import { MissingAgentHandoffError } from "../../infrastructure/agent-runtime/handoff.js";
 import { runCommand, runGit } from "../../infrastructure/git-provider/git.js";
-import type { DraftPullRequestRequest, GitProvider, PullRequestDetails, UpdateDraftPullRequestRequest } from "../../infrastructure/git-provider/git-provider.js";
+import { createGitProviderRegistry } from "../../infrastructure/git-provider/create-git-provider.js";
+import type { DraftPullRequestRequest, Fetch } from "../../infrastructure/git-provider/git-provider.js";
 import { InvocationLogger } from "../../infrastructure/logging/invocation-log.js";
+import { redactSecrets } from "../../shared/redact-secret.js";
+import { BacklogWorkflow } from "./backlog-workflow.js";
+import { PublicationLedger } from "./publication-ledger.js";
 import { createDependencyWorkflowState, processDependencyCycle } from "./dependency-cycle.js";
 import { JobLimiter } from "./job-limiter.js";
 import type { ProcessConfig } from "./process-config.js";
+import {
+  TEST_ADO_REPOSITORY as ADO_REPOSITORY,
+  TEST_AZURE_DEVOPS_PAT as AZURE_DEVOPS_PAT,
+  TEST_GITHUB_TOKEN as GITHUB_TOKEN,
+  TEST_REPOSITORY as TARGET_REPOSITORY,
+  TestBacklog,
+  type TestSeed as Seed,
+} from "./test-backlog.js";
+
+// The backlog is the only ticket source, so every fixture seeds authored issues plus their Project
+// board entries, and the coordinator settles its findings back onto those issues. Credentials are
+// fixtures; the target repository is a canonical GitHub SSH URL that a fixture `ssh` serves from a
+// real local bare repository, so clone, merge, and push stay real Git operations.
 
 process.env.GIT_AUTHOR_NAME = "Dependency Test";
 process.env.GIT_AUTHOR_EMAIL = "dependency@test.example";
 process.env.GIT_COMMITTER_NAME = "Dependency Test";
 process.env.GIT_COMMITTER_EMAIL = "dependency@test.example";
 
-async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "sandcastle-dependencies-"));
+/** One pull request as the fake provider stores it; its head SHA is always read from the real remote. */
+type FakePull = Readonly<{ number: number; url: string; head: string; base: string; title: string; body: string; draft: boolean; state: "open" | "closed"; created: string; mergedAt: string | null; mergeCommitSha: string | null }>;
+
+/** The GitHub REST pulls endpoints, served from an in-memory pull list over the real local remote. */
+function fakeGitHub(remote: string, pulls: FakePull[]) {
+  const creates: DraftPullRequestRequest[] = [];
+  const patches: Readonly<{ number: number; title: string; body: string }>[] = [];
+  /** An operator merges the draft: the fake reports the merge-result commit the test pushed to `main`. */
+  const merge = (number: number, mergeCommitSha: string) => {
+    const index = pulls.findIndex((pull) => pull.number === number);
+    pulls[index] = { ...pulls[index]!, state: "closed", mergedAt: "2026-10-16T08:00:00.000Z", mergeCommitSha };
+  };
+  const record = (pull: FakePull) => ({
+    number: pull.number,
+    html_url: pull.url,
+    state: pull.state,
+    draft: pull.draft,
+    merged_at: pull.mergedAt,
+    merge_commit_sha: pull.mergeCommitSha,
+    title: pull.title,
+    body: pull.body,
+  });
+  const sourceSha = async (branch: string) => {
+    try {
+      return (await runCommand("git", ["--git-dir", remote, "rev-parse", `refs/heads/${branch}`], "reading published branch")).trim();
+    } catch {
+      return "0".repeat(40);
+    }
+  };
+  const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, statusText: status === 200 ? "OK" : "Not Found" });
+
+  const fetchImpl: Fetch = async (url, init) => {
+    const target = new URL(url);
+    const payload = typeof init.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+    const text = (key: string) => String(payload[key] ?? "");
+    if (target.pathname === "/repos/acme/app/pulls" && init.method === "POST") {
+      creates.push({ repositoryUrl: TARGET_REPOSITORY, head: text("head"), base: text("base"), title: text("title"), body: text("body"), mergeStrategy: "squash" });
+      const number = 100 + pulls.length;
+      const pull: FakePull = { number, url: `https://github.com/acme/app/pull/${number}`, head: text("head"), base: text("base"), title: text("title"), body: text("body"), draft: payload.draft === true, state: "open", created: `2026-10-16T07:00:0${pulls.length}.000Z`, mergedAt: null, mergeCommitSha: null };
+      pulls.push(pull);
+      return json({ number, html_url: pull.url });
+    }
+    const single = /^\/repos\/acme\/app\/pulls\/(\d+)$/.exec(target.pathname);
+    if (single !== null) {
+      const pull = pulls.find((candidate) => candidate.number === Number(single[1]));
+      if (pull === undefined) return json({ message: "Not Found" }, 404);
+      if (init.method === "PATCH") {
+        patches.push({ number: pull.number, title: text("title"), body: text("body") });
+        pulls[pulls.indexOf(pull)] = { ...pull, title: text("title"), body: text("body") };
+        return json({ number: pull.number, html_url: pull.url });
+      }
+      return json({
+        ...record(pull),
+        head: { ref: pull.head, sha: await sourceSha(pull.head) },
+        base: { ref: pull.base },
+      });
+    }
+    assert.equal(target.pathname, "/repos/acme/app/pulls", `unexpected provider request ${init.method} ${url}`);
+    const head = target.searchParams.get("head")!.split(":")[1]!;
+    const base = target.searchParams.get("base")!;
+    const items = await Promise.all(
+      pulls
+        .filter((pull) => pull.head === head && pull.base === base)
+        .map(async (pull) => ({
+          ...record(pull),
+          created_at: pull.created,
+          head: { ref: pull.head, sha: await sourceSha(pull.head) },
+          base: { ref: pull.base },
+        })),
+    );
+    return json(items);
+  };
+
+  return { fetchImpl, creates, patches, merge };
+}
+
+/** One fixture: a real target bare repository, a real factory checkout with no `tickets/`, and the backlog issues. */
+async function fixture(seeds: readonly Seed[]) {
+  const root = await mkdtemp(join(tmpdir(), "sandcastle-backlog-"));
   const remote = join(root, "remote.git");
-  const seed = join(root, "seed");
+  const seedDirectory = join(root, "seed");
   const factoryRoot = join(root, "factory");
-  const ticketsDir = join(factoryRoot, "tickets");
   await runCommand("git", ["init", "--bare", remote], "creating remote");
-  await runCommand("git", ["clone", remote, seed], "cloning seed");
-  await runGit(seed, ["checkout", "-B", "main"], "creating main");
-  await writeFile(join(seed, "README.md"), "# app\n");
-  await runGit(seed, ["add", "README.md"], "staging seed");
-  await runGit(seed, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"], "committing seed");
-  await runGit(seed, ["push", "origin", "main"], "pushing seed");
+  await runCommand("git", ["clone", remote, seedDirectory], "cloning seed");
+  await runGit(seedDirectory, ["checkout", "-B", "main"], "creating main");
+  await writeFile(join(seedDirectory, "README.md"), "# app\n");
+  await runGit(seedDirectory, ["add", "README.md"], "staging seed");
+  await runGit(seedDirectory, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"], "committing seed");
+  await runGit(seedDirectory, ["push", "origin", "main"], "pushing seed");
   await runCommand("git", ["init", "-b", "main", factoryRoot], "creating factory");
   await writeFile(join(factoryRoot, "README.md"), "factory\n");
   await writeFile(join(factoryRoot, ".gitignore"), ".logs/\n.workspaces/\n");
   await runGit(factoryRoot, ["add", "README.md", ".gitignore"], "staging factory");
   await runGit(factoryRoot, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "factory"], "committing factory");
-  await mkdir(ticketsDir);
-  return { root, remote, factoryRoot, ticketsDir };
+
+  // The runner names the canonical GitHub SSH URL, so a fixture `ssh` serves exactly that
+  // repository from the local bare remote over the real Git transport; clone, merge, and push stay real.
+  const ssh = join(root, "fake-ssh.sh");
+  await writeFile(ssh, [
+    "#!/bin/sh",
+    `REPO='${remote}'`,
+    'for argument in "$@"; do command="$argument"; done',
+    'case "$command" in',
+    '  git-upload-pack*) exec git-upload-pack "$REPO" ;;',
+    '  git-receive-pack*) exec git-receive-pack "$REPO" ;;',
+    '  *) echo "fixture ssh received an unexpected command: $command" >&2; exit 128 ;;',
+    'esac',
+    "",
+  ].join("\n"));
+  await chmod(ssh, 0o755);
+  process.env.GIT_SSH_COMMAND = ssh;
+
+  const pulls: FakePull[] = [];
+  const { fetchImpl, creates, patches, merge } = fakeGitHub(remote, pulls);
+  const providers = createGitProviderRegistry({ GITHUB_TOKEN, AZURE_DEVOPS_PAT, GITHUB_REPOSITORY: "acme/tickets" }, fetchImpl);
+  const backlog = new TestBacklog();
+  for (const entry of seeds) backlog.seed(entry);
+  const secrets = [...providers.secrets, ...backlog.secrets];
+  const ledger = PublicationLedger.open(factoryRoot);
+  const workflow = new BacklogWorkflow(backlog, ledger, (text) => redactSecrets(secrets, text));
+  await workflow.validate();
+  const logger = await InvocationLogger.create(factoryRoot, secrets);
+  return { root, remote, factoryRoot, backlog, ledger, workflow, logger, providers, pulls, creates, patches, merge };
 }
 
-function markdown(id: string, remote: string, dependencies: readonly string[]) {
-  return `---\nid: ${id}\nname: ${id}\nrepository: ${remote}\ndependsOnTickets: [${dependencies.join(", ")}]\n---\n# ${id}\n\nImplement ${id}.\n`;
+/** The coordinator's own checkout carries no ticket files: the backlog is the ticket source. */
+async function assertNoTicketCheckout(factoryRoot: string): Promise<void> {
+  assert.equal((await readdir(factoryRoot)).includes("tickets"), false);
+  await assert.rejects(readFile(join(factoryRoot, "tickets", "a.md"), "utf8"), { code: "ENOENT" });
 }
 
-/** Mimics the runtime: every run for one attempt and stage gets the next numbered transcript inside that attempt's directory. */
-function transcriptFor(request: AgentRunRequest<unknown>): string {
-  const target = request.logTarget;
-  if (target.scope === "sequence") return `planner/${String(target.cycle).padStart(3, "0")}.log`;
-  const key = `${target.attemptId}/${target.stage}`;
-  const number = (RUNS.get(key) ?? 0) + 1;
-  RUNS.set(key, number);
-  return `${target.attemptId}/${target.stage}-${number}.log`;
+/** Every fake agent run writes a real transcript and returns the handoff `run` produces for it. */
+function transcriptRunner(logger: InvocationLogger, run: (request: AgentRunRequest<unknown>) => Promise<Record<string, unknown>>): AgentRunner {
+  return async <TOutput>(request: AgentRunRequest<TOutput>) => {
+    const transcript = await logger.allocate(request.logTarget);
+    await writeFile(transcript.path, `${request.name} transcript\n`);
+    const handoff = await run(request as unknown as AgentRunRequest<unknown>);
+    return { iterations: [], commits: [], stdout: "", branch: "", logReference: transcript.reference, handoff } as unknown as AgentRunResult<TOutput>;
+  };
 }
-const RUNS = new Map<string, number>();
 
-test("diamond dependencies use isolated sibling baselines, bounded overlap, reviewed integration, and one group publication", async () => {
-  const { remote, factoryRoot, ticketsDir } = await fixture();
-  for (const [id, dependencies] of [["a", []], ["b", ["a"]], ["c", ["a"]], ["d", ["b", "c"]]] as const) {
-    await writeFile(join(ticketsDir, `${id}.md`), markdown(id, remote, dependencies));
-  }
+/** The planner answers with every supplied group and its full membership. */
+async function planAll(request: AgentRunRequest<unknown>): Promise<Record<string, unknown>> {
+  const groups = request.promptArgs.GROUPS!;
+  const groupId = /<group id="([^"]+)">/.exec(groups)![1]!;
+  return { groups: [{ groupId, tickets: [...groups.matchAll(/- ([^:]+): (.+)/g)].map((match) => ({ id: match[1]!, title: match[2]! })) }] };
+}
+
+test("diamond dependencies use isolated sibling baselines, bounded overlap, reviewed integration, and one group publication settled on every issue", async () => {
+  const { factoryRoot, backlog, ledger, workflow, logger, providers, creates } = await fixture([
+    { id: "a", number: 11, status: "Ready for development" },
+    { id: "b", number: 12, status: "Ready for development", dependencies: ["a"] },
+    { id: "c", number: 13, status: "Ready for development", dependencies: ["a"] },
+    { id: "d", number: 14, status: "Ready for development", dependencies: ["b", "c"] },
+    { id: "azure-only", number: 15, status: "Blocked", repository: ADO_REPOSITORY },
+  ]);
+  await assertNoTicketCheckout(factoryRoot);
+  assert.equal(providers.resolve(ADO_REPOSITORY).name, "azure-devops", "the Azure DevOps ticket routes to its own adapter");
+
   let activeImplementations = 0;
-  const siblingBarrier = Promise.withResolvers<void>();
   let maxActiveImplementations = 0;
+  const siblingBarrier = Promise.withResolvers<void>();
   const baselines = new Map<string, string[]>();
-  const runAgent: AgentRunner = async <TOutput>(request: AgentRunRequest<TOutput>) => {
-    const base = { iterations: [], commits: [], stdout: "", branch: "" };
-    if (request.name.startsWith("plan-groups-")) {
-      const groupsText = request.promptArgs.GROUPS!;
-      const groupId = /<group id="([^"]+)">/.exec(groupsText)![1]!;
-      const tickets = [...groupsText.matchAll(/- ([^:]+): (.+)/g)].map((match) => ({ id: match[1]!, title: match[2]! }));
-      return { ...base, logReference: transcriptFor(request), handoff: { groups: [{ groupId, tickets }] } } as unknown as AgentRunResult<TOutput>;
-    }
+  const runAgent = transcriptRunner(logger, async (request) => {
+    if (request.name.startsWith("plan-groups-")) return planAll(request);
     if (request.name.startsWith("implement-")) {
       const id = request.promptArgs.TICKET_ID!;
       baselines.set(id, (await runGit(request.cwd, ["ls-tree", "--name-only", "HEAD"], "reading attempt baseline")).split("\n").filter(Boolean));
@@ -83,71 +211,90 @@ test("diamond dependencies use isolated sibling baselines, bounded overlap, revi
       await writeFile(join(request.cwd, `${id}.txt`), `${id}\n`);
       if (id === "b" || id === "c") await writeFile(join(request.cwd, "shared.txt"), `${id}\n`);
       activeImplementations--;
-      return { ...base, logReference: transcriptFor(request), handoff: { message: `feat(${id}): implement ${id}` } } as unknown as AgentRunResult<TOutput>;
+      return { message: `feat(${id}): implement ${id}` };
     }
-    if (request.name.startsWith("review-")) return { ...base, logReference: transcriptFor(request), handoff: { message: "chore(review): verify combined behavior" } } as unknown as AgentRunResult<TOutput>;
+    if (request.name.startsWith("review-")) return { message: "chore(review): verify combined behavior" };
     if (request.name.startsWith("integrate-")) {
       const conflicts = request.promptArgs.CONFLICT_PATHS === "none" ? [] : request.promptArgs.CONFLICT_PATHS!.split("\n");
       if (conflicts.includes("shared.txt")) {
         await writeFile(join(request.cwd, "shared.txt"), "b\nc\n");
         await runGit(request.cwd, ["add", "shared.txt"], "resolving integration fixture conflict");
       }
-      return { ...base, logReference: transcriptFor(request), handoff: { message: "chore(integration): review combined behavior", conflicts: conflicts.map((path) => ({ path, disposition: "combined" })) } } as unknown as AgentRunResult<TOutput>;
+      return { message: "chore(integration): review combined behavior", conflicts: conflicts.map((path) => ({ path, disposition: "combined" })) };
     }
-    return { ...base, logReference: transcriptFor(request), handoff: { title: "Deliver dependency group", body: "Reviewed as one dependency group." } } as unknown as AgentRunResult<TOutput>;
-  };
-  const requests: DraftPullRequestRequest[] = [];
-  const provider: GitProvider = {
-    name: "github",
-    credential: "secret",
-    mergeStrategySupport: "unsupported",
-    validateRepository: (url) => { if (url !== remote) throw new Error("unexpected repository"); },
-    createDraftPullRequest: async (request) => { requests.push(request); return { number: 1, url: "https://example.test/pr/1", squashPreference: "unsupported" }; },
-    secrets: () => ["secret"],
-  };
-  const limiter = new JobLimiter(2);
+    return { title: "Deliver dependency group", body: "Reviewed as one dependency group." };
+  });
   const config: ProcessConfig = {
-    ticketsDir,
     factoryRoot,
     harness: "pi",
-    logger: await InvocationLogger.create(factoryRoot, provider.credential),
-    gitProvider: provider,
-    runAgent: limiter.wrap(runAgent),
+    logger,
+    providers,
+    backlog,
+    workflow,
+    ledger,
+    runAgent: new JobLimiter(2).wrap(runAgent),
     maxParallel: 2,
     ticketAttemptsPerCycle: 2,
   };
 
   const state = createDependencyWorkflowState();
-  await processDependencyCycle(config, state);
+  assert.equal(await processDependencyCycle(config, state), "processed");
+  assert.deepEqual([...state.blocked.keys()], [], JSON.stringify([...state.retryable]));
 
-  assert.equal(maxActiveImplementations, 2, JSON.stringify({ reviewed: [...state.reviewed.keys()], blocked: [...state.blocked] }));
+  assert.equal(maxActiveImplementations, 2, "the cycle never ran more than its bounded overlap");
   assert.deepEqual(baselines.get("b"), ["README.md", "a.txt"]);
   assert.deepEqual(baselines.get("c"), ["README.md", "a.txt"]);
   assert.deepEqual(baselines.get("d"), ["README.md", "a.txt", "b.txt", "c.txt", "shared.txt"]);
-  assert.equal(requests.length, 1);
-  assert.match(requests[0]!.body, /Included: a \(a\), b \(b\), c \(c\), d \(d\)/);
-  assert.match(requests[0]!.body, /shared\.txt: combined/);
-  for (const id of ["a", "b", "c", "d"]) assert.match(await readFile(join(ticketsDir, "done", `${id}.md`), "utf8"), /Group publication/);
+
+  assert.equal(creates.length, 1, "one dependency group publishes exactly one draft pull request");
+  assert.match(creates[0]!.body, /Included: a \(a\), b \(b\), c \(c\), d \(d\)/);
+  assert.match(creates[0]!.body, /shared\.txt: combined/);
+
+  const pullRequestUrl = "https://github.com/acme/app/pull/100";
+  for (const [id, number] of [["a", 11], ["b", 12], ["c", 13], ["d", 14]] as const) {
+    assert.equal(backlog.statusOf(id), "In review", `${id} never reached the review column`);
+    assert.deepEqual(backlog.transitions.filter((entry) => entry.startsWith(`${id}=`)), [`${id}=In progress`, `${id}=In review`]);
+    assert.equal(backlog.bodies(id).filter((body) => body.includes("## Factory attempt started")).length, 1);
+    const published = backlog.bodiesWith(id, `factory:publication:issue-${number}:https-github.com-acme-app-pull-100`);
+    assert.equal(published.length, 1, `${id} has no publication comment: ${JSON.stringify(backlog.bodies(id))}`);
+    assert.match(published[0]!, new RegExp(`- Pull request: #100 ${pullRequestUrl}`));
+    assert.match(published[0]!, new RegExp(`- Ticket: \\\`${id}\\\``));
+    assert.match(published[0]!, /Requested merge method: squash \(unsupported\)/);
+    for (const body of backlog.bodies(id)) assert.ok(!body.includes(GITHUB_TOKEN), "a fixture credential reached an issue comment");
+  }
+
+  const snapshot = await ledger.load();
+  assert.deepEqual(snapshot.corrupt, []);
+  assert.deepEqual(snapshot.settlements, [], "every settled effect completed, so nothing awaits replay");
+  assert.equal(snapshot.intents.length, 1);
+  assert.equal(snapshot.results.length, 1);
+  const result = snapshot.results[0]!;
+  assert.equal(result.operationKey, snapshot.intents[0]!.operationKey);
+  assert.equal(result.pullRequestUrl, pullRequestUrl);
+  assert.equal(result.provider, "github");
+  assert.equal(result.repository, TARGET_REPOSITORY);
+  assert.equal(result.mergeStrategy, "squash");
+  assert.deepEqual(result.included.map((entry) => [entry.ticketId, entry.issueNumber, entry.issueNodeId]), [
+    ["a", 11, "I_NODE_a"], ["b", 12, "I_NODE_b"], ["c", 13, "I_NODE_c"], ["d", 14, "I_NODE_d"],
+  ]);
+
+  assert.equal(backlog.statusOf("azure-only"), "Blocked", "a parked Azure DevOps issue is never scheduled");
+  assert.deepEqual(backlog.bodies("azure-only"), []);
 });
 
-test("an exhausted ticket publishes reviewed ancestors, blocks descendants, then retries fresh next cycle", async () => {
-  const { remote, factoryRoot, ticketsDir } = await fixture();
-  for (const [id, dependencies] of [["a", []], ["b", ["a"]], ["c", ["b"]]] as const) {
-    await writeFile(join(ticketsDir, `${id}.md`), markdown(id, remote, dependencies));
-  }
+test("an exhausted issue publishes its reviewed ancestor, parks its descendants on the board, then retries fresh and extends the same draft", async () => {
+  const { factoryRoot, backlog, ledger, workflow, logger, providers, creates, patches } = await fixture([
+    { id: "a", number: 21, status: "Ready for development" },
+    { id: "b", number: 22, status: "Ready for development", dependencies: ["a"] },
+    { id: "c", number: 23, status: "Ready for development", dependencies: ["b"] },
+  ]);
   let cycle = 1;
   let bImplementRuns = 0;
   let cImplementRuns = 0;
   const bWorkspaces = new Set<string>();
   let freshRetryWasClean = false;
-  const runAgent: AgentRunner = async <TOutput>(request: AgentRunRequest<TOutput>) => {
-    const base = { iterations: [], commits: [], stdout: "", branch: "" };
-    if (request.name.startsWith("plan-groups-")) {
-      const groupsText = request.promptArgs.GROUPS!;
-      const groupId = /<group id="([^"]+)">/.exec(groupsText)![1]!;
-      const tickets = [...groupsText.matchAll(/- ([^:]+): (.+)/g)].map((match) => ({ id: match[1]!, title: match[2]! }));
-      return { ...base, logReference: transcriptFor(request), handoff: { groups: [{ groupId, tickets }] } } as unknown as AgentRunResult<TOutput>;
-    }
+  const runAgent = transcriptRunner(logger, async (request) => {
+    if (request.name.startsWith("plan-groups-")) return planAll(request);
     if (request.name.startsWith("implement-")) {
       const id = request.promptArgs.TICKET_ID!;
       if (id === "b") {
@@ -162,271 +309,271 @@ test("an exhausted ticket publishes reviewed ancestors, blocks descendants, then
       }
       if (id === "c") cImplementRuns++;
       await writeFile(join(request.cwd, `${id}.txt`), `${id}\n`);
-      return { ...base, logReference: transcriptFor(request), handoff: { message: `feat(${id}): implement ${id}` } } as unknown as AgentRunResult<TOutput>;
+      return { message: `feat(${id}): implement ${id}` };
     }
-    if (request.name.startsWith("review-")) return { ...base, logReference: transcriptFor(request), handoff: { message: "chore(review): verify behavior" } } as unknown as AgentRunResult<TOutput>;
-    if (request.name.startsWith("integrate-")) return { ...base, logReference: transcriptFor(request), handoff: { message: "chore(integration): verify group", conflicts: [] } } as unknown as AgentRunResult<TOutput>;
-    return { ...base, logReference: transcriptFor(request), handoff: { title: `Cycle ${cycle}`, body: `Cycle ${cycle} delivery.` } } as unknown as AgentRunResult<TOutput>;
-  };
-  const requests: DraftPullRequestRequest[] = [];
-  const updates: UpdateDraftPullRequestRequest[] = [];
-  let pullRequest: PullRequestDetails | undefined;
-  const provider: GitProvider = {
-    name: "github",
-    credential: "secret",
-    mergeStrategySupport: "unsupported",
-    validateRepository: (url) => { if (url !== remote) throw new Error("unexpected repository"); },
-    createDraftPullRequest: async (request) => {
-      requests.push(request);
-      const sourceSha = (await runCommand("git", ["--git-dir", remote, "rev-parse", `refs/heads/${request.head}`], "reading published test branch")).trim();
-      pullRequest = { number: 1, url: "https://example.test/pr/1", state: "open", draft: true, head: request.head, base: request.base, sourceSha, title: request.title, body: request.body, squashPreference: "unsupported" };
-      return { number: 1, url: pullRequest.url, squashPreference: "unsupported" };
-    },
-    getPullRequest: async () => pullRequest,
-    updateDraftPullRequest: async (request) => {
-      updates.push(request);
-      pullRequest = { ...pullRequest!, sourceSha: request.expectedSourceSha, title: request.title, body: request.body };
-      return { number: 1, url: pullRequest.url, squashPreference: "unsupported" };
-    },
-    secrets: () => ["secret"],
-  };
-  const config: ProcessConfig = {
-    ticketsDir,
-    factoryRoot,
-    harness: "pi",
-    logger: await InvocationLogger.create(factoryRoot, provider.credential),
-    gitProvider: provider,
-    runAgent,
-    maxParallel: 1,
-    ticketAttemptsPerCycle: 1,
-  };
+    if (request.name.startsWith("review-")) return { message: "chore(review): verify behavior" };
+    if (request.name.startsWith("integrate-")) return { message: "chore(integration): verify group", conflicts: [] };
+    return { title: `Cycle ${cycle}`, body: `Cycle ${cycle} delivery.` };
+  });
+  const config: ProcessConfig = { factoryRoot, harness: "pi", logger, providers, backlog, workflow, ledger, runAgent, maxParallel: 1, ticketAttemptsPerCycle: 1 };
   const state = createDependencyWorkflowState();
 
   await processDependencyCycle(config, state);
-  assert.deepEqual([...state.reviewed.keys()], ["a"]);
-  assert.equal(cImplementRuns, 0);
-  assert.equal(requests.length, 1);
-  assert.match(requests[0]!.body, /Retryable: b/);
-  assert.match(requests[0]!.body, /Blocked: c/);
 
+  assert.deepEqual([...state.reviewed.keys()], ["a"]);
+  assert.equal(cImplementRuns, 0, "a descendant of an exhausted issue is never implemented");
+  assert.equal(creates.length, 1);
+  assert.match(creates[0]!.body, /Retryable: b/);
+  assert.match(creates[0]!.body, /Blocked: c/);
+  assert.equal(backlog.statusOf("a"), "In review");
+  assert.equal(backlog.statusOf("b"), "Blocked");
+  assert.match(state.blocked.get("c")!, /waiting for dependencies: b/);
+  const exhausted = backlog.bodiesWith("b", "factory:failure:issue-22:attempts-1");
+  assert.equal(exhausted.length, 1, JSON.stringify(backlog.bodies("b")));
+  assert.match(exhausted[0]!, /The attempt's workspace is retained/);
+
+  // The runner parked the exhausted issue on the board, so only an operator re-queue resumes it.
+  backlog.moveTo("b", "Ready for development");
   cycle = 2;
   await processDependencyCycle(config, state);
-  assert.equal(bImplementRuns, 4);
-  assert.equal(bWorkspaces.size, 2);
-  assert.equal(freshRetryWasClean, true);
-  assert.equal(cImplementRuns, 1);
+
+  assert.equal(bImplementRuns, 4, "three failed iterations in the retained workspace, then one fresh run");
+  assert.equal(bWorkspaces.size, 2, "the retry runs in a second workspace, not the retained one");
+  assert.equal(freshRetryWasClean, true, "the fresh workspace carries nothing from the failed attempt");
+  assert.equal(cImplementRuns, 1, "the descendant resumes once its dependency is reviewed again");
   assert.deepEqual([...state.reviewed.keys()], ["a", "b", "c"]);
-  assert.equal(requests.length, 1);
-  assert.equal(updates.length, 1);
-  assert.match(updates[0]!.body, /Included: a \(a\), b \(b\), c \(c\)/);
+  assert.equal(creates.length, 1, "the resumed work extends the tracked draft instead of opening a second one");
+  assert.equal(patches.length, 1);
+  assert.match(patches[0]!.body, /Included: a \(a\), b \(b\), c \(c\)/);
+  assert.equal(backlog.statusOf("b"), "In review");
+  assert.equal(backlog.statusOf("c"), "In review");
+  assert.deepEqual(backlog.transitions.filter((entry) => entry.startsWith("b=")), ["b=In progress", "b=Blocked", "b=In progress", "b=In review"]);
+
+  // The parked descendant was reported onto its own issue at the start of the resume cycle, then resumed.
+  assert.deepEqual(backlog.transitions.filter((entry) => entry.startsWith("c=")), ["c=Blocked", "c=In progress", "c=In review"]);
+  const descendant = backlog.bodies("c").filter((body) => body.includes("waiting for dependencies: b"));
+  assert.equal(descendant.length, 1, JSON.stringify(backlog.bodies("c")));
+  assert.match(descendant[0]!, /## Factory blocked/);
+  assert.equal(backlog.bodiesWith("b", "factory:failure:issue-22:attempts-1").length, 1, "one exhausted-attempt report is never repeated");
+  assert.equal(backlog.bodies("a").filter((body) => body.includes("## Factory pull request")).length, 1, "an already published issue is commented on once");
+  for (const id of ["b", "c"] as const) {
+    assert.equal(backlog.bodiesWith(id, `factory:publication:issue-${backlog.issueNumber(id)}:https-github.com-acme-app-pull-100`).length, 1);
+  }
+
+  const snapshot = await ledger.load();
+  assert.equal(snapshot.intents.length, 2, "each publication is durable before its push");
+  assert.equal(snapshot.results.length, 2);
+  assert.deepEqual(snapshot.settlements, []);
+  // Ledger files are keyed by operation, so the extension is found by the work it carries.
+  const extended = snapshot.results.find((result) => result.included.length === 3)!;
+  assert.deepEqual(extended.included.map((entry) => entry.ticketId), ["a", "b", "c"]);
+  assert.equal(extended.pullRequestNumber, 100, "the extension updated the tracked draft");
 });
 
-test("failed combined review publishes separate reviewed subsets and leaves multi-parent descendants blocked", async () => {
-  const { remote, factoryRoot, ticketsDir } = await fixture();
-  for (const [id, dependencies] of [["a", []], ["b", ["a"]], ["c", ["a"]], ["d", ["b", "c"]]] as const) {
-    await writeFile(join(ticketsDir, `${id}.md`), markdown(id, remote, dependencies));
-  }
-  let dRuns = 0;
-  const runAgent: AgentRunner = async <TOutput>(request: AgentRunRequest<TOutput>) => {
-    const base = { iterations: [], commits: [], stdout: "", branch: "" };
-    if (request.name.startsWith("plan-groups-")) {
-      const groupId = /<group id="([^"]+)">/.exec(request.promptArgs.GROUPS!)![1]!;
-      const tickets = [...request.promptArgs.GROUPS!.matchAll(/- ([^:]+): (.+)/g)].map((match) => ({ id: match[1]!, title: match[2]! }));
-      return { ...base, logReference: transcriptFor(request), handoff: { groups: [{ groupId, tickets }] } } as unknown as AgentRunResult<TOutput>;
-    }
+test("an unresolvable integration conflict publishes each reviewed leaf on its own subset draft, settled once per issue", async () => {
+  const { factoryRoot, backlog, ledger, workflow, logger, providers, creates } = await fixture([
+    { id: "a", number: 31, status: "Ready for development" },
+    { id: "b", number: 32, status: "Ready for development", dependencies: ["a"] },
+    { id: "c", number: 33, status: "Ready for development", dependencies: ["a"] },
+  ]);
+  const conflictPaths: string[] = [];
+  const runAgent = transcriptRunner(logger, async (request) => {
+    if (request.name.startsWith("plan-groups-")) return planAll(request);
     if (request.name.startsWith("implement-")) {
       const id = request.promptArgs.TICKET_ID!;
-      if (id === "d") dRuns++;
-      await writeFile(join(request.cwd, `${id}.txt`), `${id}\n`);
-      return { ...base, logReference: transcriptFor(request), handoff: { message: `feat(${id}): implement ${id}` } } as unknown as AgentRunResult<TOutput>;
+      await writeFile(join(request.cwd, "shared.txt"), id === "a" ? "base\n" : `from ${id}\n`);
+      return { message: `feat(${id}): implement ${id}` };
     }
-    if (request.name.startsWith("review-")) return { ...base, logReference: transcriptFor(request), handoff: { message: "chore(review): verify ticket" } } as unknown as AgentRunResult<TOutput>;
-    if (request.name.startsWith("integrate-")) throw new MissingAgentHandoffError();
-    return { ...base, logReference: transcriptFor(request), handoff: { title: "Reviewed subset", body: "A reviewed dependency-closed subset." } } as unknown as AgentRunResult<TOutput>;
-  };
-  const requests: DraftPullRequestRequest[] = [];
-  const provider: GitProvider = {
-    name: "github",
-    credential: "secret",
-    mergeStrategySupport: "unsupported",
-    validateRepository: () => {},
-    createDraftPullRequest: async (request) => {
-      requests.push(request);
-      return { number: requests.length, url: `https://example.test/pr/${requests.length}`, squashPreference: "unsupported" };
-    },
-    secrets: () => ["secret"],
-  };
-  const config: ProcessConfig = {
-    ticketsDir,
-    factoryRoot,
-    harness: "pi",
-    logger: await InvocationLogger.create(factoryRoot, provider.credential),
-    gitProvider: provider,
-    runAgent,
-    maxParallel: 2,
-    ticketAttemptsPerCycle: 1,
-  };
+    if (request.name.startsWith("review-")) return { message: "chore(review): verify combined behavior" };
+    if (request.name.startsWith("integrate-")) {
+      conflictPaths.push(request.promptArgs.CONFLICT_PATHS!);
+      return { message: "chore(integration): leave the conflict for an author", conflicts: [] };
+    }
+    return { title: "Deliver one reviewed leaf", body: "Reviewed leaf subset." };
+  });
+  const config: ProcessConfig = { factoryRoot, harness: "pi", logger, providers, backlog, workflow, ledger, runAgent: new JobLimiter(1).wrap(runAgent), maxParallel: 1, ticketAttemptsPerCycle: 1 };
   const state = createDependencyWorkflowState();
+  assert.equal(await processDependencyCycle(config, state), "processed");
 
-  await processDependencyCycle(config, state);
+  assert.deepEqual(conflictPaths, ["shared.txt"], "the real Git conflict is handed to the integration review");
+  assert.equal(creates.length, 2, "each reviewed leaf publishes its own dependency-closed subset");
+  const published = [...creates].sort((left, right) => left.head.localeCompare(right.head));
+  assert.match(published[0]!.head, /^agent-tickets\/b-/);
+  assert.match(published[1]!.head, /^agent-tickets\/c-/);
+  assert.match(published[0]!.body, /Included: a \(a\), b \(b\)/);
+  assert.ok(!published[0]!.body.includes("c (c)"), "the b subset carries nothing from the conflicting sibling");
+  assert.match(published[1]!.body, /Included: a \(a\), c \(c\)/);
+  assert.ok(!published[1]!.body.includes("b (b)"), "the c subset carries nothing from the conflicting sibling");
 
-  assert.equal(dRuns, 0);
-  assert.match(state.blocked.get("d")!, /multi-parent integration review failed/);
-  assert.equal(requests.length, 2);
-  assert.ok(requests.some((request) => /Included: a \(a\), b \(b\)/.test(request.body)));
-  assert.ok(requests.some((request) => /Included: a \(a\), c \(c\)/.test(request.body)));
-  assert.equal(await readFile(join(ticketsDir, "done", "a.md"), "utf8").then((text) => (text.match(/Group publication/g) ?? []).length), 1);
-});
+  // Each subset settles only the issues it newly carries, so the shared ancestor is commented on once.
+  for (const id of ["a", "b", "c"] as const) {
+    assert.equal(backlog.statusOf(id), "In review");
+    assert.deepEqual(backlog.transitions.filter((entry) => entry.startsWith(`${id}=`)), [`${id}=In progress`, `${id}=In review`]);
+  }
+  assert.equal(backlog.bodies("a").filter((body) => body.includes("## Factory pull request")).length, 1);
+  assert.equal(backlog.bodiesWith("a", "factory:publication:issue-31:https-github.com-acme-app-pull-100").length, 1);
+  assert.equal(backlog.bodiesWith("b", "factory:publication:issue-32:https-github.com-acme-app-pull-100").length, 1, JSON.stringify(backlog.bodies("b")));
+  assert.equal(backlog.bodiesWith("c", "factory:publication:issue-33:https-github.com-acme-app-pull-101").length, 1, JSON.stringify(backlog.bodies("c")));
 
-test("checkpoint failures are written to main.log and surfaced on stderr", async (t) => {
-  const { remote, factoryRoot, ticketsDir } = await fixture();
-  await writeFile(join(ticketsDir, "a.md"), markdown("a", remote, []));
-  const runAgent: AgentRunner = async <TOutput>(request: AgentRunRequest<TOutput>) => {
-    const base = { iterations: [], commits: [], stdout: "", branch: "" };
-    if (request.name.startsWith("plan-groups-")) {
-      const groupId = /<group id="([^"]+)">/.exec(request.promptArgs.GROUPS!)![1]!;
-      return { ...base, logReference: transcriptFor(request), handoff: { groups: [{ groupId, tickets: [{ id: "a", title: "a" }] }] } } as unknown as AgentRunResult<TOutput>;
-    }
-    if (request.name.startsWith("implement-")) {
-      await writeFile(join(request.cwd, "a.txt"), "a\n");
-      const hook = join(request.cwd, ".git", "hooks", "pre-commit");
-      await writeFile(hook, "#!/bin/sh\nexit 1\n");
-      await chmod(hook, 0o755);
-      return { ...base, logReference: transcriptFor(request), handoff: { message: "feat(a): implement a" } } as unknown as AgentRunResult<TOutput>;
-    }
-    throw new Error(`unexpected agent ${request.name}`);
-  };
-  const provider: GitProvider = {
-    name: "github",
-    credential: "secret",
-    mergeStrategySupport: "unsupported",
-    validateRepository: () => undefined,
-    createDraftPullRequest: async () => ({ number: 1, url: "https://example.test/pr/1", squashPreference: "unsupported" }),
-    secrets: () => ["secret"],
-  };
-  const logger = await InvocationLogger.create(factoryRoot, provider.credential);
-  const config: ProcessConfig = {
-    ticketsDir,
-    factoryRoot,
-    harness: "pi",
-    logger,
-    gitProvider: provider,
-    runAgent,
-    maxParallel: 1,
-    ticketAttemptsPerCycle: 1,
-  };
-  const errors: string[] = [];
-  t.mock.method(console, "error", (...args: unknown[]) => { errors.push(args.map(String).join(" ")); });
-
-  const state = createDependencyWorkflowState();
-  await processDependencyCycle(config, state);
-
-  assert.match(state.blocked.get("a")!, /implementation commit failed after a durable boundary/);
-  assert.match(await readFile(join(logger.runDir, "main.log"), "utf8"), /ticket=a .*stage=implementation commit .*status=failed/);
-  assert.equal(errors.length, 1);
-  assert.match(errors[0]!, /Ticket a attempt .* failed at implementation commit/);
-});
-
-test("startup reconciliation blocks are written to main.log and surfaced on stderr", async (t) => {
-  const { remote, factoryRoot, ticketsDir } = await fixture();
-  await writeFile(
-    join(ticketsDir, "a.md"),
-    `${markdown("a", remote, [])}\n## Attempt abc123 (2026-10-11T00:00:00.000Z)\n\n- Workspace: \`/retained/a-abc123\`\n`,
+  const snapshot = await ledger.load();
+  assert.deepEqual(snapshot.settlements, []);
+  assert.deepEqual(snapshot.corrupt, []);
+  assert.equal(snapshot.intents.length, 2);
+  assert.equal(snapshot.results.length, 2);
+  assert.deepEqual(
+    snapshot.results
+      .map((result) => [result.groupId.slice(result.groupId.lastIndexOf("-") + 1), result.included.map((entry) => entry.ticketId).join(",")])
+      .sort(),
+    [["b", "a,b"], ["c", "a,c"]],
+    "each leaf recorded its own dependency-closed subset",
   );
-  const provider: GitProvider = {
-    name: "github",
-    credential: "secret",
-    mergeStrategySupport: "unsupported",
-    validateRepository: () => undefined,
-    createDraftPullRequest: async () => ({ number: 1, url: "https://example.test/pr/1", squashPreference: "unsupported" }),
-    secrets: () => ["secret"],
-  };
-  const logger = await InvocationLogger.create(factoryRoot, provider.credential);
-  const config: ProcessConfig = {
-    ticketsDir,
-    factoryRoot,
-    harness: "pi",
-    logger,
-    gitProvider: provider,
-    runAgent: async () => { throw new Error("planner must not run for a blocked ticket"); },
-    maxParallel: 1,
-    ticketAttemptsPerCycle: 1,
-  };
-  const errors: string[] = [];
-  t.mock.method(console, "error", (...args: unknown[]) => { errors.push(args.map(String).join(" ")); });
 
+  assert.equal(await processDependencyCycle(config, state), "no-runnable");
+  assert.equal(creates.length, 2, "published subsets are never published again");
+  assert.equal(backlog.markerBodies("a").length, 2, "the ancestor keeps exactly one start comment and one publication comment");
+});
+
+test("a merged draft is verified from its real merge-result commit and settles its issues as Done and closed", async () => {
+  const { root, remote, factoryRoot, backlog, ledger, workflow, logger, providers, creates, merge } = await fixture([
+    { id: "a", number: 41, status: "Ready for development" },
+    { id: "b", number: 42, status: "Ready for development", dependencies: ["a"] },
+  ]);
+  const runAgent = transcriptRunner(logger, async (request) => {
+    if (request.name.startsWith("plan-groups-")) return planAll(request);
+    if (request.name.startsWith("implement-")) {
+      const id = request.promptArgs.TICKET_ID!;
+      await writeFile(join(request.cwd, `${id}.txt`), `${id}\n`);
+      return { message: `feat(${id}): implement ${id}` };
+    }
+    if (request.name.startsWith("review-")) return { message: "chore(review): verify combined behavior" };
+    if (request.name.startsWith("integrate-")) return { message: "chore(integration): review combined behavior", conflicts: [] };
+    return { title: "Deliver the reviewed group", body: "Reviewed as one dependency group." };
+  });
+  const config: ProcessConfig = { factoryRoot, harness: "pi", logger, providers, backlog, workflow, ledger, runAgent, maxParallel: 1, ticketAttemptsPerCycle: 1 };
   const state = createDependencyWorkflowState();
-  const outcome = await processDependencyCycle(config, state);
+  assert.equal(await processDependencyCycle(config, state), "processed");
+  assert.equal(creates.length, 1);
+  assert.equal(backlog.statusOf("b"), "In review");
+  const published = (await ledger.load()).results[0]!;
+
+  // An operator merges the draft: the published tree lands on `main` as a real merge-result commit.
+  const mergeClone = join(root, "merge");
+  await runCommand("git", ["clone", remote, mergeClone], "cloning for the merge");
+  const mergeSha = (await runGit(mergeClone, ["commit-tree", `${published.sourceSha}^{tree}`, "-p", published.baseSha, "-m", "Merge pull request #100"], "creating the merge result")).trim();
+  await runGit(mergeClone, ["update-ref", "refs/heads/main", mergeSha], "moving main to the merge result");
+  await runGit(mergeClone, ["push", "origin", "main"], "pushing the merge result");
+  merge(100, mergeSha);
+
+  assert.equal(await processDependencyCycle(config, state), "no-runnable", "settled issues leave the work graph");
+  for (const [id, number] of [["a", 41], ["b", 42]] as const) {
+    assert.equal(backlog.statusOf(id), "Done");
+    const settled = backlog.bodiesWith(id, `factory:settlement:issue-${number}:https-github.com-acme-app-pull-100`);
+    assert.equal(settled.length, 1, `${id} has no merge settlement: ${JSON.stringify(backlog.bodies(id))}`);
+    assert.match(settled[0]!, /## Factory merged/);
+    assert.ok(settled[0]!.includes(`- Merge commit: \`${mergeSha}\``), settled[0]!);
+  }
+  assert.deepEqual(backlog.closed, [41, 42]);
+  assert.deepEqual([...state.settled].sort(), ["a", "b"]);
+  assert.equal(creates.length, 1, "a merged publication is never published again");
+
+  const snapshot = await ledger.load();
+  assert.deepEqual(snapshot.settlements, [], "every settlement completed, so nothing awaits replay");
+  assert.equal(snapshot.results.length, 1, "a settled publication stays recorded");
+});
+
+test("startup reconciliation retires a vanished draft, replays unfinished settlements, and blocks an issue In review with no record", async () => {
+  const { factoryRoot, backlog, ledger, workflow, logger, providers, creates } = await fixture([
+    { id: "lost", number: 51, status: "In review" },
+    { id: "orphan", number: 52, status: "In review" },
+    { id: "parked", number: 53, status: "Blocked" },
+  ]);
+  await ledger.writeResult({
+    version: 1,
+    operationKey: "factory:publication:group-g1:vanished",
+    groupId: "g1",
+    provider: "github",
+    repository: TARGET_REPOSITORY,
+    baseBranch: "main",
+    baseSha: "1".repeat(40),
+    head: "agent-tickets/lost-deadbeef",
+    sourceSha: "2".repeat(40),
+    title: "Lost draft",
+    body: "Its pull request no longer exists.",
+    mergeStrategy: "squash",
+    included: [{ ticketId: "lost", issueNumber: 51, issueNodeId: "I_NODE_lost", requirementsHash: "3".repeat(64) }],
+    recordedAt: "2026-10-15T07:00:00.000Z",
+    pullRequestNumber: 100,
+    pullRequestUrl: "https://github.com/acme/app/pull/100",
+    squashPreference: "unsupported",
+    publishedAt: "2026-10-15T07:00:01.000Z",
+  });
+  await ledger.recordSettlement({
+    version: 1,
+    operationKey: "factory:settlement:issue-53:status-blocked",
+    kind: "status",
+    subject: "issue-53",
+    status: "Blocked",
+    ticketId: "parked",
+    issueNumber: 53,
+    issueNodeId: "I_NODE_parked",
+    detail: "status-blocked",
+    recordedAt: "2026-10-15T07:00:00.000Z",
+  });
+  await writeFile(join(factoryRoot, ".factory-state", "publication-result-corrupt-example.json"), "{ not json\n");
+
+  const logs: string[] = [];
+  const errors: string[] = [];
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  console.error = (...args: unknown[]) => errors.push(args.join(" "));
+  let outcome = "";
+  const state = createDependencyWorkflowState();
+  let config: ProcessConfig;
+  try {
+    const runAgent = transcriptRunner(logger, async (request) => {
+      if (request.name.startsWith("plan-groups-")) return planAll(request);
+      if (request.name.startsWith("implement-")) {
+        await writeFile(join(request.cwd, "lost.txt"), "lost\n");
+        return { message: "feat(lost): implement lost" };
+      }
+      if (request.name.startsWith("review-")) return { message: "chore(review): verify combined behavior" };
+      if (request.name.startsWith("integrate-")) return { message: "chore(integration): review combined behavior", conflicts: [] };
+      return { title: "Recover the lost draft", body: "Published again after its pull request vanished." };
+    });
+    config = { factoryRoot, harness: "pi", logger, providers, backlog, workflow, ledger, runAgent, maxParallel: 1, ticketAttemptsPerCycle: 1 };
+    outcome = await processDependencyCycle(config, state);
+
+    assert.match(state.blocked.get("lost")!, /pull request 100 for lost is no longer an open draft/);
+    assert.match(state.blocked.get("orphan")!, /In review with no recorded pull request/);
+    assert.deepEqual(backlog.transitions, ["lost=In progress", "lost=Blocked", "orphan=Blocked"], "the replayed settlement needed no board write, and reconciliation parked both reconciled issues");
+    const resumed = backlog.bodiesWith("lost", "factory:comment:issue-51:pull-request-100");
+    assert.equal(resumed.length, 1, JSON.stringify(backlog.bodies("lost")));
+    assert.match(resumed[0]!, /## Factory resumed/);
+    assert.equal(backlog.bodies("orphan").length, 1, JSON.stringify(backlog.bodies("orphan")));
+    const corrupt = errors.filter((line) => line.includes("publication-result-corrupt-example.json"));
+    assert.equal(corrupt.length, 1, JSON.stringify(errors));
+    assert.match(corrupt[0]!, /requires operator reconciliation/);
+    assert.equal(logs.filter((line) => line.includes("Replayed the recorded settlement status-blocked for issue #53")).length, 1);
+    assert.equal(creates.length, 0, "reconciliation publishes nothing");
+
+    const retired = await ledger.load();
+    assert.deepEqual(retired.results, [], "the vanished publication is un-recorded so its work can publish again");
+    assert.deepEqual(retired.intents, []);
+    // A settlement whose effect the board already shows is completed by the replay, so it never replays again.
+    assert.deepEqual(retired.settlements, [], "the replayed settlement record is consumed once its effect is confirmed");
+    assert.equal(retired.corrupt.length, 1);
+
+    // The operator queues the resumed issue again; un-reconciled work is never silently republished.
+    backlog.moveTo("lost", "Ready for development");
+    outcome = await processDependencyCycle(config, state);
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
 
   assert.equal(outcome, "no-runnable");
-  assert.match(state.blocked.get("a")!, /prior factory evidence requires operator reconciliation/);
-  assert.match(await readFile(join(logger.runDir, "main.log"), "utf8"), /ticket=a .*stage=scheduling .*status=blocked/);
-  assert.equal(errors.length, 1);
-  assert.match(errors[0]!, /Ticket a is blocked: prior factory evidence requires operator reconciliation/);
-});
-
-test("checkpoint commit, ticket annotation, and main.log all carry the runtime's invocation-relative transcript", async () => {
-  const { remote, factoryRoot, ticketsDir } = await fixture();
-  await writeFile(join(ticketsDir, "a.md"), markdown("a", remote, []));
-  const provider: GitProvider = {
-    name: "github",
-    credential: "secret",
-    mergeStrategySupport: "unsupported",
-    validateRepository: () => undefined,
-    createDraftPullRequest: async () => ({ number: 1, url: "https://example.test/pr/1", squashPreference: "unsupported" }),
-    secrets: () => ["secret"],
-  };
-  const logger = await InvocationLogger.create(factoryRoot, provider.credential);
-  const references: string[] = [];
-  const runAgent: AgentRunner = async <TOutput>(request: AgentRunRequest<TOutput>) => {
-    const base = { iterations: [], commits: [], stdout: "", branch: "" };
-    const transcript = await logger.allocate(request.logTarget);
-    await writeFile(transcript.path, `${request.name} transcript\n`);
-    const logReference = transcript.reference;
-    references.push(logReference);
-    if (request.name.startsWith("plan-groups-")) {
-      const groupId = /<group id="([^"]+)">/.exec(request.promptArgs.GROUPS!)![1]!;
-      return { ...base, logReference, handoff: { groups: [{ groupId, tickets: [{ id: "a", title: "a" }] }] } } as unknown as AgentRunResult<TOutput>;
-    }
-    if (request.name.startsWith("implement-")) {
-      if (logReference.endsWith("implement-1.log")) {
-        throw new MissingAgentHandoffError();
-      }
-      await writeFile(join(request.cwd, "a.txt"), "a\n");
-      return { ...base, logReference, handoff: { message: "feat(a): implement a" } } as unknown as AgentRunResult<TOutput>;
-    }
-    if (request.name.startsWith("review-")) {
-      await writeFile(join(request.cwd, "reviewed.txt"), "reviewed\n");
-      return { ...base, logReference, handoff: { message: "chore(review): approved a" } } as unknown as AgentRunResult<TOutput>;
-    }
-    return { ...base, logReference, handoff: { title: "Deliver a", body: "Reviewed a." } } as unknown as AgentRunResult<TOutput>;
-  };
-  const config: ProcessConfig = { ticketsDir, factoryRoot, harness: "pi", logger, gitProvider: provider, runAgent, maxParallel: 1, ticketAttemptsPerCycle: 1 };
-
-  await processDependencyCycle(config, createDependencyWorkflowState());
-
-  const main = await readFile(join(logger.runDir, "main.log"), "utf8");
-  const record = /stage=implementation commit .*?checkpoint=(\w{40}) .*agent-log=(\S+)/.exec(main)!;
-  const checkpointSha = record[1]!;
-  const recordedReference = record[2]!;
-  const ticket = await readFile(join(ticketsDir, "done", "a.md"), "utf8");
-  const workspacePath = /- Workspace: `([^`]+)`/.exec(ticket)![1]!;
-  const trailer = (await runGit(workspacePath, ["show", "-s", "--format=%B", checkpointSha], "reading the checkpoint message")).trim();
-
-  const attempt = recordedReference.split("/")[0]!;
-  const attemptId = /- Attempt ID: `([^`]+)`/.exec(ticket)![1]!;
-  assert.equal(references[0], "planner/001.log", "planner cycle 1 writes planner/001.log");
-  assert.deepEqual(references.slice(1, 4), [`${attempt}/implement-1.log`, `${attempt}/implement-2.log`, `${attempt}/review-1.log`], "the failed run consumed implement-1 and the retry got implement-2 in the same attempt directory");
-  assert.match(references[4]!, /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-group-[^/]+\/pull-request-1\.log$/, "publication runs in its own timestamped attempt directory");
-  assert.equal(recordedReference, references[2], "main.log records the reference the runtime handed the successful retry");
-  assert.match(recordedReference, /^[^/]+\/implement-2\.log$/, "the reference is invocation-relative, not a basename");
-  assert.equal(attempt.slice(attempt.lastIndexOf("-") + 1), attemptId, "the attempt directory is named for its attempt ID inside the instance directory");
-  const entries = await readdir(logger.runDir);
-  assert.ok(entries.includes("main.log") && entries.includes(attempt) && entries.includes("planner"), `instance directory holds main.log, planner/, and the attempt directory, got ${entries.join(", ")}`);
-  for (const reference of references) {
-    await access(join(logger.runDir, reference));
-  }
-  assert.ok(trailer.includes(`Factory-Agent-Log: ${recordedReference}`), "the checkpoint trailer carries the reference the runtime handed the stage");
-  assert.ok(ticket.includes(`- Agent log: \`${recordedReference}\``), "the ticket annotation carries the same reference");
-  assert.ok(ticket.includes(`- Agent log: \`${attempt}/review-1.log\``), "the review checkpoint annotates its own transcript");
+  assert.equal(creates.length, 0, "a retired publication waits for operator reconciliation, it is never republished silently");
+  assert.equal(backlog.bodiesWith("lost", "factory:comment:issue-51:pull-request-100").length, 1, "the resume is reported exactly once");
+  assert.equal(backlog.bodies("lost").filter((body) => body.includes("## Factory blocked")).length, 1, JSON.stringify(backlog.bodies("lost")));
 });

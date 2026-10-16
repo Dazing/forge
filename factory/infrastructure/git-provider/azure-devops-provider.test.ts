@@ -272,3 +272,76 @@ test("reads and safely updates the exact unchanged Azure draft with squash prese
     completionOptions: { mergeStrategy: "squash", deleteSourceBranch: false, bypassPolicy: false },
   });
 });
+
+function pullRecord(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    pullRequestId: 42,
+    status: "active",
+    isDraft: true,
+    sourceRefName: `refs/heads/${request.head}`,
+    targetRefName: `refs/heads/${request.base}`,
+    title: request.title,
+    description: request.body,
+    creationDate: "2026-10-11T08:00:00Z",
+    lastMergeSourceCommit: { commitId: "a".repeat(40) },
+    ...overrides,
+  };
+}
+
+test("findPullRequest matches the exact open draft via api-version 7.1 with encoded segments and status=all", async () => {
+  const seam = recordingFetch(200, "OK", JSON.stringify({ value: [pullRecord()] }));
+  const found = await new AzureDevOpsProvider(pat, seam.fetch).findPullRequest({ repository: request.repositoryUrl, head: request.head, base: request.base, sourceSha: "a".repeat(40) });
+  assert.deepEqual(found, {
+    provider: "azure-devops",
+    repository: request.repositoryUrl,
+    number: 42,
+    url: "https://dev.azure.com/Contoso%20Team/Web%20App/_git/fix-login/pullrequest/42",
+    baseBranch: "release/2.1",
+    headBranch: request.head,
+    sourceSha: "a".repeat(40),
+    title: request.title,
+    body: request.body,
+    draft: true,
+    state: "open",
+    mergeMethod: "unknown",
+    mergeCommitSha: undefined,
+  });
+  assert.equal(seam.calls[0]!.url, "https://dev.azure.com/Contoso%20Team/Web%20App/_apis/git/repositories/fix-login/pullrequests?searchCriteria/status=all&api-version=7.1");
+  assert.deepEqual((seam.calls[0]!.init.headers as Record<string, string>).Authorization, `Basic ${basicAuth}`);
+});
+
+test("the same findPullRequest lookup discovers merged and closed pull requests with their merge facts", async () => {
+  const merged = await new AzureDevOpsProvider(pat, recordingFetch(200, "OK", JSON.stringify({ value: [pullRecord({ status: "completed", mergeCommitId: "b".repeat(40), completionOptions: { mergeStrategy: "squash" } })] })).fetch)
+    .findPullRequest({ repository: request.repositoryUrl, head: request.head, base: request.base });
+  assert.equal(merged?.state, "merged");
+  assert.equal(merged?.mergeCommitSha, "b".repeat(40));
+  assert.equal(merged?.mergeMethod, "squash");
+  const closed = await new AzureDevOpsProvider(pat, recordingFetch(200, "OK", JSON.stringify({ value: [pullRecord({ status: "abandoned" })] })).fetch)
+    .findPullRequest({ repository: request.repositoryUrl, head: request.head, base: request.base });
+  assert.equal(closed?.state, "closed");
+  assert.equal(closed?.mergeCommitSha, undefined);
+});
+
+test("findPullRequest refuses a pull request whose source commit differs from the required source SHA", async () => {
+  const seam = recordingFetch(200, "OK", JSON.stringify({ value: [pullRecord({ lastMergeSourceCommit: { commitId: "c".repeat(40) } })] }));
+  const found = await new AzureDevOpsProvider(pat, seam.fetch).findPullRequest({ repository: request.repositoryUrl, head: request.head, base: request.base, sourceSha: "a".repeat(40) });
+  assert.equal(found, undefined);
+});
+
+test("an empty pull-request list and a missing repository resolve to no pull request", async () => {
+  const empty = await new AzureDevOpsProvider(pat, recordingFetch(200, "OK", '{"value":[]}').fetch).findPullRequest({ repository: request.repositoryUrl, head: request.head, base: request.base });
+  assert.equal(empty, undefined);
+  const missing = await new AzureDevOpsProvider(pat, recordingFetch(404, "Not Found", '{}').fetch).findPullRequest({ repository: request.repositoryUrl, head: request.head, base: request.base });
+  assert.equal(missing, undefined);
+});
+
+test("a findPullRequest HTTP failure is a structured failure with both credential forms redacted", async () => {
+  await assert.rejects(
+    new AzureDevOpsProvider(pat, recordingFetch(502, "Bad Gateway", `upstream rejected ${pat} via Basic ${basicAuth}`).fetch)
+      .findPullRequest({ repository: request.repositoryUrl, head: request.head, base: request.base }),
+    (error: unknown) => error instanceof CommandFailedError
+      && error.failure.exitCode === 502
+      && !JSON.stringify(error.failure).includes(pat)
+      && !JSON.stringify(error.failure).includes(basicAuth),
+  );
+});

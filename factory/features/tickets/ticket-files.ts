@@ -9,15 +9,3 @@ export async function listTicketPaths(dir: string): Promise<string[]> {
     .map((name) => resolve(dir, name))
     .sort();
 }
-/** List active and lifecycle Markdown tickets used only for startup reconciliation diagnostics. */
-export async function listRelevantTicketPaths(dir: string): Promise<string[]> {
-  const paths = await listTicketPaths(dir);
-  for (const lifecycleDir of ["done", "failed"]) {
-    const nested = await readdir(resolve(dir, lifecycleDir)).catch((error: unknown) => {
-      if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
-      throw error;
-    });
-    paths.push(...nested.filter((name) => name.toLowerCase().endsWith(".md")).map((name) => resolve(dir, lifecycleDir, name)));
-  }
-  return paths.sort();
-}
