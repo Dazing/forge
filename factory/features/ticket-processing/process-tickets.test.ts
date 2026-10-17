@@ -52,7 +52,7 @@ test("the daemon replans without sleeping when an empty selection leaves active 
   t.after(() => rm(root, { recursive: true, force: true }));
   const factoryRoot = await initFactory(root, "factory");
   const backlog = new TestBacklog();
-  backlog.seed({ id: "active", number: 1, status: "Ready for development" });
+  backlog.seed({ id: "active", number: 1, status: "Ready" });
   const stop = new Error("bounded daemon stop");
   let plans = 0;
   const runAgent: AgentRunner = async <TOutput>(request: AgentRunRequest<TOutput>) => {
@@ -87,7 +87,7 @@ test("the daemon polls and discovers a new ticket when every current ticket is b
   t.mock.method(console, "log", () => undefined);
   t.mock.method(globalThis, "setTimeout", (callback: () => void, delay?: number) => {
     delays.push(delay ?? 0);
-    backlog.seed({ id: "fresh", number: 2, status: "Ready for development" });
+    backlog.seed({ id: "fresh", number: 2, status: "Ready" });
     callback();
     return 0 as unknown as NodeJS.Timeout;
   });

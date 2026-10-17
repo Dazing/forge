@@ -7,13 +7,13 @@ import { acquireSubmissionLock, readSubmissionRecord, releaseSubmissionLock, sub
 import { expandTicketPaths, readTicketSources, submissionProviderRegistry, validateBatch, type SourceProblem, type ValidatedSource } from "./submission-sources.js";
 
 // Ingestion policy for `npm run tickets -- submit` (plan §3 D3): validate the whole batch, then apply
-// the smallest effect per ticket — create, update, attach, Staging, verify, Ready — plus one keyed
-// feedback comment. Statuses beyond Staging/Ready for development are never written here; the server
+// the smallest effect per ticket — create, update, attach, Backlog, verify, Ready — plus one keyed
+// feedback comment. Statuses beyond Backlog/Ready are never written here; the server
 // owns everything after Ready, and no credential ever reaches a report, comment, or sidecar.
 
 /** The only two statuses submission may set; everything else is human- or server-owned. */
-export const STAGING: BacklogStatusName = "Staging";
-export const READY_FOR_DEVELOPMENT: BacklogStatusName = "Ready for development";
+export const BACKLOG: BacklogStatusName = "Backlog";
+export const READY: BacklogStatusName = "Ready";
 
 /** Gate failure that stops the run with zero writes: repository/Project privacy, identity, scope, Project access. */
 export class SubmissionGateError extends Error {
@@ -30,7 +30,6 @@ export type SubmitTicketsInput = Readonly<{
   provider: GitProvider;
   cwd: string;
   repositoryOverride?: string;
-  projectIdOverride?: string;
   dryRun: boolean;
   json: boolean;
   now?: () => Date;
@@ -45,7 +44,7 @@ export type SubmissionGates = Readonly<{
   repository: string;
   projectId: string;
   field: BacklogStatusField;
-  stagingOptionId: string;
+  backlogOptionId: string;
   readyOptionId: string;
   issues: readonly BacklogIssue[];
   remote: ReadonlyMap<string, RemoteTicket>;
@@ -70,7 +69,7 @@ function gateFailure(operation: string, scope: "repo" | "project", error: unknow
 export async function readSubmissionGates(input: SubmitTicketsInput, redact: (text: string) => string): Promise<SubmissionGates> {
   const backlog = input.backlog;
   const repository = input.repositoryOverride ?? backlog.repository;
-  const projectId = input.projectIdOverride ?? backlog.projectId;
+  const projectId = backlog.projectId;
 
   let identity: { private: boolean; fullName: string };
   try {
@@ -91,18 +90,18 @@ export async function readSubmissionGates(input: SubmitTicketsInput, redact: (te
   } catch (error) {
     throw gateFailure("Project gate", "project", error, redact);
   }
-  const stagingOptionId = field.options.find((option) => option.name === STAGING)?.optionId;
-  if (stagingOptionId === undefined) {
-    throw new SubmissionGateError(`Backlog Project ${projectId} has no \`${STAGING}\` Status option, so a submission cannot be staged. Zero writes.`);
+  const backlogOptionId = field.options.find((option) => option.name === BACKLOG)?.optionId;
+  if (backlogOptionId === undefined) {
+    throw new SubmissionGateError(`Backlog Project ${projectId} has no \`${BACKLOG}\` Status option, so a submission cannot enter Backlog. Zero writes.`);
   }
-  const readyOptionId = field.options.find((option) => option.name === READY_FOR_DEVELOPMENT)?.optionId;
+  const readyOptionId = field.options.find((option) => option.name === READY)?.optionId;
   if (readyOptionId === undefined) {
-    throw new SubmissionGateError(`Backlog Project ${projectId} has no \`${READY_FOR_DEVELOPMENT}\` Status option, so a submission cannot be released. Zero writes.`);
+    throw new SubmissionGateError(`Backlog Project ${projectId} has no \`${READY}\` Status option, so a submission cannot be released. Zero writes.`);
   }
 
   const issues = await backlog.listIssues();
   const remote = await backlogTicketIds(backlog, input.provider, issues);
-  return { repository, projectId, field, stagingOptionId, readyOptionId, issues, remote };
+  return { repository, projectId, field, backlogOptionId, readyOptionId, issues, remote };
 }
 
 /** Index every ticket ID already present in the backlog by validated issue body — never by title or filename. */
@@ -260,12 +259,12 @@ export async function submitValidated(
   }
   const remote = target.remote;
   const exactSource = remote !== undefined && remote.issue.body === source.source;
-  if (remote !== undefined && status !== STAGING && !exactSource) {
-    return failed(`Refusing to mutate ${remote.issue.url}: Project Status is ${status ?? "not set"}, and only \`${STAGING}\` accepts a resubmission.`, remote.issue);
+  if (remote !== undefined && status !== BACKLOG && !exactSource) {
+    return failed(`Refusing to mutate ${remote.issue.url}: Project Status is ${status ?? "not set"}, and only \`${BACKLOG}\` accepts a resubmission.`, remote.issue);
   }
   // Exact authored bytes establish a replay, not permission to edit a claimed ticket.
   // A missing attachment/status is repairable; a later status must never be demoted.
-  const needsReady = remote === undefined || status === undefined || status === STAGING;
+  const needsReady = remote === undefined || status === undefined || status === BACKLOG;
   const marker = commentMarker(submissionOperationKey(ticket.id, ticket.sourceHash));
   let issue = remote?.issue;
   try {
@@ -276,7 +275,7 @@ export async function submitValidated(
       && sidecar.lastComment.id === posted.id && sidecar.lastComment.url === posted.url) {
       return { ...base, outcome: "unchanged", issueNumber: remote.issue.number, issueUrl: remote.issue.url };
     }
-    const finalStatus = needsReady ? READY_FOR_DEVELOPMENT : status;
+    const finalStatus = needsReady ? READY : status;
     const planned = { outcome: target.effect, ...(remote === undefined ? {} : { issueNumber: remote.issue.number, issueUrl: remote.issue.url }) };
     if (input.dryRun) {
       log(`${target.effect} ${ticket.id} (dry run)`);
@@ -286,7 +285,7 @@ export async function submitValidated(
     const accepted = remote === undefined
       ? await backlog.createIssue(ticket.title, source.source)
       : exactSource ? remote.issue : await backlog.updateIssueBody(remote.issue.number, source.source, remote.issue.revision);
-    if (needsReady) await backlog.setProjectStatus(accepted.nodeId, gates.stagingOptionId);
+    if (needsReady) await backlog.setProjectStatus(accepted.nodeId, gates.backlogOptionId);
 
     const readBack = await backlog.getIssue(accepted.number);
     if (readBack === undefined || readBack.number !== accepted.number || readBack.nodeId !== accepted.nodeId || readBack.body !== source.source) {

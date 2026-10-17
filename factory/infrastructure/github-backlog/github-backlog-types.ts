@@ -62,7 +62,7 @@ export type NewComment = Readonly<{
 export interface GitHubBacklog {
   /** Configured `owner/repository` backlog. */
   readonly repository: string;
-  /** Configured Project v2 node id. */
+  /** Resolved Project v2 node id: the stable identity behind the configured Project URL, and the only Project identity callers and persisted records ever use. */
   readonly projectId: string;
   /** Raw token; every value that must never reach a log, comment, or command display. */
   readonly secrets: readonly string[];

@@ -23,7 +23,7 @@ export const TEST_GITHUB_TOKEN = "ghp_fixture_token_1234567890abcdef";
 export const TEST_AZURE_DEVOPS_PAT = "fixture-azure-devops-pat-0123456789";
 export const TEST_BACKLOG_TOKEN = "fixture-backlog-token-98765";
 
-export const TEST_STATUS_NAMES = ["Staging", "Ready for development", "In progress", "In review", "Done", "Blocked"] as const;
+export const TEST_STATUS_NAMES = ["Backlog", "Ready", "In progress", "In review", "Done", "Blocked"] as const;
 export const testStatusOptionId = (name: string) => `option-${name.toLowerCase().replaceAll(" ", "-")}`;
 
 /** One authored issue with its board position. */

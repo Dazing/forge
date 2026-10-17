@@ -86,9 +86,9 @@ export class BacklogWorkflow {
     this.options = await this.statusOptions();
   }
 
-  /** Move an authored issue out of Staging and into the queue. */
+  /** Move an authored issue out of Backlog and into the queue. */
   async stage(target: BacklogTarget): Promise<void> {
-    await this.setStatus(target, "Ready for development");
+    await this.setStatus(target, "Ready");
   }
 
   /** Claim a ticket for one attempt: durable start comment, then `In progress`. */
@@ -168,7 +168,7 @@ export class BacklogWorkflow {
       `- Ticket: ${quoted(target.ticketId)}`,
       "- Reason: the recorded pull request is no longer an open draft, so this ticket's work is published again from a fresh attempt.",
     ].join("\n"));
-    await this.setStatus(target, "Ready for development");
+    await this.setStatus(target, "Ready");
   }
 
   /** Record a published draft on every included issue and move them into review. */
@@ -229,8 +229,8 @@ export class BacklogWorkflow {
     }
     const fact = await this.readAuthorization(target.identity);
     if (!fact.open) throw new AuthorizationWithdrawnError(target.ticketId, stage, `backlog issue #${target.identity.number} is no longer open`);
-    if (fact.status !== "Ready for development" && fact.status !== "In progress") {
-      throw new AuthorizationWithdrawnError(target.ticketId, stage, `its Project status is ${fact.status ?? "unknown"}, not Ready for development or In progress`);
+    if (fact.status !== "Ready" && fact.status !== "In progress") {
+      throw new AuthorizationWithdrawnError(target.ticketId, stage, `its Project status is ${fact.status ?? "unknown"}, not Ready or In progress`);
     }
     if (fact.requirementsHash !== target.requirementsHash) {
       throw new AuthorizationWithdrawnError(target.ticketId, stage, "its authored requirements changed since the work was scheduled");

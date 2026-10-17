@@ -1,7 +1,6 @@
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import type { MountConfig, SandboxProvider } from "@ai-hero/sandcastle";
 import { resolve } from "node:path";
-import { modelsPath } from "../agent-runtime/models-path.js";
 import { runCommand } from "../git-provider/git.js";
 import { requirePath } from "../../shared/paths.js";
 
@@ -23,7 +22,7 @@ function sandboxMounts(harness: AgentHarness, factoryRoot: string, repositoryPat
   const agentDir = harness === "pi" ? "/home/agent/.pi/agent" : "/home/agent/.omp/agent";
   return [
     { hostPath: resolve(factoryRoot, "factory/infrastructure/agent-runtime/skills"), sandboxPath: `${agentDir}/skills`, readonly: true },
-    { hostPath: modelsPath, sandboxPath: `${agentDir}/${harness === "pi" ? "models.json" : "models.yml"}`, readonly: true },
+    { hostPath: resolve(factoryRoot, "models.json"), sandboxPath: `${agentDir}/${harness === "pi" ? "models.json" : "models.yml"}`, readonly: true },
     { hostPath: checkMcpPath, sandboxPath: "/home/agent/.factory-assets/check-mcp.mjs", readonly: true },
     { hostPath: handoffServerPath, sandboxPath: "/home/agent/.factory-assets/handoff-server.mjs", readonly: true },
     ...(handoff === undefined ? [] : [

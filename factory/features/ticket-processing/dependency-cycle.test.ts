@@ -205,10 +205,10 @@ function successfulRunner(logger: InvocationLogger, implement?: (request: AgentR
 
 test("diamond dependencies use isolated sibling baselines, bounded overlap, reviewed integration, and one group publication settled on every issue", async () => {
   const { factoryRoot, backlog, ledger, workflow, logger, providers, creates } = await fixture([
-    { id: "a", number: 11, status: "Ready for development" },
-    { id: "b", number: 12, status: "Ready for development", dependencies: ["a"] },
-    { id: "c", number: 13, status: "Ready for development", dependencies: ["a"] },
-    { id: "d", number: 14, status: "Ready for development", dependencies: ["b", "c"] },
+    { id: "a", number: 11, status: "Ready" },
+    { id: "b", number: 12, status: "Ready", dependencies: ["a"] },
+    { id: "c", number: 13, status: "Ready", dependencies: ["a"] },
+    { id: "d", number: 14, status: "Ready", dependencies: ["b", "c"] },
     { id: "azure-only", number: 15, status: "Blocked", repository: ADO_REPOSITORY },
   ]);
   await assertNoTicketCheckout(factoryRoot);
@@ -305,9 +305,9 @@ test("diamond dependencies use isolated sibling baselines, bounded overlap, revi
 
 test("an exhausted issue publishes its reviewed ancestor, parks its descendants on the board, then retries fresh and extends the same draft", async () => {
   const { remote, factoryRoot, backlog, ledger, workflow, logger, providers, creates, patches } = await fixture([
-    { id: "a", number: 21, status: "Ready for development" },
-    { id: "b", number: 22, status: "Ready for development", dependencies: ["a"] },
-    { id: "c", number: 23, status: "Ready for development", dependencies: ["b"] },
+    { id: "a", number: 21, status: "Ready" },
+    { id: "b", number: 22, status: "Ready", dependencies: ["a"] },
+    { id: "c", number: 23, status: "Ready", dependencies: ["b"] },
   ]);
   let cycle = 1;
   let bImplementRuns = 0;
@@ -354,7 +354,7 @@ test("an exhausted issue publishes its reviewed ancestor, parks its descendants 
   assert.match(exhausted[0]!, /The attempt's workspace is retained/);
 
   // The runner parked the exhausted issue on the board, so only an operator re-queue resumes it.
-  backlog.moveTo("b", "Ready for development");
+  backlog.moveTo("b", "Ready");
   cycle = 2;
   await processDependencyCycle(config, state);
 
@@ -398,9 +398,9 @@ test("an exhausted issue publishes its reviewed ancestor, parks its descendants 
 
 test("an unresolvable integration conflict publishes each reviewed leaf on its own subset draft, settled once per issue", async () => {
   const { factoryRoot, backlog, ledger, workflow, logger, providers, creates } = await fixture([
-    { id: "a", number: 31, status: "Ready for development" },
-    { id: "b", number: 32, status: "Ready for development", dependencies: ["a"] },
-    { id: "c", number: 33, status: "Ready for development", dependencies: ["a"] },
+    { id: "a", number: 31, status: "Ready" },
+    { id: "b", number: 32, status: "Ready", dependencies: ["a"] },
+    { id: "c", number: 33, status: "Ready", dependencies: ["a"] },
   ]);
   const conflictPaths: string[] = [];
   const runAgent = transcriptRunner(logger, async (request) => {
@@ -461,8 +461,8 @@ test("an unresolvable integration conflict publishes each reviewed leaf on its o
 
 test("a merged draft is verified from its real merge-result commit and settles its issues as Done and closed", async () => {
   const { root, remote, factoryRoot, backlog, ledger, workflow, logger, providers, creates, merge } = await fixture([
-    { id: "a", number: 41, status: "Ready for development" },
-    { id: "b", number: 42, status: "Ready for development", dependencies: ["a"] },
+    { id: "a", number: 41, status: "Ready" },
+    { id: "b", number: 42, status: "Ready", dependencies: ["a"] },
   ]);
   const runAgent = transcriptRunner(logger, async (request) => {
     if (request.name.startsWith("plan-groups-")) return planAll(request);
@@ -507,7 +507,7 @@ test("a merged draft is verified from its real merge-result commit and settles i
   assert.deepEqual(snapshot.settlements, [], "every settlement completed, so nothing awaits replay");
   assert.equal(snapshot.results.length, 1, "a settled publication stays recorded");
 
-  backlog.seed({ id: "c", number: 43, status: "Ready for development", dependencies: ["b"] });
+  backlog.seed({ id: "c", number: 43, status: "Ready", dependencies: ["b"] });
   assert.equal(await processDependencyCycle(config, state), "processed", "a closed merged parent satisfies a newly authored child");
   assert.equal(backlog.statusOf("c"), "In review");
   assert.equal(backlog.statusOf("b"), "Done");
@@ -582,8 +582,8 @@ test("startup reconciliation retires a vanished draft, replays unfinished settle
 
     assert.match(state.blocked.get("lost")!, /pull request 100 for lost is no longer an open draft/);
     assert.match(state.blocked.get("orphan")!, /In review with no recorded pull request/);
-    assert.deepEqual(backlog.transitions, ["lost=Ready for development", "orphan=Blocked"], "the retired publication restores development eligibility without overwriting it as Blocked");
-    assert.equal(backlog.statusOf("lost"), "Ready for development");
+    assert.deepEqual(backlog.transitions, ["lost=Ready", "orphan=Blocked"], "the retired publication restores development eligibility without overwriting it as Blocked");
+    assert.equal(backlog.statusOf("lost"), "Ready");
     const resumed = backlog.bodiesWith("lost", "factory:comment:issue-51:pull-request-100");
     assert.equal(resumed.length, 1, JSON.stringify(backlog.bodies("lost")));
     assert.match(resumed[0]!, /## Factory resumed/);
@@ -601,7 +601,7 @@ test("startup reconciliation retires a vanished draft, replays unfinished settle
     assert.deepEqual(retired.settlements, [], "the replayed settlement record is consumed once its effect is confirmed");
     assert.equal(retired.corrupt.length, 1);
 
-    // Retirement restores Ready for development, but this process defers it until restart.
+    // Retirement restores Ready, but this process defers it until restart.
     outcome = await processDependencyCycle(config, state);
   } finally {
     console.log = originalLog;
@@ -616,7 +616,7 @@ test("startup reconciliation retires a vanished draft, replays unfinished settle
 
 test("restart restores a published parent's baseline for a new child and recovers a lost extension result without creating another draft", async () => {
   const { remote, factoryRoot, backlog, ledger, workflow, logger, providers, creates, patches } = await fixture([
-    { id: "a", number: 61, status: "Ready for development" },
+    { id: "a", number: 61, status: "Ready" },
   ]);
   const implemented: string[] = [];
   const runAgent = successfulRunner(logger, async (request) => {
@@ -628,7 +628,7 @@ test("restart restores a published parent's baseline for a new child and recover
   assert.equal(await processDependencyCycle(config, createDependencyWorkflowState()), "processed");
   const parent = (await ledger.load()).results[0]!;
 
-  backlog.seed({ id: "b", number: 62, status: "Ready for development", dependencies: ["a"] });
+  backlog.seed({ id: "b", number: 62, status: "Ready", dependencies: ["a"] });
   const restarted = createDependencyWorkflowState();
   assert.equal(await processDependencyCycle(config, restarted), "processed");
   assert.deepEqual(implemented, ["a", "b"], "the already published parent is not implemented again");
@@ -661,9 +661,9 @@ test("restart restores a published parent's baseline for a new child and recover
 
 test("fresh discovery evicts cached tickets whose authored metadata becomes invalid or duplicated", async () => {
   const { factoryRoot, backlog, ledger, workflow, logger, providers, creates } = await fixture([
-    { id: "invalid", number: 71, status: "Staging" },
-    { id: "duplicate", number: 72, status: "Staging" },
-    { id: "unrelated", number: 74, status: "Staging" },
+    { id: "invalid", number: 71, status: "Backlog" },
+    { id: "duplicate", number: 72, status: "Backlog" },
+    { id: "unrelated", number: 74, status: "Backlog" },
   ]);
   const implemented: string[] = [];
   const runAgent = successfulRunner(logger, async (request) => { implemented.push(request.promptArgs.TICKET_ID!); });
@@ -675,14 +675,14 @@ test("fresh discovery evicts cached tickets whose authored metadata becomes inva
 
   const duplicateBody = backlog.issues.find((issue) => issue.number === 72)!.body;
   backlog.rewrite("invalid", "# Metadata was removed by its author");
-  backlog.seed({ id: "duplicate-copy", number: 73, status: "Ready for development", body: duplicateBody });
-  backlog.moveTo("invalid", "Ready for development");
-  backlog.moveTo("duplicate", "Ready for development");
-  backlog.moveTo("unrelated", "Ready for development");
+  backlog.seed({ id: "duplicate-copy", number: 73, status: "Ready", body: duplicateBody });
+  backlog.moveTo("invalid", "Ready");
+  backlog.moveTo("duplicate", "Ready");
+  backlog.moveTo("unrelated", "Ready");
   assert.equal(await processDependencyCycle(config, state), "processed");
   assert.deepEqual(implemented, ["unrelated"], "neither stale cached ticket is dispatched after fresh discovery rejects it");
   assert.equal(backlog.statusOf("unrelated"), "In review");
-  assert.equal(backlog.statusOf("invalid"), "Ready for development");
+  assert.equal(backlog.statusOf("invalid"), "Ready");
   assert.equal(backlog.statusOf("duplicate"), "Blocked");
   assert.deepEqual(backlog.bodies("invalid"), []);
   assert.ok(backlog.bodies("duplicate").some((body) => body.includes("duplicate open ticket identity")));
@@ -693,8 +693,8 @@ test("fresh discovery evicts cached tickets whose authored metadata becomes inva
 
 test("an ordinary provider publication failure is isolated and unrelated work still publishes next cycle", async () => {
   const { factoryRoot, backlog, ledger, workflow, logger, providers, creates, failNextCreate } = await fixture([
-    { id: "failed", number: 81, status: "Ready for development" },
-    { id: "unrelated", number: 82, status: "Staging" },
+    { id: "failed", number: 81, status: "Ready" },
+    { id: "unrelated", number: 82, status: "Backlog" },
   ]);
   const runAgent = successfulRunner(logger);
   const config: ProcessConfig = { factoryRoot, harness: "pi", logger, providers, backlog, workflow, ledger, runAgent, maxParallel: 1, ticketAttemptsPerCycle: 1 };
@@ -705,7 +705,7 @@ test("an ordinary provider publication failure is isolated and unrelated work st
   assert.notEqual(backlog.statusOf("failed"), "In review");
   assert.equal((await ledger.load()).results.length, 0);
 
-  backlog.moveTo("unrelated", "Ready for development");
+  backlog.moveTo("unrelated", "Ready");
   assert.equal(await processDependencyCycle(config, state), "processed");
   assert.equal(backlog.statusOf("unrelated"), "In review");
   assert.equal(creates.length, 1);
@@ -715,22 +715,22 @@ test("an ordinary provider publication failure is isolated and unrelated work st
 
 test("authorization withdrawal preserves the human's board status on the next cycle", async () => {
   const { factoryRoot, backlog, ledger, workflow, logger, providers, creates } = await fixture([
-    { id: "withdrawn", number: 91, status: "Ready for development" },
+    { id: "withdrawn", number: 91, status: "Ready" },
   ]);
   let implementations = 0;
   const runAgent = successfulRunner(logger, async () => {
     implementations++;
-    backlog.moveTo("withdrawn", "Staging");
+    backlog.moveTo("withdrawn", "Backlog");
   });
   const config: ProcessConfig = { factoryRoot, harness: "pi", logger, providers, backlog, workflow, ledger, runAgent, maxParallel: 1, ticketAttemptsPerCycle: 1 };
   const state = createDependencyWorkflowState();
   assert.equal(await processDependencyCycle(config, state), "processed");
-  assert.equal(backlog.statusOf("withdrawn"), "Staging");
+  assert.equal(backlog.statusOf("withdrawn"), "Backlog");
   const preservation = backlog.bodies("withdrawn").filter((body) => body.includes("## Factory preserved unreviewed work"));
   assert.equal(preservation.length, 1);
   assert.match(preservation[0]!, /Authorization was withdrawn/);
   assert.equal(await processDependencyCycle(config, state), "no-runnable");
-  assert.equal(backlog.statusOf("withdrawn"), "Staging", "reporting the cached withdrawal must not move the human's status to Blocked");
+  assert.equal(backlog.statusOf("withdrawn"), "Backlog", "reporting the cached withdrawal must not move the human's status to Blocked");
   assert.deepEqual(backlog.transitions, ["withdrawn=In progress"]);
   assert.equal(backlog.bodies("withdrawn").filter((body) => body.includes("## Factory blocked")).length, 0);
   assert.equal(backlog.bodies("withdrawn").filter((body) => body.includes("## Factory preserved unreviewed work")).length, 1);

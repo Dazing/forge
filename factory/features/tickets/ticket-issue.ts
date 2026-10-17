@@ -6,9 +6,9 @@ import { parseTicketSource, type Ticket } from "./ticket.js";
 // issue it created validate identically. Lifecycle transitions themselves belong to the features
 // that own scheduling and ingestion, never to this leaf.
 
-/** The six configured backlog workflow states in board order. These are operator-created Project
- * option names, not GitHub defaults; a missing option is a configuration failure, never `Ready`. */
-export const BACKLOG_STATUSES = ["Staging", "Ready for development", "In progress", "In review", "Done", "Blocked"] as const;
+/** The six required Project Status option names in board order. Backlog and Ready follow the
+ * default board vocabulary; any missing option is a configuration failure, never a fallback. */
+export const BACKLOG_STATUSES = ["Backlog", "Ready", "In progress", "In review", "Done", "Blocked"] as const;
 
 /** One configured backlog workflow state name. */
 export type BacklogStatusName = (typeof BACKLOG_STATUSES)[number];

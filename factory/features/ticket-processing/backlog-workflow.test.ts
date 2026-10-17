@@ -17,7 +17,7 @@ import type {
   NewComment,
 } from "../../infrastructure/github-backlog/index.js";
 
-const STATUS_NAMES = ["Staging", "Ready for development", "In progress", "In review", "Done", "Blocked"];
+const STATUS_NAMES = ["Backlog", "Ready", "In progress", "In review", "Done", "Blocked"];
 
 class FakeBacklog implements GitHubBacklog {
   readonly repository = "acme/backlog";
@@ -34,7 +34,7 @@ class FakeBacklog implements GitHubBacklog {
     fieldName: "Status",
     options: STATUS_NAMES.map((name, index) => ({ optionId: `option-${index}`, name })),
   };
-  /** When set to an issue node id, the read-back after a status write keeps reporting Staging. */
+  /** When set to an issue node id, the read-back after a status write keeps reporting Backlog. */
   stubborn: string | undefined;
 
   async validateRepository(): Promise<{ private: boolean; fullName: string }> {
@@ -107,7 +107,7 @@ class FakeBacklog implements GitHubBacklog {
     this.writes.push(`status:${optionId}`);
     const option = this.statusField.options.find((candidate) => candidate.optionId === optionId);
     if (option === undefined) throw new Error(`unknown option ${optionId}`);
-    this.statuses.set(issueNodeId, this.stubborn === issueNodeId ? "Staging" : option.name);
+    this.statuses.set(issueNodeId, this.stubborn === issueNodeId ? "Backlog" : option.name);
   }
 }
 
@@ -134,7 +134,7 @@ async function openWorkflow(): Promise<{ backlog: FakeBacklog; workflow: Backlog
   const root = await mkdtemp(join(tmpdir(), "sandcastle-workflow-"));
   const backlog = new FakeBacklog();
   const ledger = PublicationLedger.open(root);
-  backlog.statuses.set("NODE_ticket-a", "Ready for development");
+  backlog.statuses.set("NODE_ticket-a", "Ready");
   const workflow = new BacklogWorkflow(
     backlog,
     ledger,
@@ -181,7 +181,7 @@ test("a repeated claim repeats neither the comment nor the status write", async 
   assert.deepEqual(backlog.writes, []);
 });
 
-for (const status of ["Staging", "Blocked", "In review", "Done", undefined]) {
+for (const status of ["Backlog", "Blocked", "In review", "Done", undefined]) {
   test(`a stale claim cannot overwrite a human's ${status ?? "missing"} status`, async () => {
     const { backlog, workflow, ledger } = await openWorkflow();
     if (status === undefined) backlog.statuses.delete("NODE_ticket-a");
@@ -200,7 +200,7 @@ test("closed issues and changed requirements cannot be claimed", async () => {
     else backlog.requirementsHash = "b".repeat(64);
     await assert.rejects(workflow.claim(target(), "1a2b3c", "factory/ticket-a", "git@github.com:acme/app.git", "main"), AuthorizationWithdrawnError);
     assert.deepEqual(backlog.writes, []);
-    assert.equal(backlog.statuses.get("NODE_ticket-a"), "Ready for development");
+    assert.equal(backlog.statuses.get("NODE_ticket-a"), "Ready");
   }
 });
 
@@ -229,12 +229,12 @@ test("withdrawal while checking comment idempotency prevents the start comment",
   const { backlog, workflow } = await openWorkflow();
   const listComments = backlog.listComments.bind(backlog);
   backlog.listComments = async (number) => {
-    backlog.statuses.set("NODE_ticket-a", "Staging");
+    backlog.statuses.set("NODE_ticket-a", "Backlog");
     return listComments(number);
   };
   await assert.rejects(workflow.claim(target(), "1a2b3c", "factory/ticket-a", "git@github.com:acme/app.git", "main"), AuthorizationWithdrawnError);
   assert.deepEqual(backlog.writes, []);
-  assert.equal(backlog.statuses.get("NODE_ticket-a"), "Staging");
+  assert.equal(backlog.statuses.get("NODE_ticket-a"), "Backlog");
 });
 
 test("withdrawal during durable claim recording leaves no status write to replay", async () => {
@@ -358,7 +358,7 @@ test("preservation names the preserved branch and commit and parks the ticket", 
 
 test("withdrawal reports incomplete work capture without replacing the human's status", async () => {
   const { backlog, workflow } = await openWorkflow();
-  backlog.statuses.set("NODE_ticket-a", "Staging");
+  backlog.statuses.set("NODE_ticket-a", "Backlog");
   await workflow.withdrawn(target(), "1a2b3c", {
     attemptId: "1a2b3c",
     branch: "factory/ticket-a",
@@ -375,15 +375,15 @@ test("withdrawal reports incomplete work capture without replacing the human's s
     stage: "review",
   });
   assert.deepEqual(backlog.writes, ["comment:7"]);
-  assert.equal(backlog.statuses.get("NODE_ticket-a"), "Staging");
+  assert.equal(backlog.statuses.get("NODE_ticket-a"), "Backlog");
   assert.match(bodies(backlog)[0]!, /Work capture: incomplete.*Unresolved merge conflicts/);
 });
 
-test("retiring a publication returns the issue to Ready for development", async () => {
+test("retiring a publication returns the issue to Ready", async () => {
   const { backlog, workflow } = await openWorkflow();
   backlog.statuses.set("NODE_ticket-a", "In review");
   await workflow.resume(target(), "retired-publication");
-  assert.equal(backlog.statuses.get("NODE_ticket-a"), "Ready for development");
+  assert.equal(backlog.statuses.get("NODE_ticket-a"), "Ready");
 });
 
 test("a Project missing a configured status option fails validation by name", async () => {

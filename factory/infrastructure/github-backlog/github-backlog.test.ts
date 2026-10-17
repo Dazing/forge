@@ -4,9 +4,11 @@ import { BacklogConfigurationError, BacklogConflictError, BacklogHttpError, crea
 import type { Fetch } from "../git-provider/git-provider.js";
 
 const token = "ghp_backlog_secret_9f2c";
-const env = { FORGE_BACKLOG_REPOSITORY: "acme/backlog", FORGE_BACKLOG_PROJECT_ID: "PVT_kwH_private1", FORGE_BACKLOG_TOKEN: token };
+const env = { FORGE_BACKLOG_REPOSITORY: "acme/backlog", FORGE_BACKLOG_PROJECT_URL: "https://github.com/orgs/acme/projects/7", FORGE_BACKLOG_TOKEN: token };
 
 type Recorded = { url: string; method: string; headers: Record<string, string>; body?: unknown };
+
+const resolvedProject = JSON.stringify({ data: { organization: { projectV2: { id: "PVT_kwH_private1" } } } });
 
 /** Routing fetch seam: the test owns every response, so no request can reach the network. */
 function routingFetch(respond: (url: string, init: RequestInit) => { status?: number; body: string }): { fetch: Fetch; calls: Recorded[] } {
@@ -14,6 +16,8 @@ function routingFetch(respond: (url: string, init: RequestInit) => { status?: nu
   return {
     calls,
     fetch: async (url, init) => {
+      // Constructing the transport resolves the Project URL; that lookup is setup, never the operation under test.
+      if (String(init.body ?? "").includes("ResolveProject")) return new Response(resolvedProject, { status: 200, statusText: "Status" });
       const method = init.method ?? "GET";
       calls.push({ url, method, headers: init.headers as Record<string, string>, ...(init.body === undefined ? {} : { body: JSON.parse(String(init.body)) }) });
       const { status = 200, body } = respond(url, init);
@@ -51,7 +55,7 @@ test("lists every issue across pages, excludes pull requests, and stops at the s
   };
   const seam = routingFetch((url) => ({ body: JSON.stringify(pages[url.includes("page=3") ? "page=3" : url.includes("page=2") ? "page=2" : "page=1"]) }));
 
-  const issues = await createGitHubBacklog(env, seam.fetch).listIssues();
+  const issues = await (await createGitHubBacklog(env, seam.fetch)).listIssues();
 
   assert.equal(issues.length, 201);
   assert.deepEqual(issues.map((entry) => entry.number).slice(-2), [200, 201]);
@@ -81,7 +85,7 @@ test("lists comments across pages and deduplicates repeated node ids", async () 
   };
   const seam = routingFetch((url) => ({ body: JSON.stringify(url.includes("page=2") ? pages["page=2"] : pages["page=1"]) }));
 
-  const comments = await createGitHubBacklog(env, seam.fetch).listComments(9);
+  const comments = await (await createGitHubBacklog(env, seam.fetch)).listComments(9);
 
   assert.equal(comments.length, 102);
   assert.equal(comments.filter((entry) => entry.nodeId === "IC_100").length, 1);
@@ -94,7 +98,7 @@ test("a public repository blocks issue creation before any write request", async
   const seam = routingFetch((url) => (url.endsWith("/repos/acme/backlog") ? { body: JSON.stringify({ private: false, full_name: "acme/backlog" }) } : { body: privateProject }));
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).createIssue("Ticket", "# Ticket"),
+    (await createGitHubBacklog(env, seam.fetch)).createIssue("Ticket", "# Ticket"),
     (error: unknown) => error instanceof BacklogConfigurationError && /is public, so ticket content would be published/.test(error.message),
   );
   assert.deepEqual(writes(seam.calls), []);
@@ -106,7 +110,7 @@ test("a public Project blocks commenting even when the repository is private", a
     : { body: privateRepo }));
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).createComment(4, "evidence"),
+    (await createGitHubBacklog(env, seam.fetch)).createComment(4, "evidence"),
     (error: unknown) => error instanceof BacklogConfigurationError && /Project PVT_kwH_private1 is public/.test(error.message),
   );
   assert.deepEqual(writes(seam.calls), []);
@@ -119,7 +123,7 @@ test("creates a private issue with GitHub REST headers and payload", async () =>
     return { status: 201, body: JSON.stringify(issue(12, { updated_at: "2026-10-16T10:00:00Z" })) };
   });
 
-  const created = await createGitHubBacklog(env, seam.fetch).createIssue("Fix login redirect", "# Fix login redirect");
+  const created = await (await createGitHubBacklog(env, seam.fetch)).createIssue("Fix login redirect", "# Fix login redirect");
 
   assert.deepEqual(created, { number: 12, nodeId: "I_NODE_12", url: "https://github.com/acme/backlog/issues/12" });
   const post = writes(seam.calls).find((call) => call.url.endsWith("/repos/acme/backlog/issues"))!;
@@ -140,7 +144,7 @@ test("a revision change between read and write conflicts with no PATCH sent", as
   });
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).updateIssueBody(12, "# Intended body text", "2026-10-16T10:00:00Z"),
+    (await createGitHubBacklog(env, seam.fetch)).updateIssueBody(12, "# Intended body text", "2026-10-16T10:00:00Z"),
     (error: unknown) => error instanceof BacklogConflictError
       && /issue 12 changed externally/.test(error.message)
       && /expected revision 2026-10-16T10:00:00Z, found 2026-10-16T11:00:00Z/.test(error.message)
@@ -160,7 +164,7 @@ test("a read-back showing a foreign body fails the update structurally", async (
   });
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).updateIssueBody(12, "# Intended", "2026-10-16T10:00:00Z"),
+    (await createGitHubBacklog(env, seam.fetch)).updateIssueBody(12, "# Intended", "2026-10-16T10:00:00Z"),
     (error: unknown) => error instanceof BacklogHttpError
       && error.operation === "verifying backlog issue 12 update"
       && error.stderr === "Stored revision 2026-10-16T12:00:00Z does not carry the submitted body.",
@@ -177,7 +181,7 @@ test("a successful update returns the re-read issue with its new revision", asyn
     return { body: JSON.stringify(stored) };
   });
 
-  const updated = await createGitHubBacklog(env, seam.fetch).updateIssueBody(12, "# Intended", "2026-10-16T10:00:00Z");
+  const updated = await (await createGitHubBacklog(env, seam.fetch)).updateIssueBody(12, "# Intended", "2026-10-16T10:00:00Z");
 
   assert.equal(updated.body, "# Intended");
   assert.equal(updated.revision, "2026-10-16T12:00:00Z");
@@ -191,7 +195,7 @@ test("closing an issue completed sends the completed state reason", async () => 
     return { body: JSON.stringify(issue(12, { state: "closed", state_reason: "completed" })) };
   });
 
-  await createGitHubBacklog(env, seam.fetch).closeIssueCompleted(12);
+  await (await createGitHubBacklog(env, seam.fetch)).closeIssueCompleted(12);
 
   const patch = writes(seam.calls).find((call) => call.method === "PATCH")!;
   assert.equal(patch.url, "https://api.github.com/repos/acme/backlog/issues/12");
@@ -202,7 +206,7 @@ test("an oversized comment is rejected before any request", async () => {
   const seam = routingFetch(() => ({ body: privateRepo }));
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).createComment(12, "x".repeat(65537)),
+    (await createGitHubBacklog(env, seam.fetch)).createComment(12, "x".repeat(65537)),
     (error: unknown) => error instanceof BacklogConfigurationError && /65537 characters and exceeds the GitHub limit of 65536/.test(error.message),
   );
   assert.deepEqual(seam.calls, []);
@@ -211,14 +215,14 @@ test("an oversized comment is rejected before any request", async () => {
 test("a missing issue reads as undefined", async () => {
   const seam = routingFetch(() => ({ status: 404, body: "{\"message\":\"Not Found\"}" }));
 
-  assert.equal(await createGitHubBacklog(env, seam.fetch).getIssue(99), undefined);
+  assert.equal(await (await createGitHubBacklog(env, seam.fetch)).getIssue(99), undefined);
 });
 
 test("a 500 response body is redacted in the structured failure", async () => {
   const seam = routingFetch(() => ({ status: 500, body: `internal error, forwarded ${token} by the proxy` }));
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).validateRepository(),
+    (await createGitHubBacklog(env, seam.fetch)).validateRepository(),
     (error: unknown) => error instanceof BacklogHttpError
       && error.status === 500
       && error.stdout === "internal error, forwarded [redacted-token] by the proxy"
@@ -228,12 +232,13 @@ test("a 500 response body is redacted in the structured failure", async () => {
 });
 
 test("a transport rejection becomes a structured failure with status zero", async () => {
-  const failing: Fetch = async () => {
+  const failing: Fetch = async (_url, init) => {
+    if (String(init.body ?? "").includes("ResolveProject")) return new Response(resolvedProject, { status: 200, statusText: "Status" });
     throw new Error(`connect ECONNREFUSED with ${token}`);
   };
 
   await assert.rejects(
-    createGitHubBacklog(env, failing).listIssues(),
+    (await createGitHubBacklog(env, failing)).listIssues(),
     (error: unknown) => error instanceof BacklogHttpError
       && error.status === 0
       && error.stderr === "connect ECONNREFUSED with [redacted-token]"
@@ -246,7 +251,7 @@ for (const status of [401, 403]) {
     const seam = routingFetch(() => ({ status, body: "Bad credentials" }));
 
     await assert.rejects(
-      createGitHubBacklog(env, seam.fetch).listIssues(),
+      (await createGitHubBacklog(env, seam.fetch)).listIssues(),
       (error: unknown) => error instanceof BacklogConfigurationError
         && /listing backlog issues/.test(error.message)
         && /https:\/\/api\.github\.com\/repos\/acme\/backlog\/issues/.test(error.message),
@@ -258,41 +263,46 @@ test("a missing or invisible repository is a configuration failure", async () =>
   const seam = routingFetch(() => ({ status: 404, body: "{\"message\":\"Not Found\"}" }));
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).validateRepository(),
+    (await createGitHubBacklog(env, seam.fetch)).validateRepository(),
     (error: unknown) => error instanceof BacklogConfigurationError && /does not exist or the backlog token cannot see it/.test(error.message),
   );
 });
 
-test("configuration names each missing variable and never echoes the token", () => {
-  assert.throws(
-    () => createGitHubBacklog({ FORGE_BACKLOG_PROJECT_ID: "PVT_kwH_private1", FORGE_BACKLOG_TOKEN: token }),
+test("configuration names each missing variable and never echoes the token", async () => {
+  const unused: Fetch = () => Promise.reject(new Error("no request is allowed before configuration is valid"));
+  const projectUrl = "https://github.com/orgs/acme/projects/7";
+
+  await assert.rejects(
+    createGitHubBacklog({ FORGE_BACKLOG_PROJECT_URL: projectUrl, FORGE_BACKLOG_TOKEN: token }, unused),
     (error: unknown) => error instanceof BacklogConfigurationError && /FORGE_BACKLOG_REPOSITORY/.test(error.message),
   );
-  assert.throws(
-    () => createGitHubBacklog({ FORGE_BACKLOG_REPOSITORY: "acme/backlog", FORGE_BACKLOG_PROJECT_ID: "PVT_kwH_private1", FORGE_BACKLOG_TOKEN: "   " }),
+  await assert.rejects(
+    createGitHubBacklog({ FORGE_BACKLOG_REPOSITORY: "acme/backlog", FORGE_BACKLOG_PROJECT_URL: projectUrl, FORGE_BACKLOG_TOKEN: "   " }, unused),
     (error: unknown) => error instanceof BacklogConfigurationError && /FORGE_BACKLOG_TOKEN/.test(error.message),
   );
-  assert.throws(
-    () => createGitHubBacklog({ FORGE_BACKLOG_REPOSITORY: "acme/backlog", FORGE_BACKLOG_TOKEN: token }),
-    (error: unknown) => error instanceof BacklogConfigurationError && /FORGE_BACKLOG_PROJECT_ID/.test(error.message),
+  await assert.rejects(
+    createGitHubBacklog({ FORGE_BACKLOG_REPOSITORY: "acme/backlog", FORGE_BACKLOG_TOKEN: token }, unused),
+    (error: unknown) => error instanceof BacklogConfigurationError && /FORGE_BACKLOG_PROJECT_URL/.test(error.message),
   );
-  assert.throws(
-    () => createGitHubBacklog({ FORGE_BACKLOG_REPOSITORY: "https://github.com/acme/backlog", FORGE_BACKLOG_PROJECT_ID: "PVT_kwH_private1", FORGE_BACKLOG_TOKEN: token }),
+  await assert.rejects(
+    createGitHubBacklog({ FORGE_BACKLOG_REPOSITORY: "https://github.com/acme/backlog", FORGE_BACKLOG_PROJECT_URL: projectUrl, FORGE_BACKLOG_TOKEN: token }, unused),
     (error: unknown) => error instanceof BacklogConfigurationError && /must be `owner\/repository`; got https:\/\/github\.com\/acme\/backlog/.test(error.message),
   );
   for (const incomplete of [
-    { FORGE_BACKLOG_PROJECT_ID: "PVT_kwH_private1", FORGE_BACKLOG_TOKEN: token },
+    { FORGE_BACKLOG_PROJECT_URL: projectUrl, FORGE_BACKLOG_TOKEN: token },
     { FORGE_BACKLOG_REPOSITORY: "acme/backlog", FORGE_BACKLOG_TOKEN: "   " },
   ]) {
-    assert.throws(
-      () => createGitHubBacklog(incomplete),
+    await assert.rejects(
+      createGitHubBacklog(incomplete, unused),
       (error: unknown) => !(error as Error).message.includes(token),
     );
   }
 });
 
-test("the transport reports its repository, Project, and secrets for aggregate redaction", () => {
-  const backlog = createGitHubBacklog(env);
+test("the transport reports its repository, Project, and secrets for aggregate redaction", async () => {
+  const seam = routingFetch(() => ({ body: privateRepo }));
+
+  const backlog = await createGitHubBacklog(env, seam.fetch);
 
   assert.equal(backlog.repository, "acme/backlog");
   assert.equal(backlog.projectId, "PVT_kwH_private1");

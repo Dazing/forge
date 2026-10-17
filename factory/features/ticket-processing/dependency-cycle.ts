@@ -173,7 +173,7 @@ async function discover(config: ProcessConfig, state: DependencyWorkflowState): 
       state.blocked.set(id, `requirements changed after successful checkpoint; author a new ticket instead of reusing ${id}`);
     }
     state.issues.set(id, entry);
-    if (state.withdrawn.has(id) && entry.status === "Ready for development") {
+    if (state.withdrawn.has(id) && entry.status === "Ready") {
       state.withdrawn.delete(id);
       state.blocked.delete(id);
       state.reviewed.delete(id);
@@ -356,7 +356,7 @@ async function reconcileResult(config: ProcessConfig, state: DependencyWorkflowS
       }
     }
     state.publications.delete(result.groupId);
-    console.error(`Pull request ${result.pullRequestUrl} is ${record === undefined ? "absent" : "closed"}; its recorded publication is retired and its tickets return to Ready for development pending restart.`);
+    console.error(`Pull request ${result.pullRequestUrl} is ${record === undefined ? "absent" : "closed"}; its recorded publication is retired and its tickets return to Ready pending restart.`);
     for (const ticketId of includedIds(result)) {
       state.published.delete(ticketId);
       state.retired.add(ticketId);
@@ -916,7 +916,7 @@ export async function processDependencyCycle(config: ProcessConfig, state: Depen
     if (reason.startsWith("waiting for dependencies:") && ticket.dependsOnTickets.every((id) => {
       const dependency = state.issues.get(id);
       return state.mergedSatisfied.has(id) || state.reviewed.has(id) || state.published.has(id)
-        || (!state.blocked.has(id) && (dependency?.status === "Ready for development" || dependency?.status === "In progress"));
+        || (!state.blocked.has(id) && (dependency?.status === "Ready" || dependency?.status === "In progress"));
     })) continue;
     await reportSettlement(config, ticketId, "blocked", () => config.workflow.blocked(targetOf(entry), reason, blockingReasonKey(reason)));
   }
@@ -969,5 +969,5 @@ export async function processDependencyCycle(config: ProcessConfig, state: Depen
 
 /** Issues whose board status is not an instruction to develop: they are never scheduled. */
 function nonSchedulableStatuses(state: DependencyWorkflowState): readonly string[] {
-  return [...state.issues].filter(([, entry]) => entry.status !== "Ready for development" && entry.status !== "In progress").map(([ticketId]) => ticketId);
+  return [...state.issues].filter(([, entry]) => entry.status !== "Ready" && entry.status !== "In progress").map(([ticketId]) => ticketId);
 }

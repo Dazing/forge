@@ -78,7 +78,13 @@ async function expandPath(pattern: string, cwd: string): Promise<string[]> {
   if (!GLOB_MAGIC.test(pattern)) {
     const details = await stat(rooted).catch(() => undefined);
     if (details === undefined) throw new Error(`Ticket path does not exist: ${pattern}`);
-    if (details.isDirectory()) return listTicketPaths(rooted);
+    if (details.isDirectory()) {
+      const paths = await listTicketPaths(rooted);
+      if (paths.length === 0) {
+        throw new Error(`Ticket directory ${pattern} contains no top-level Markdown tickets. Directory inputs are not recursive; pass the directory containing the tickets or a quoted recursive glob such as "${pattern.replaceAll("\\", "/").replace(/\/$/u, "")}/**/*.md".`);
+      }
+      return paths;
+    }
     return [rooted];
   }
 

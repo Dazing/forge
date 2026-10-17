@@ -9,10 +9,10 @@ const REPORT: SubmissionReport = {
   ok: false,
   exitCode: 1,
   entries: [
-    { source: "tickets/a.md", ticketId: "T-1", outcome: "created", issueNumber: 12, issueUrl: "https://github.com/acme/backlog/issues/12", status: "Ready for development" },
-    { source: "tickets/b.md", ticketId: "T-2", outcome: "updated", issueNumber: 13, issueUrl: "https://github.com/acme/backlog/issues/13", status: "Ready for development" },
-    { source: "tickets/c.md", ticketId: "T-3", outcome: "unchanged", issueNumber: 14, issueUrl: "https://github.com/acme/backlog/issues/14", status: "Ready for development" },
-    { source: "tickets/d.md", ticketId: "T-4", outcome: "failed", reason: "Project Status is Blocked, and only `Staging` accepts a resubmission." },
+    { source: "tickets/a.md", ticketId: "T-1", outcome: "created", issueNumber: 12, issueUrl: "https://github.com/acme/backlog/issues/12", status: "Ready" },
+    { source: "tickets/b.md", ticketId: "T-2", outcome: "updated", issueNumber: 13, issueUrl: "https://github.com/acme/backlog/issues/13", status: "Ready" },
+    { source: "tickets/c.md", ticketId: "T-3", outcome: "unchanged", issueNumber: 14, issueUrl: "https://github.com/acme/backlog/issues/14", status: "Ready" },
+    { source: "tickets/d.md", ticketId: "T-4", outcome: "failed", reason: "Project Status is Blocked, and only `Backlog` accepts a resubmission." },
   ],
   totals: { created: 1, updated: 1, unchanged: 1, failed: 1 },
 };
@@ -21,10 +21,10 @@ test("the text report gives one line per ticket in batch order, then totals", ()
   const lines = renderTextReport(REPORT).split("\n");
 
   assert.deepEqual(lines, [
-    "created #12 https://github.com/acme/backlog/issues/12 T-1 tickets/a.md status=Ready for development",
-    "updated #13 T-2 tickets/b.md status=Ready for development",
-    "unchanged #14 T-3 tickets/c.md status=Ready for development",
-    "failed tickets/d.md: Project Status is Blocked, and only `Staging` accepts a resubmission. (T-4)",
+    "created #12 https://github.com/acme/backlog/issues/12 T-1 tickets/a.md status=Ready",
+    "updated #13 T-2 tickets/b.md status=Ready",
+    "unchanged #14 T-3 tickets/c.md status=Ready",
+    "failed tickets/d.md: Project Status is Blocked, and only `Backlog` accepts a resubmission. (T-4)",
     "totals: 1 created, 1 updated, 1 unchanged, 1 failed",
   ]);
 });

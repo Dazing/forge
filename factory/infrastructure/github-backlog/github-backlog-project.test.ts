@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { buildSchema, graphqlSync } from "graphql";
 import { BacklogConfigurationError, BacklogHttpError, createGitHubBacklog } from "./index.js";
 import type { Fetch } from "../git-provider/git-provider.js";
 
 const token = "ghp_backlog_secret_9f2c";
 const projectId = "PVT_kwH_private1";
-const env = { FORGE_BACKLOG_REPOSITORY: "acme/backlog", FORGE_BACKLOG_PROJECT_ID: projectId, FORGE_BACKLOG_TOKEN: token };
-const STATUS_NAMES = ["Staging", "Ready for development", "In progress", "In review", "Done", "Blocked"];
+const env = { FORGE_BACKLOG_REPOSITORY: "acme/backlog", FORGE_BACKLOG_PROJECT_URL: "https://github.com/orgs/acme/projects/7", FORGE_BACKLOG_TOKEN: token };
+const resolvedProject = JSON.stringify({ data: { organization: { projectV2: { id: projectId } } } });
+const STATUS_NAMES = ["Backlog", "Ready", "In progress", "In review", "Done", "Blocked"];
 const optionId = (name: string): string => `OPT_${name.toUpperCase().replace(/ /g, "_")}`;
 
 type GraphqlCall = { name: string; query: string; variables: Record<string, unknown> };
@@ -18,6 +20,8 @@ function graphqlFetch(respond: (call: GraphqlCall) => { status?: number; body: s
     calls,
     fetch: async (_url, init) => {
       const payload = JSON.parse(String(init.body)) as { query: string; variables: Record<string, unknown> };
+      // Constructing the transport resolves the Project URL; that lookup is setup, never the Project behavior under test.
+      if (payload.query.includes("ResolveProject")) return new Response(resolvedProject, { status: 200, statusText: "Status" });
       const call: GraphqlCall = { name: /(?:query|mutation)\s+(\w+)/.exec(payload.query)?.[1] ?? "anonymous", query: payload.query, variables: payload.variables };
       calls.push(call);
       const { status = 200, body } = respond(call);
@@ -48,7 +52,7 @@ const privateRepo = JSON.stringify({ private: true, full_name: "acme/backlog" })
 test("validates the Project status field and returns every configured option", async () => {
   const seam = graphqlFetch(() => ({ body: projectFieldResponse(allOptions) }));
 
-  const field = await createGitHubBacklog(env, seam.fetch).validateProject(STATUS_NAMES);
+  const field = await (await createGitHubBacklog(env, seam.fetch)).validateProject(STATUS_NAMES);
 
   assert.deepEqual(field, { fieldId: "PVTSSF_field", fieldName: "Status", options: allOptions.map((option) => ({ optionId: option.id, name: option.name })) });
   assert.equal(seam.calls[0]!.name, "ProjectNode");
@@ -59,7 +63,7 @@ test("a status field missing one required option is rejected by name", async () 
   const seam = graphqlFetch(() => ({ body: projectFieldResponse(allOptions.filter((option) => option.name !== "In review")) }));
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).validateProject(STATUS_NAMES),
+    (await createGitHubBacklog(env, seam.fetch)).validateProject(STATUS_NAMES),
     (error: unknown) => error instanceof BacklogConfigurationError && /missing required options: In review\./.test(error.message),
   );
 });
@@ -68,7 +72,7 @@ test("duplicate status options are rejected by name", async () => {
   const seam = graphqlFetch(() => ({ body: projectFieldResponse([...allOptions, { id: "OPT_DONE_SECOND", name: "Done" }]) }));
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).validateProject(STATUS_NAMES),
+    (await createGitHubBacklog(env, seam.fetch)).validateProject(STATUS_NAMES),
     (error: unknown) => error instanceof BacklogConfigurationError && /duplicate options: Done\./.test(error.message),
   );
 });
@@ -77,7 +81,7 @@ test("a Project without a status field is a configuration failure", async () => 
   const seam = graphqlFetch(() => ({ body: JSON.stringify({ data: { node: { id: projectId, number: 7, title: "Backlog", url: "https://github.com/orgs/acme/projects/7", public: false, viewerCanUpdate: true, fields: { nodes: [{ __typename: "ProjectV2Text", id: "PVTSSF_text", name: "Ticket" }] } } } }) }));
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).validateProject(STATUS_NAMES),
+    (await createGitHubBacklog(env, seam.fetch)).validateProject(STATUS_NAMES),
     (error: unknown) => error instanceof BacklogConfigurationError && /has no single-select `Status` field/.test(error.message),
   );
 });
@@ -86,7 +90,7 @@ test("an inaccessible Project node is a configuration failure", async () => {
   const seam = graphqlFetch(() => ({ body: JSON.stringify({ data: { node: null } }) }));
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).validateProject(STATUS_NAMES),
+    (await createGitHubBacklog(env, seam.fetch)).validateProject(STATUS_NAMES),
     (error: unknown) => error instanceof BacklogConfigurationError && /is inaccessible/.test(error.message),
   );
 });
@@ -95,7 +99,7 @@ test("a public Project is rejected for status validation", async () => {
   const seam = graphqlFetch(() => ({ body: JSON.stringify({ data: { node: { id: projectId, number: 7, title: "Backlog", url: "https://github.com/orgs/acme/projects/7", public: true, viewerCanUpdate: true, fields: { nodes: [] } } } }) }));
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).validateProject(STATUS_NAMES),
+    (await createGitHubBacklog(env, seam.fetch)).validateProject(STATUS_NAMES),
     (error: unknown) => error instanceof BacklogConfigurationError && /is public; the backlog must be a private Project/.test(error.message),
   );
 });
@@ -104,7 +108,7 @@ test("GraphQL errors arriving with HTTP 200 become structured failures named by 
   const seam = graphqlFetch(() => ({ status: 200, body: JSON.stringify({ data: null, errors: [{ message: "Field 'public' is not defined", type: "GRAPHQL_VALIDATION_FAILED" }] }) }));
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).validateProject(STATUS_NAMES),
+    (await createGitHubBacklog(env, seam.fetch)).validateProject(STATUS_NAMES),
     (error: unknown) => error instanceof BacklogHttpError
       && error.status === 200
       && error.operation === "reading backlog Project"
@@ -116,7 +120,7 @@ test("a GraphQL payload with null data and no errors is a structured failure", a
   const seam = graphqlFetch(() => ({ body: JSON.stringify({ data: null }) }));
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).validateProject(STATUS_NAMES),
+    (await createGitHubBacklog(env, seam.fetch)).validateProject(STATUS_NAMES),
     (error: unknown) => error instanceof BacklogHttpError && /returned no data/.test(error.message),
   );
 });
@@ -125,7 +129,7 @@ test("a token inside a GraphQL error message is redacted", async () => {
   const seam = graphqlFetch(() => ({ body: JSON.stringify({ errors: [{ message: `expired token ${token} rejected`, type: "BAD_CREDENTIALS" }] }) }));
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).validateProject(STATUS_NAMES),
+    (await createGitHubBacklog(env, seam.fetch)).validateProject(STATUS_NAMES),
     (error: unknown) => error instanceof BacklogHttpError
       && error.stderr === "BAD_CREDENTIALS: expired token [redacted-token] rejected"
       && !error.message.includes(token)
@@ -134,12 +138,13 @@ test("a token inside a GraphQL error message is redacted", async () => {
 });
 
 test("a GraphQL transport rejection reports status zero", async () => {
-  const failing: Fetch = async () => {
+  const failing: Fetch = async (_url, init) => {
+    if (String(init.body).includes("ResolveProject")) return new Response(resolvedProject, { status: 200 });
     throw new Error(`socket hang up near ${token}`);
   };
 
   await assert.rejects(
-    createGitHubBacklog(env, failing).validateProject(STATUS_NAMES),
+    (await createGitHubBacklog(env, failing)).validateProject(STATUS_NAMES),
     (error: unknown) => error instanceof BacklogHttpError && error.status === 0 && error.stderr === "socket hang up near [redacted-token]",
   );
 });
@@ -156,6 +161,8 @@ function backlogFetch(repositoryPrivate: boolean, respond: (call: GraphqlCall) =
       return new Response(JSON.stringify({ private: repositoryPrivate, full_name: "acme/backlog" }), { status: 200 });
     }
     const payload = JSON.parse(String(init.body)) as { query: string; variables: Record<string, unknown> };
+    // Constructing the transport resolves the Project URL; that lookup is setup, never the Project behavior under test.
+    if (payload.query.includes("ResolveProject")) return new Response(resolvedProject, { status: 200, statusText: "Status" });
     const call: GraphqlCall = { name: /(?:query|mutation)\s+(\w+)/.exec(payload.query)?.[1] ?? "anonymous", query: payload.query, variables: payload.variables };
     graphqlCalls.push(call);
     const { status = 200, body } = respond(call);
@@ -172,7 +179,7 @@ test("finds the project item for an issue across item pages and reads its status
     ? { body: itemsResponse([{ id: "PVTI_1", content: { id: "I_NODE_other", number: 3 }, fieldValues: { nodes: [] } }], { hasNextPage: true, endCursor: "cur2" }) }
     : { body: itemsResponse([{ id: "PVTI_9", content: { id: "I_NODE_12", number: 12 }, fieldValues: { nodes: [statusValueNode("In progress", "OPT_IN_PROGRESS")] } }], { hasNextPage: false, endCursor: null }) }));
 
-  const item = await createGitHubBacklog(env, seam.fetch).findProjectItem("I_NODE_12");
+  const item = await (await createGitHubBacklog(env, seam.fetch)).findProjectItem("I_NODE_12");
 
   assert.deepEqual(item, { itemId: "PVTI_9", status: { optionId: "OPT_IN_PROGRESS", name: "In progress" } });
   assert.equal(seam.calls.length, 2);
@@ -182,13 +189,13 @@ test("finds the project item for an issue across item pages and reads its status
 test("an attached issue with no status value reports an undefined status", async () => {
   const seam = graphqlFetch(() => ({ body: itemsResponse([{ id: "PVTI_9", content: { id: "I_NODE_12", number: 12 }, fieldValues: { nodes: [] } }], { hasNextPage: false, endCursor: null }) }));
 
-  assert.deepEqual(await createGitHubBacklog(env, seam.fetch).findProjectItem("I_NODE_12"), { itemId: "PVTI_9", status: undefined });
+  assert.deepEqual(await (await createGitHubBacklog(env, seam.fetch)).findProjectItem("I_NODE_12"), { itemId: "PVTI_9", status: undefined });
 });
 
 test("an issue that is not on the board has no project item", async () => {
   const seam = graphqlFetch(() => ({ body: itemsResponse([{ id: "PVTI_1", content: { id: "I_NODE_other", number: 3 }, fieldValues: { nodes: [] } }], { hasNextPage: false, endCursor: null }) }));
 
-  assert.equal(await createGitHubBacklog(env, seam.fetch).findProjectItem("I_NODE_12"), undefined);
+  assert.equal(await (await createGitHubBacklog(env, seam.fetch)).findProjectItem("I_NODE_12"), undefined);
 });
 
 test("setting a status attaches the issue, writes the option, and verifies the read-back", async () => {
@@ -200,7 +207,7 @@ test("setting a status attaches the issue, writes the option, and verifies the r
     return { body: JSON.stringify({ data: { node: { id: "PVTI_9", fieldValues: { nodes: [statusValueNode("In progress", "OPT_IN_PROGRESS")] } } } }) };
   });
 
-  await createGitHubBacklog(env, seam.fetch).setProjectStatus("I_NODE_12", "OPT_IN_PROGRESS");
+  await (await createGitHubBacklog(env, seam.fetch)).setProjectStatus("I_NODE_12", "OPT_IN_PROGRESS");
 
   const addItem = seam.graphql.find((call) => call.name === "AddItem")!;
   assert.deepEqual(addItem.variables, { projectId, contentId: "I_NODE_12" });
@@ -208,15 +215,66 @@ test("setting a status attaches the issue, writes the option, and verifies the r
   assert.deepEqual(seam.graphql.map((call) => call.name), ["ProjectNode", "ProjectNode", "ProjectItems", "AddItem", "SetStatus", "ItemNode"]);
 });
 
+test("claim and blocked statuses persist through the GitHub single-select GraphQL input contract", async () => {
+  const schema = buildSchema(`
+    type Query { unused: Boolean }
+    type Mutation {
+      updateProjectV2ItemFieldValue(input: UpdateProjectV2ItemFieldValueInput!): UpdateProjectV2ItemFieldValuePayload
+    }
+    input UpdateProjectV2ItemFieldValueInput {
+      projectId: ID!
+      itemId: ID!
+      fieldId: ID!
+      value: ProjectV2FieldValue!
+    }
+    input ProjectV2FieldValue { singleSelectOptionId: String }
+    type UpdateProjectV2ItemFieldValuePayload { projectV2Item: ProjectV2Item }
+    type ProjectV2Item { id: ID! }
+  `);
+  let storedOption = allOptions.find((option) => option.name === "Ready")!;
+  const seam = backlogFetch(true, (call) => {
+    if (call.name === "ProjectNode") return { body: projectFieldResponse(allOptions) };
+    const nodes = [statusValueNode(storedOption.name, storedOption.id)];
+    if (call.name === "ProjectItems") {
+      return { body: itemsResponse([{ id: "PVTI_9", content: { id: "I_NODE_12", number: 12 }, fieldValues: { nodes } }], { hasNextPage: false, endCursor: null }) };
+    }
+    if (call.name === "SetStatus") {
+      const result = graphqlSync({
+        schema,
+        source: call.query,
+        variableValues: call.variables,
+        rootValue: {
+          updateProjectV2ItemFieldValue: ({ input }: { input: { projectId: string; itemId: string; fieldId: string; value: { singleSelectOptionId: string } } }) => {
+            assert.equal(input.projectId, projectId);
+            assert.equal(input.itemId, "PVTI_9");
+            assert.equal(input.fieldId, "PVTSSF_field");
+            storedOption = allOptions.find((option) => option.id === input.value.singleSelectOptionId)!;
+            return { projectV2Item: { id: input.itemId } };
+          },
+        },
+      });
+      return { body: JSON.stringify(result) };
+    }
+    assert.equal(call.name, "ItemNode");
+    return { body: JSON.stringify({ data: { node: { id: "PVTI_9", fieldValues: { nodes } } } }) };
+  });
+  const backlog = await createGitHubBacklog(env, seam.fetch);
+  for (const name of ["In progress", "Blocked"]) {
+    await backlog.setProjectStatus("I_NODE_12", optionId(name));
+    const item = await backlog.findProjectItem("I_NODE_12");
+    assert.deepEqual(item?.status, { optionId: optionId(name), name });
+  }
+});
+
 test("setting a status on an attached issue reuses its existing item", async () => {
   const seam = backlogFetch(true, (call) => {
     if (call.name === "ProjectNode") return { body: projectFieldResponse(allOptions) };
-    if (call.name === "ProjectItems") return { body: itemsResponse([{ id: "PVTI_9", content: { id: "I_NODE_12", number: 12 }, fieldValues: { nodes: [statusValueNode("Staging", "OPT_STAGING")] } }], { hasNextPage: false, endCursor: null }) };
+    if (call.name === "ProjectItems") return { body: itemsResponse([{ id: "PVTI_9", content: { id: "I_NODE_12", number: 12 }, fieldValues: { nodes: [statusValueNode("Backlog", "OPT_STAGING")] } }], { hasNextPage: false, endCursor: null }) };
     if (call.name === "SetStatus") return { body: JSON.stringify({ data: { updateProjectV2ItemFieldValue: { projectV2Item: { id: "PVTI_9" } } } }) };
     return { body: JSON.stringify({ data: { node: { id: "PVTI_9", fieldValues: { nodes: [statusValueNode("Done", "OPT_DONE")] } } } }) };
   });
 
-  await createGitHubBacklog(env, seam.fetch).setProjectStatus("I_NODE_12", "OPT_DONE");
+  await (await createGitHubBacklog(env, seam.fetch)).setProjectStatus("I_NODE_12", "OPT_DONE");
 
   assert.equal(seam.graphql.some((call) => call.name === "AddItem"), false);
 });
@@ -231,7 +289,7 @@ test("a status read-back that is not the requested option fails structurally", a
   });
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).setProjectStatus("I_NODE_12", "OPT_DONE"),
+    (await createGitHubBacklog(env, seam.fetch)).setProjectStatus("I_NODE_12", "OPT_DONE"),
     (error: unknown) => error instanceof BacklogHttpError
       && error.operation === "verifying a backlog Project status"
       && error.stderr === 'Project item PVTI_9 reports "Blocked" Status after the write, not option OPT_DONE.',
@@ -242,7 +300,7 @@ test("an unknown status option id is rejected before any mutation", async () => 
   const seam = backlogFetch(true, (call) => (call.name === "ProjectNode" ? { body: projectFieldResponse(allOptions) } : { body: itemsResponse([], { hasNextPage: false, endCursor: null }) }));
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).setProjectStatus("I_NODE_12", "OPT_MISSING"),
+    (await createGitHubBacklog(env, seam.fetch)).setProjectStatus("I_NODE_12", "OPT_MISSING"),
     (error: unknown) => error instanceof BacklogConfigurationError && /has no option id OPT_MISSING/.test(error.message),
   );
   assert.equal(seam.graphql.some((call) => call.name === "SetStatus"), false);
@@ -252,7 +310,7 @@ test("a public repository blocks a status write before any Project mutation", as
   const seam = backlogFetch(false, () => ({ body: projectFieldResponse(allOptions) }));
 
   await assert.rejects(
-    createGitHubBacklog(env, seam.fetch).setProjectStatus("I_NODE_12", "OPT_DONE"),
+    (await createGitHubBacklog(env, seam.fetch)).setProjectStatus("I_NODE_12", "OPT_DONE"),
     (error: unknown) => error instanceof BacklogConfigurationError && /is public, so ticket content would be published/.test(error.message),
   );
   assert.deepEqual(seam.graphql, []);

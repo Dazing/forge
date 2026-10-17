@@ -142,34 +142,97 @@ function statusValue(nodes: readonly unknown[]): BacklogStatusOption | undefined
   return undefined;
 }
 
+/** The credential-bearing seam every GitHub request needs; `secrets` is what diagnostics must never expose. */
+type GitHubTransport = Readonly<{
+  fetchImpl: Fetch;
+  token: string;
+  secrets: readonly string[];
+}>;
+
+function authHeaders(transport: GitHubTransport, withBody: boolean): Record<string, string> {
+  return {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${transport.token}`,
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "sandcastle-runner",
+    ...(withBody ? { "Content-Type": "application/json" } : {}),
+  };
+}
+
+function httpFailure(transport: GitHubTransport, operation: string, command: string, status: number, body: string, cause: unknown): BacklogHttpError {
+  return new BacklogHttpError(
+    { operation, command, status, stdout: redactSecrets(transport.secrets, body), stderr: redactSecrets(transport.secrets, `HTTP ${status}`) },
+    new Error(redactSecrets(transport.secrets, toMessage(cause))),
+  );
+}
+
+function transportFailure(transport: GitHubTransport, operation: string, command: string, cause: unknown): BacklogHttpError {
+  return new BacklogHttpError(
+    { operation, command, status: 0, stdout: "", stderr: redactSecrets(transport.secrets, toMessage(cause)) },
+    new Error(redactSecrets(transport.secrets, toMessage(cause))),
+  );
+}
+
+/** One GraphQL exchange against the fixed endpoint. Project errors arrive with HTTP 200, so the payload envelope is authoritative. */
+async function graphqlRequest<T>(
+  transport: GitHubTransport,
+  schema: z.ZodType<T>,
+  operation: string,
+  query: string,
+  variables: Record<string, unknown>,
+): Promise<T> {
+  const command = `POST ${GRAPHQL_URL} ${operation}`;
+  let response: Response;
+  try {
+    response = await transport.fetchImpl(GRAPHQL_URL, { method: "POST", headers: authHeaders(transport, true), body: JSON.stringify({ query, variables }) });
+  } catch (error) {
+    throw transportFailure(transport, operation, `POST ${GRAPHQL_URL}`, error);
+  }
+  const text = await response.text();
+  if (response.status === 401 || response.status === 403) {
+    throw new BacklogConfigurationError(
+      `Backlog token cannot authorize ${operation} at ${GRAPHQL_URL} (HTTP ${response.status}). Projects v2 requires a classic PAT with the \`project\` scope; fine-grained PATs cannot access it.`,
+    );
+  }
+  if (!response.ok) throw httpFailure(transport, operation, command, response.status, text, new Error(`GitHub GraphQL request failed with HTTP ${response.status}.`));
+
+  let envelope: { data?: unknown; errors?: { message?: string; type?: string }[] };
+  try {
+    envelope = JSON.parse(text) as typeof envelope;
+  } catch (error) {
+    throw httpFailure(transport, operation, command, response.status, text, new Error(`GitHub GraphQL response was not JSON: ${toMessage(error)}`));
+  }
+  if (envelope.errors !== undefined && envelope.errors.length > 0) {
+    const detail = redactSecrets(transport.secrets, envelope.errors.map((entry) => [entry.type, entry.message].filter((part) => part !== undefined && part.length > 0).join(": ")).join("; "));
+    throw new BacklogHttpError(
+      { operation, command, status: response.status, stdout: redactSecrets(transport.secrets, text), stderr: detail },
+      new Error(`GitHub GraphQL reported an error for ${operation}: ${detail}`),
+    );
+  }
+  if (envelope.data === null || envelope.data === undefined) {
+    throw httpFailure(transport, operation, command, response.status, text, new Error(`GitHub GraphQL returned no data for ${operation}.`));
+  }
+  try {
+    return schema.parse(envelope.data) as T;
+  } catch (error) {
+    throw httpFailure(transport, operation, command, response.status, text, new Error(`GitHub GraphQL data for ${operation} did not match the expected shape: ${toMessage(error)}`));
+  }
+}
+
 /** GitHub backlog transport over an injectable fetch seam. */
 export class GitHubBacklogClient implements GitHubBacklog {
   readonly secrets: readonly string[];
 
+  private readonly transport: GitHubTransport;
+
   constructor(
     readonly repository: string,
     readonly projectId: string,
-    private readonly token: string,
-    private readonly fetchImpl: Fetch = globalThis.fetch,
+    token: string,
+    fetchImpl: Fetch = globalThis.fetch,
   ) {
-    this.secrets = [token];
-  }
-
-  private headers(withBody: boolean): Record<string, string> {
-    return {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${this.token}`,
-      "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "sandcastle-runner",
-      ...(withBody ? { "Content-Type": "application/json" } : {}),
-    };
-  }
-
-  private httpFailure(operation: string, command: string, status: number, body: string, cause: unknown): BacklogHttpError {
-    return new BacklogHttpError(
-      { operation, command, status, stdout: redactSecrets(this.secrets, body), stderr: redactSecrets(this.secrets, `HTTP ${status}`) },
-      new Error(redactSecrets(this.secrets, toMessage(cause))),
-    );
+    this.transport = { fetchImpl, token, secrets: [token] };
+    this.secrets = this.transport.secrets;
   }
 
   /** One REST exchange with redacted structured failures; 404 yields `undefined` so each caller decides what absence means. */
@@ -177,16 +240,13 @@ export class GitHubBacklogClient implements GitHubBacklog {
     const command = `${method} ${API_BASE}${path}`;
     let response: Response;
     try {
-      response = await this.fetchImpl(`${API_BASE}${path}`, {
+      response = await this.transport.fetchImpl(`${API_BASE}${path}`, {
         method,
-        headers: this.headers(payload !== undefined),
+        headers: authHeaders(this.transport, payload !== undefined),
         ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
       });
     } catch (error) {
-      throw new BacklogHttpError(
-        { operation, command, status: 0, stdout: "", stderr: redactSecrets(this.secrets, toMessage(error)) },
-        new Error(redactSecrets(this.secrets, toMessage(error))),
-      );
+      throw transportFailure(this.transport, operation, command, error);
     }
     const text = await response.text();
     if (response.status === 404) return undefined;
@@ -197,61 +257,19 @@ export class GitHubBacklogClient implements GitHubBacklog {
         `Backlog token cannot authorize ${operation} at ${command} (HTTP ${response.status}). FORGE_BACKLOG_TOKEN needs the classic \`repo\` scope for private issues and the \`project\` scope for the Project. ${redactSecrets(this.secrets, text)}`,
       );
     }
-    if (!response.ok) throw this.httpFailure(operation, command, response.status, text, new Error(`GitHub backlog request failed with HTTP ${response.status}.`));
+    if (!response.ok) throw httpFailure(this.transport, operation, command, response.status, text, new Error(`GitHub backlog request failed with HTTP ${response.status}.`));
     let parsed: T;
     try {
       parsed = schema.parse(JSON.parse(text)) as T;
     } catch (error) {
-      throw this.httpFailure(operation, command, response.status, text, new Error(`GitHub backlog response did not match the expected shape: ${toMessage(error)}`));
+      throw httpFailure(this.transport, operation, command, response.status, text, new Error(`GitHub backlog response did not match the expected shape: ${toMessage(error)}`));
     }
     return parsed;
   }
 
-  /** One GraphQL exchange. Project errors arrive with HTTP 200, so the payload envelope is authoritative. */
-  private async graphql<T>(schema: z.ZodType<T>, operation: string, query: string, variables: Record<string, unknown>): Promise<T> {
-    const command = `POST ${GRAPHQL_URL} ${operation}`;
-    let response: Response;
-    try {
-      response = await this.fetchImpl(GRAPHQL_URL, {
-        method: "POST",
-        headers: this.headers(true),
-        body: JSON.stringify({ query, variables }),
-      });
-    } catch (error) {
-      throw new BacklogHttpError(
-        { operation, command: `POST ${GRAPHQL_URL}`, status: 0, stdout: "", stderr: redactSecrets(this.secrets, toMessage(error)) },
-        new Error(redactSecrets(this.secrets, toMessage(error))),
-      );
-    }
-    const text = await response.text();
-    if (response.status === 401 || response.status === 403) {
-      throw new BacklogConfigurationError(
-        `Backlog token cannot authorize ${operation} at ${GRAPHQL_URL} (HTTP ${response.status}). Projects v2 requires a classic PAT with the \`project\` scope; fine-grained PATs cannot access it.`,
-      );
-    }
-    if (!response.ok) throw this.httpFailure(operation, command, response.status, text, new Error(`GitHub GraphQL request failed with HTTP ${response.status}.`));
-
-    let envelope: { data?: unknown; errors?: { message?: string; type?: string }[] };
-    try {
-      envelope = JSON.parse(text) as typeof envelope;
-    } catch (error) {
-      throw this.httpFailure(operation, command, response.status, text, new Error(`GitHub GraphQL response was not JSON: ${toMessage(error)}`));
-    }
-    if (envelope.errors !== undefined && envelope.errors.length > 0) {
-      const detail = redactSecrets(this.secrets, envelope.errors.map((entry) => [entry.type, entry.message].filter((part) => part !== undefined && part.length > 0).join(": ")).join("; "));
-      throw new BacklogHttpError(
-        { operation, command, status: response.status, stdout: redactSecrets(this.secrets, text), stderr: detail },
-        new Error(`GitHub GraphQL reported an error for ${operation}: ${detail}`),
-      );
-    }
-    if (envelope.data === null || envelope.data === undefined) {
-      throw this.httpFailure(operation, command, response.status, text, new Error(`GitHub GraphQL returned no data for ${operation}.`));
-    }
-    try {
-      return schema.parse(envelope.data) as T;
-    } catch (error) {
-      throw this.httpFailure(operation, command, response.status, text, new Error(`GitHub GraphQL data for ${operation} did not match the expected shape: ${toMessage(error)}`));
-    }
+  /** One GraphQL exchange on this transport's credential. */
+  private graphql<T>(schema: z.ZodType<T>, operation: string, query: string, variables: Record<string, unknown>): Promise<T> {
+    return graphqlRequest(this.transport, schema, operation, query, variables);
   }
 
   /** Repository privacy and identity; a missing or invisible repository is a configuration failure. */
@@ -508,7 +526,7 @@ export class GitHubBacklogClient implements GitHubBacklog {
     await this.graphql(
       updatedItemSchema,
       "setting a backlog Project status",
-      `mutation SetStatus($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: ID!) { updateProjectV2ItemFieldValue(input: { projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: { singleSelectOptionId: $optionId } }) { projectV2Item { id } } }`,
+      `mutation SetStatus($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) { updateProjectV2ItemFieldValue(input: { projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: { singleSelectOptionId: $optionId } }) { projectV2Item { id } } }`,
       { projectId: this.projectId, itemId, fieldId, optionId },
     );
 
@@ -528,8 +546,75 @@ export class GitHubBacklogClient implements GitHubBacklog {
   }
 }
 
-/** Build the configured backlog transport; a missing or blank setting names the variable and never echoes the token. */
-export function createGitHubBacklog(env: NodeJS.ProcessEnv, fetchImpl: Fetch = globalThis.fetch): GitHubBacklog {
+/** The Project V2 reference a pasted browser URL identifies: owner kind, owner login, and project number. */
+type ProjectReference = Readonly<{
+  kind: "organization" | "user";
+  owner: string;
+  number: number;
+}>;
+
+const projectPathPattern = /^\/(orgs|users)\/([^/]+)\/projects\/([^/]+)(?:\/views\/([^/]+))?\/?$/u;
+const ownerPattern = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u;
+const MAX_GRAPHQL_INT = 2_147_483_647;
+const projectUrlGuidance = "FORGE_BACKLOG_PROJECT_URL must be the private Project V2 board URL, for example https://github.com/orgs/<owner>/projects/<number> (a trailing /views/<number> is allowed). See .env.example.";
+const ownerProjectSchema = z.object({ projectV2: z.object({ id: z.string().min(1) }).nullable() }).nullable();
+const projectRefSchema = z.object({ organization: ownerProjectSchema.nullish(), user: ownerProjectSchema.nullish() });
+
+/** One positive GraphQL `Int` path segment; zero, sign, decimals, and overflow have no Project. */
+function projectNumber(segment: string | undefined): number | undefined {
+  if (segment === undefined || !/^\d+$/u.test(segment)) return undefined;
+  const number = Number(segment);
+  return number >= 1 && number <= MAX_GRAPHQL_INT ? number : undefined;
+}
+
+/**
+ * Interpret the reference the operator pasted, locally, and never fetch it. Only the canonical browser
+ * grammar is accepted: HTTPS on `github.com`, no credential in the authority, no non-default port, and
+ * `/orgs/<owner>/projects/<number>` or `/users/<owner>/projects/<number>` with an optional view segment.
+ * Query strings and fragments are browser filtering rather than board identity, so they are ignored. The
+ * rejected value is never echoed: a pasted URL can carry a credential in its authority.
+ */
+function parseProjectUrl(value: string): ProjectReference {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new BacklogConfigurationError(projectUrlGuidance);
+  }
+  const path = projectPathPattern.exec(url.pathname);
+  const owner = path?.[2] ?? "";
+  const number = projectNumber(path?.[3]);
+  const view = path?.[4];
+  if (url.protocol !== "https:" || url.hostname !== "github.com" || url.username.length > 0 || url.password.length > 0 || url.port.length > 0
+    || path === null || !ownerPattern.test(owner) || number === undefined || (view !== undefined && projectNumber(view) === undefined)) {
+    throw new BacklogConfigurationError(projectUrlGuidance);
+  }
+  return { kind: path[1] === "orgs" ? "organization" : "user", owner, number };
+}
+
+/** One read-only lookup of the node id behind a reference, through the fixed GraphQL endpoint. */
+async function resolveProjectId(transport: GitHubTransport, reference: ProjectReference): Promise<string> {
+  const data = await graphqlRequest(
+    transport,
+    projectRefSchema,
+    "resolving backlog Project URL",
+    `query ResolveProject($login: String!, $number: Int!) { ${reference.kind}(login: $login) { projectV2(number: $number) { id } } }`,
+    { login: reference.owner, number: reference.number },
+  );
+  const owner = reference.kind === "organization" ? data.organization : data.user;
+  const project = owner === null || owner === undefined ? null : owner.projectV2;
+  if (project === null) {
+    throw new BacklogConfigurationError(`Backlog Project ${reference.number} of ${reference.kind} ${reference.owner} is inaccessible: it is not a Project V2 the backlog token can read. Projects v2 requires a classic PAT with the \`project\` scope.`);
+  }
+  return project.id;
+}
+
+/**
+ * Build the configured backlog transport: every local setting is validated before the single read-only
+ * Project URL lookup, and the result carries the resolved node id as its immutable identity. A missing
+ * setting names its variable, the token is never echoed, and a rejected URL is never echoed.
+ */
+export async function createGitHubBacklog(env: NodeJS.ProcessEnv, fetchImpl: Fetch = globalThis.fetch): Promise<GitHubBacklog> {
   const repository = env.FORGE_BACKLOG_REPOSITORY?.trim() ?? "";
   if (repository.length === 0) {
     throw new BacklogConfigurationError("FORGE_BACKLOG_REPOSITORY must be the private backlog `owner/repository`. See .env.example.");
@@ -537,13 +622,15 @@ export function createGitHubBacklog(env: NodeJS.ProcessEnv, fetchImpl: Fetch = g
   if (!repositoryPattern.test(repository)) {
     throw new BacklogConfigurationError(`FORGE_BACKLOG_REPOSITORY must be \`owner/repository\`; got ${repository}.`);
   }
-  const projectId = env.FORGE_BACKLOG_PROJECT_ID?.trim() ?? "";
-  if (projectId.length === 0) {
-    throw new BacklogConfigurationError("FORGE_BACKLOG_PROJECT_ID must be the private Project V2 node id. See .env.example.");
+  const projectUrl = env.FORGE_BACKLOG_PROJECT_URL?.trim() ?? "";
+  if (projectUrl.length === 0) {
+    throw new BacklogConfigurationError(projectUrlGuidance);
   }
   const token = env.FORGE_BACKLOG_TOKEN?.trim() ?? "";
   if (token.length === 0) {
     throw new BacklogConfigurationError("FORGE_BACKLOG_TOKEN must be a classic PAT with the `repo` and `project` scopes. See .env.example.");
   }
+  const reference = parseProjectUrl(projectUrl);
+  const projectId = await resolveProjectId({ fetchImpl, token, secrets: [token] }, reference);
   return new GitHubBacklogClient(repository, projectId, token, fetchImpl);
 }

@@ -11,7 +11,7 @@ import { SubmissionLockError } from "./submission-state.js";
 import { FakeBacklog } from "./test-backlog.js";
 
 // Behaviour of the local submission command (plan §3 D3, AC1/AC2/AC11): batch semantics, the exact
-// per-ticket effect, staging-only mutation, keyed comment idempotency, and the sidecar that records it.
+// per-ticket effect, Backlog-only mutation, keyed comment idempotency, and the sidecar that records it.
 
 const PROVIDER: GitProvider = createGitProviderRegistry({ GITHUB_TOKEN: "gh_secret_abc" }).resolve("git@github.com:acme/api.git");
 
@@ -45,7 +45,7 @@ async function sidecar(directory: string, stem: string): Promise<Record<string, 
   return JSON.parse(await readFile(join(directory, `${stem}.submission.json`), "utf8")) as Record<string, unknown>;
 }
 
-function submission(input: Readonly<{ paths: readonly string[]; cwd: string; backlog: FakeBacklog; dryRun?: boolean; repositoryOverride?: string; projectIdOverride?: string; now?: () => Date }>) {
+function submission(input: Readonly<{ paths: readonly string[]; cwd: string; backlog: FakeBacklog; dryRun?: boolean; repositoryOverride?: string; now?: () => Date }>) {
   return submitTickets({
     paths: input.paths,
     backlog: input.backlog,
@@ -53,13 +53,12 @@ function submission(input: Readonly<{ paths: readonly string[]; cwd: string; bac
     cwd: input.cwd,
     dryRun: input.dryRun ?? false,
     ...(input.repositoryOverride === undefined ? {} : { repositoryOverride: input.repositoryOverride }),
-    ...(input.projectIdOverride === undefined ? {} : { projectIdOverride: input.projectIdOverride }),
     json: false,
     ...(input.now === undefined ? {} : { now: input.now }),
   });
 }
 
-test("a directory batch creates one issue per ticket in sorted order with verbatim bodies and Staging then Ready", async () => {
+test("a directory batch creates one issue per ticket in sorted order with verbatim bodies and Backlog then Ready", async () => {
   const directory = await ticketDirectory({
     "b-second.md": ticketSource("T-2", "Second ticket", { dependsOn: ["T-1"] }),
     "a-first.md": ticketSource("T-1", "First ticket"),
@@ -69,15 +68,15 @@ test("a directory batch creates one issue per ticket in sorted order with verbat
   const result = await submission({ paths: [directory], cwd: directory, backlog, now: () => new Date("2026-10-16T10:00:00.000Z") });
 
   assert.equal(result.ok, true);
-  assert.deepEqual(result.entries.map((entry) => [entry.ticketId, entry.outcome, entry.status]), [["T-1", "created", "Ready for development"], ["T-2", "created", "Ready for development"]]);
+  assert.deepEqual(result.entries.map((entry) => [entry.ticketId, entry.outcome, entry.status]), [["T-1", "created", "Ready"], ["T-2", "created", "Ready"]]);
   assert.deepEqual(result.totals, { created: 2, updated: 0, unchanged: 0, failed: 0 });
 
   const created = backlog.issues;
   assert.deepEqual(created.map((issue) => issue.title), ["First ticket", "Second ticket"]);
   assert.equal(created[0]!.body, ticketSource("T-1", "First ticket"), "the issue body is the source byte for byte");
   assert.deepEqual(backlog.writeOperations().slice(0, 3), ["createIssue", "setProjectStatus", "setProjectStatus"]);
-  assert.deepEqual(backlog.statusWrites, ["opt-Staging", "opt-Ready for development", "opt-Staging", "opt-Ready for development"]);
-  assert.deepEqual([...new Set(backlog.statusWrites)].sort(), ["opt-Ready for development", "opt-Staging"], "submission never writes a status after Ready");
+  assert.deepEqual(backlog.statusWrites, ["opt-Backlog", "opt-Ready", "opt-Backlog", "opt-Ready"]);
+  assert.deepEqual([...new Set(backlog.statusWrites)].sort(), ["opt-Backlog", "opt-Ready"], "submission never writes a status after Ready");
   assert.ok(!backlog.reads.includes("listProjectItems"), "submission resolves one Project item per issue, never the runner's bulk walk");
 
   const record = await sidecar(directory, "a-first");
@@ -105,12 +104,12 @@ test("a rerun with unchanged content performs zero writes and posts no comment",
   assert.equal(backlog.commentsFor(100).length, commentsAfterFirst);
 });
 
-test("a changed source returned to Staging updates the body with the read revision and posts exactly one new keyed comment", async () => {
+test("a changed source returned to Backlog updates the body with the read revision and posts exactly one new keyed comment", async () => {
   const directory = await ticketDirectory({ "first.md": ticketSource("T-1", "First ticket") });
   const backlog = new FakeBacklog();
   await submission({ paths: [directory], cwd: directory, backlog });
   const firstMarker = String(((await sidecar(directory, "first")).lastComment as Record<string, unknown>).marker);
-  await backlog.setProjectStatus(backlog.issues[0]!.nodeId, "opt-Staging");
+  await backlog.setProjectStatus(backlog.issues[0]!.nodeId, "opt-Backlog");
 
   await writeFile(join(directory, "first.md"), ticketSource("T-1", "First ticket", { body: "Requirements for T-1, revised." }), "utf8");
   const result = await submission({ paths: [directory], cwd: directory, backlog });
@@ -123,7 +122,7 @@ test("a changed source returned to Staging updates the body with the read revisi
   assert.equal(comments.length, 2, "one comment per distinct content hash");
   assert.ok(comments[0]!.body.includes(firstMarker));
   assert.ok(comments[1]!.body.includes("<!-- factory:comment:T-1:"), "the new comment carries the operation-key marker");
-  assert.deepEqual(backlog.statusWrites.slice(3), ["opt-Staging", "opt-Ready for development"], "a resubmission re-stages, then returns the ticket to Ready");
+  assert.deepEqual(backlog.statusWrites.slice(3), ["opt-Backlog", "opt-Ready"], "a resubmission returns to Backlog, then returns the ticket to Ready");
 });
 
 test("a rerun whose content is unchanged after a successful update posts no comment", async () => {
@@ -141,7 +140,7 @@ test("an existing comment with the same operation-key marker is never duplicated
   const source = ticketSource("T-1", "First ticket");
   const marker = `<!-- factory:comment:T-1:${createHash("sha256").update(source).digest("hex").slice(0, 12)} -->`;
   const backlog = new FakeBacklog();
-  backlog.seedIssue(source, { number: 100, status: "Staging" });
+  backlog.seedIssue(source, { number: 100, status: "Backlog" });
   backlog.seedComment(100, `${marker}\n- Ticket: T-1`, 700);
   await writeFile(join(directory, "first.md"), source, "utf8");
 
@@ -194,7 +193,7 @@ test("a Project the token cannot update is a configuration failure with zero wri
 
 test("a Project without the configured Status options is a configuration failure", async () => {
   const directory = await ticketDirectory({ "first.md": ticketSource("T-1", "First ticket") });
-  const missingOptions = new FakeBacklog({ projectStatuses: ["Staging"] });
+  const missingOptions = new FakeBacklog({ projectStatuses: ["Backlog"] });
   const noField = new FakeBacklog({ projectStatusField: false });
 
   await assert.rejects(() => submission({ paths: [directory], cwd: directory, backlog: missingOptions }), /missing required options/);
@@ -290,7 +289,7 @@ test("a dry run reports the exact plan with zero write calls", async () => {
     "changed.md": ticketSource("T-1", "First ticket", { body: "Changed requirements." }),
   });
   const backlog = new FakeBacklog();
-  backlog.seedIssue(ticketSource("T-1", "First ticket"), { number: 70, status: "Staging" });
+  backlog.seedIssue(ticketSource("T-1", "First ticket"), { number: 70, status: "Backlog" });
 
   const result = await submission({ paths: [directory], cwd: directory, backlog, dryRun: true });
 
@@ -327,7 +326,7 @@ test("the batch lock is released after a successful run and after a ticket failu
   }
 });
 
-test("an issue outside Staging refuses mutation and reports the ticket failure with zero writes", async () => {
+test("an issue outside Backlog refuses mutation and reports the ticket failure with zero writes", async () => {
   const directory = await ticketDirectory({ "first.md": ticketSource("T-1", "First ticket", { body: "Revised after the claim." }) });
   const backlog = new FakeBacklog();
   backlog.seedIssue(ticketSource("T-1", "First ticket"), { number: 71, status: "In progress" });
@@ -336,14 +335,14 @@ test("an issue outside Staging refuses mutation and reports the ticket failure w
 
   assert.equal(result.ok, false);
   assert.equal(result.entries[0]!.outcome, "failed");
-  assert.match(result.entries[0]!.reason ?? "", /only `Staging` accepts a resubmission/);
+  assert.match(result.entries[0]!.reason ?? "", /only `Backlog` accepts a resubmission/);
   assert.deepEqual(backlog.writes, [], "a claimed ticket is never mutated and its Project item is never moved");
 });
 
 test("an issue edited externally mid-flight is reported as a conflict and never overwritten blindly", async () => {
   const directory = await ticketDirectory({ "first.md": ticketSource("T-1", "First ticket", { body: "Local revision." }) });
   const backlog = new FakeBacklog({ externalEditBeforeUpdate: (issue) => { issue.revision = "externally-bumped"; } });
-  backlog.seedIssue(ticketSource("T-1", "First ticket"), { number: 72, status: "Staging" });
+  backlog.seedIssue(ticketSource("T-1", "First ticket"), { number: 72, status: "Backlog" });
 
   const result = await submission({ paths: [directory], cwd: directory, backlog });
 
@@ -371,7 +370,7 @@ test("a comment failure redacts the token and keeps the accepted work recoverabl
   assert.equal(recovered.ok, true);
   assert.equal(backlog.issues.length, 1);
   assert.deepEqual(backlog.writeOperations().slice(writesBeforeRetry), ["createComment"]);
-  assert.equal(backlog.statusOf(backlog.issues[0]!.nodeId), "Ready for development");
+  assert.equal(backlog.statusOf(backlog.issues[0]!.nodeId), "Ready");
   assert.equal((await sidecar(directory, "first")).issueNumber, 100);
 
   const writesAfterRecovery = backlog.writes.length;
@@ -438,7 +437,7 @@ test("an issue created before attachment failure is recovered by exact ticket id
   assert.equal(backlog.issues.length, 1);
   assert.equal(backlog.issues[0]!.body, source);
   assert.deepEqual(backlog.writeOperations(), ["createIssue", "setProjectStatus", "setProjectStatus", "createComment"]);
-  assert.equal(backlog.statusOf(backlog.issues[0]!.nodeId), "Ready for development");
+  assert.equal(backlog.statusOf(backlog.issues[0]!.nodeId), "Ready");
   assert.equal((await sidecar(directory, "first")).issueNumber, 100);
 
   const writesAfterRecovery = backlog.writes.length;
@@ -458,7 +457,7 @@ test("a missing status on an attached exact ticket is repaired without rewriting
   assert.equal(result.entries[0]!.issueNumber, 73);
   assert.equal(backlog.issues.length, 1);
   assert.deepEqual(backlog.writeOperations(), ["setProjectStatus", "setProjectStatus", "createComment"]);
-  assert.equal(backlog.statusOf(backlog.issues[0]!.nodeId), "Ready for development");
+  assert.equal(backlog.statusOf(backlog.issues[0]!.nodeId), "Ready");
 });
 
 test("a comment already posted before sidecar loss is recovered without demoting a claimed ticket", async () => {
@@ -494,11 +493,11 @@ test("a changed submission whose comment failed after Ready repairs the stale si
   const oldRecord = await sidecar(directory, "first");
   const source = ticketSource("T-1", "First ticket", { body: "Revised requirements." });
   await writeFile(join(directory, "first.md"), source, "utf8");
-  await backlog.setProjectStatus(backlog.issues[0]!.nodeId, "opt-Staging");
+  await backlog.setProjectStatus(backlog.issues[0]!.nodeId, "opt-Backlog");
   behaviour.commentFailure = "interrupted";
   assert.equal((await submission({ paths: [directory], cwd: directory, backlog })).entries[0]!.outcome, "failed");
   assert.deepEqual(await sidecar(directory, "first"), oldRecord);
-  assert.equal(backlog.statusOf(backlog.issues[0]!.nodeId), "Ready for development");
+  assert.equal(backlog.statusOf(backlog.issues[0]!.nodeId), "Ready");
   delete behaviour.commentFailure;
   const writesBeforeRecovery = backlog.writes.length;
 
@@ -521,7 +520,7 @@ test("a sidecar for a foreign repository or Project fails before looking up or m
     const foreignRecord = { ...record, [field]: field === "backlogRepository" ? "other/backlog" : "PVT_other" };
     await writeFile(join(directory, "first.submission.json"), JSON.stringify(foreignRecord), "utf8");
     const destination = new FakeBacklog();
-    destination.seedIssue(source, { number: 100, status: "Staging" });
+    destination.seedIssue(source, { number: 100, status: "Backlog" });
     const originalWrites = original.writes.length;
 
     const result = await submission({ paths: [directory], cwd: directory, backlog: destination });
@@ -572,7 +571,7 @@ test("per-ticket target lookup errors fail that entry while later tickets can st
     "b-second.md": ticketSource("T-2", "Second ticket"),
   });
   const backlog = new BrokenTargetBacklog();
-  backlog.seedIssue(ticketSource("T-1", "First ticket"), { number: 73, status: "Staging" });
+  backlog.seedIssue(ticketSource("T-1", "First ticket"), { number: 73, status: "Backlog" });
 
   const result = await submission({ paths: [directory], cwd: directory, backlog });
 

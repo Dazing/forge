@@ -11,19 +11,19 @@ import { renderJsonReport, renderTextReport, SubmissionGateError, SubmissionLock
 
 const USAGE = `Usage: npm run tickets -- submit <path ...> [options]
 
-Publish locally authored Markdown tickets into the private GitHub issue backlog: one issue per ticket ID, added to the configured private Project as Staging, then Ready for development. Repeat the command to update tickets whose content changed; unchanged tickets are left untouched.
+Publish locally authored Markdown tickets into the private GitHub issue backlog: one issue per ticket ID, added to the configured private Project as Backlog, then Ready. Repeat the command to update tickets whose content changed; unchanged tickets are left untouched.
 
 Options:
   <path ...>            Ticket files, directories (top-level *.md, sorted), and glob patterns (*, ?, **)
   --repository <owner/repo>  Backlog repository; overrides FORGE_BACKLOG_REPOSITORY and every ticket's target repository
-  --project <node-id>   Backlog Project V2 node id; overrides FORGE_BACKLOG_PROJECT_ID
+  --project <url>       Backlog Project V2 URL; overrides FORGE_BACKLOG_PROJECT_URL
   --dry-run             Run every gate and print the planned effect per ticket with zero remote writes
   --json                Print one JSON object (entries, totals, exit status) instead of the text report
   -h, --help            Show this help without reading .env, credentials, logging, or the network
 
 Environment (.env at the repository root, independent from the server's queue):
   FORGE_BACKLOG_REPOSITORY  Private backlog \`owner/repository\`
-  FORGE_BACKLOG_PROJECT_ID  Private Project V2 node id with the six Status options
+  FORGE_BACKLOG_PROJECT_URL  Private Project V2 URL, for example https://github.com/orgs/<owner>/projects/<number>; a board view URL (…/views/<number>) is accepted. This setting replaces the removed FORGE_BACKLOG_PROJECT_ID node-id setting.
   FORGE_BACKLOG_TOKEN       Classic PAT: \`repo\` scope for private issues, \`project\` scope for the Project
   GITHUB_TOKEN              Optional target credential; the GitHub provider validates each ticket's repository URL
 
@@ -41,7 +41,7 @@ export class TicketsUsageError extends Error {
 export type TicketsOptions = Readonly<{
   paths: readonly string[];
   repository?: string;
-  projectId?: string;
+  projectUrl?: string;
   dryRun: boolean;
   json: boolean;
 }>;
@@ -63,7 +63,7 @@ export function parseTicketsArgs(argv: readonly string[]): TicketsOptions | unde
 
   const paths: string[] = [];
   let repository: string | undefined;
-  let projectId: string | undefined;
+  let projectUrl: string | undefined;
   let dryRun = false;
   let json = false;
   for (let index = 0; index < rest.length; index++) {
@@ -86,8 +86,8 @@ export function parseTicketsArgs(argv: readonly string[]): TicketsOptions | unde
         if (!/^[^/\s]+\/[^/\s]+$/.test(value)) throw new TicketsUsageError(`--repository must be \`owner/repository\`; got ${value}.`);
         repository = value;
       } else {
-        if (projectId !== undefined) throw new TicketsUsageError("--project may be supplied only once.");
-        projectId = value;
+        if (projectUrl !== undefined) throw new TicketsUsageError("--project may be supplied only once.");
+        projectUrl = value;
       }
       continue;
     }
@@ -99,7 +99,7 @@ export function parseTicketsArgs(argv: readonly string[]): TicketsOptions | unde
   return {
     paths,
     ...(repository === undefined ? {} : { repository }),
-    ...(projectId === undefined ? {} : { projectId }),
+    ...(projectUrl === undefined ? {} : { projectUrl }),
     dryRun,
     json,
   };
@@ -111,7 +111,7 @@ export type TicketsRuntime = Readonly<{
   env: NodeJS.ProcessEnv;
   cwd?: string;
   loadEnvironment?: (path: string) => void;
-  createBacklog?: (env: NodeJS.ProcessEnv) => GitHubBacklog;
+  createBacklog?: (env: NodeJS.ProcessEnv) => Promise<GitHubBacklog>;
   createProvider?: (env: NodeJS.ProcessEnv) => GitProvider;
   now?: () => Date;
   log?: (line: string) => void;
@@ -159,15 +159,16 @@ async function submit(runtime: TicketsRuntime, options: TicketsOptions, env: Nod
   const applyOverrides = (source: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({
     ...source,
     ...(options.repository === undefined ? {} : { FORGE_BACKLOG_REPOSITORY: options.repository }),
-    ...(options.projectId === undefined ? {} : { FORGE_BACKLOG_PROJECT_ID: options.projectId }),
+    ...(options.projectUrl === undefined ? {} : { FORGE_BACKLOG_PROJECT_URL: options.projectUrl }),
   });
   const backlogEnv = applyOverrides(env);
 
-  let backlog: GitHubBacklog;
   let provider: GitProvider;
+  let backlog: GitHubBacklog;
   try {
-    backlog = (runtime.createBacklog ?? createGitHubBacklog)(backlogEnv);
+    // The provider check is purely local, so a broken target credential fails before the Project URL lookup contacts GitHub.
     provider = (runtime.createProvider ?? githubProviderFromEnv)(backlogEnv);
+    backlog = await (runtime.createBacklog ?? createGitHubBacklog)(backlogEnv);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     return refused(2, redacted(reason, backlogEnv));
@@ -180,7 +181,6 @@ async function submit(runtime: TicketsRuntime, options: TicketsOptions, env: Nod
       provider,
       cwd,
       ...(options.repository === undefined ? {} : { repositoryOverride: options.repository }),
-      ...(options.projectId === undefined ? {} : { projectIdOverride: options.projectId }),
       dryRun: options.dryRun,
       json: options.json,
       ...(runtime.now === undefined ? {} : { now: runtime.now }),

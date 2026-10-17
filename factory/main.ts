@@ -24,7 +24,9 @@ async function run(): Promise<void> {
   const factoryRoot = resolve(import.meta.dirname, "..");
   process.loadEnvFile(resolve(factoryRoot, ".env"));
   const targetProviders = createGitProviderRegistry(process.env);
-  const backlog = createGitHubBacklog(process.env);
+  // Constructing the backlog resolves the configured Project URL into its node id through one read-only
+  // GitHub request, so an unusable destination stops the run before any invocation directory or sandbox work.
+  const backlog = await createGitHubBacklog(process.env);
   const providers = { ...targetProviders, secrets: [...targetProviders.secrets, ...backlog.secrets] };
   const ledger = PublicationLedger.open(factoryRoot);
   const workflow = new BacklogWorkflow(backlog, ledger, (text) => redactSecrets(providers.secrets, text), undefined, createIssueAuthorizationReader({ backlog, providers }));

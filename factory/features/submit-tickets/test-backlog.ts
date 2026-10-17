@@ -4,7 +4,7 @@ import { BacklogConfigurationError, BacklogConflictError, BacklogHttpError, type
 // zero-write guarantees, status transitions, and comment idempotency without network or credentials.
 
 /** The six configured options the fake Project is seeded with, in board order. */
-export const FAKE_STATUSES = ["Staging", "Ready for development", "In progress", "In review", "Done", "Blocked"];
+export const FAKE_STATUSES = ["Backlog", "Ready", "In progress", "In review", "Done", "Blocked"];
 
 /** A stored issue, mutable so a fixture can simulate the author editing it between a read and a write. */
 export type FakeIssue = { -readonly [K in keyof BacklogIssue]: BacklogIssue[K] };

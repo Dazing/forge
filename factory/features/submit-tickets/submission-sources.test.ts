@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -50,6 +50,29 @@ test("a directory expands to its top-level Markdown tickets in sorted order", as
   const expanded = await expandTicketPaths([directory], directory);
 
   assert.deepEqual(expanded.map((path) => path.slice(directory.length + 1)), ["a.md", "b.md"]);
+});
+
+test("a directory with only nested tickets is refused without discarding other inputs", async (t) => {
+  const directory = await scratch({ "issues/a.md": source("T-1"), "other/b.md": source("T-2") });
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  for (const paths of [[directory], [join(directory, "other/b.md"), directory]]) {
+    await assert.rejects(() => expandTicketPaths(paths, directory), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.ok(error.message.includes(directory));
+      assert.match(error.message, /no top-level Markdown tickets/);
+      assert.match(error.message, /not recursive/);
+      return true;
+    });
+  }
+  assert.deepEqual(await expandTicketPaths([join(directory, "issues")], directory), [join(directory, "issues/a.md")]);
+  assert.deepEqual(await expandTicketPaths([join(directory, "**/*.md")], directory), [join(directory, "issues/a.md"), join(directory, "other/b.md")]);
+});
+
+test("an empty directory is refused instead of returning an empty batch", async (t) => {
+  const directory = await scratch({});
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await assert.rejects(() => expandTicketPaths([directory], directory), /no top-level Markdown tickets/);
 });
 
 test("a glob expands, duplicates collapse, and an unmatched pattern fails", async () => {

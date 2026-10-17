@@ -94,10 +94,10 @@ async function discover(issues: readonly BacklogIssue[], items: readonly Backlog
 test("every open issue is parsed as a ticket in issue-number order with its board status", async () => {
   const discovery = await discover(
     [ticketIssue(3), { ...ticketIssue(2), state: "closed", stateReason: "completed" }, ticketIssue(1)],
-    [entry(1, "Ready for development"), entry(3, "In review"), entry(2, "Done")],
+    [entry(1, "Ready"), entry(3, "In review"), entry(2, "Done")],
   );
 
-  assert.deepEqual(discovery.tickets.map((ticket) => [ticket.ticket.id, ticket.status]), [["ticket-1", "Ready for development"], ["ticket-3", "In review"]]);
+  assert.deepEqual(discovery.tickets.map((ticket) => [ticket.ticket.id, ticket.status]), [["ticket-1", "Ready"], ["ticket-3", "In review"]]);
   assert.equal(discovery.tickets[0]!.ticket.repository, "git@github.com:acme/app.git");
   assert.equal(discovery.tickets[0]!.snapshot.identity.number, 1);
   assert.equal(discovery.tickets[0]!.snapshot.identity.nodeId, "I_NODE_1");
@@ -107,7 +107,7 @@ test("every open issue is parsed as a ticket in issue-number order with its boar
 test("an issue body that is not a ticket is reported by issue identity and never scheduled", async () => {
   const discovery = await discover(
     [{ ...ticketIssue(4), body: "Just a bug report, no front matter." }, { ...ticketIssue(3), body: "---\nrepository: git@github.com:acme/app.git\n---\n# Missing identity\n" }],
-    [entry(4, "Ready for development"), entry(3, "Ready for development")],
+    [entry(4, "Ready"), entry(3, "Ready")],
   );
 
   assert.deepEqual(discovery.tickets, []);
@@ -117,14 +117,14 @@ test("an issue body that is not a ticket is reported by issue identity and never
 });
 
 test("a target repository no configured adapter accepts is reported with the missing credential", async () => {
-  const discovery = await discover([ticketIssue(5, "ticket-ado", "git@ssh.dev.azure.com:v3/acme/project/repo")], [entry(5, "Ready for development")]);
+  const discovery = await discover([ticketIssue(5, "ticket-ado", "git@ssh.dev.azure.com:v3/acme/project/repo")], [entry(5, "Ready")]);
 
   assert.deepEqual(discovery.tickets, []);
   assert.match(discovery.failures[0]!.reason, /AZURE_DEVOPS_PAT/);
 });
 
 test("one ticket ID declared by two issues blocks both from scheduling", async () => {
-  const discovery = await discover([ticketIssue(6, "ticket-dup"), ticketIssue(9, "ticket-dup"), ticketIssue(7)], [entry(6, "Ready for development"), entry(9, "Ready for development"), entry(7, "Ready for development")]);
+  const discovery = await discover([ticketIssue(6, "ticket-dup"), ticketIssue(9, "ticket-dup"), ticketIssue(7)], [entry(6, "Ready"), entry(9, "Ready"), entry(7, "Ready")]);
 
   assert.deepEqual(discovery.duplicates, [{ ticketId: "ticket-dup", issueNumbers: [6, 9] }]);
   assert.deepEqual(discovery.tickets.map((ticket) => ticket.ticket.id), ["ticket-7"]);
@@ -138,10 +138,10 @@ test("an open issue absent from the Project is reported unboarded and never sche
   assert.deepEqual(schedulable(discovery), []);
 });
 
-test("only Ready for development and In progress issues are schedulable, and In progress marks a claim", async () => {
+test("only Ready and In progress issues are schedulable, and In progress marks a claim", async () => {
   const discovery = await discover(
     [ticketIssue(10), ticketIssue(11), ticketIssue(12), ticketIssue(13), ticketIssue(14)],
-    [entry(10, "Staging"), entry(11, "Ready for development"), entry(12, "In progress"), entry(13, "In review"), entry(14, "Blocked")],
+    [entry(10, "Backlog"), entry(11, "Ready"), entry(12, "In progress"), entry(13, "In review"), entry(14, "Blocked")],
   );
 
   assert.deepEqual(schedulable(discovery).map((ticket) => ticket.ticket.id), ["ticket-11", "ticket-12"]);

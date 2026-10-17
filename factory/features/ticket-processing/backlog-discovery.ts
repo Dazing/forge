@@ -15,7 +15,7 @@ import {
 // client used, and separates schedulable tickets from the evidence an operator must reconcile.
 
 /** The board status names that make an issue eligible for factory work. */
-const SCHEDULABLE: readonly BacklogStatusName[] = ["Ready for development", "In progress"];
+const SCHEDULABLE: readonly BacklogStatusName[] = ["Ready", "In progress"];
 
 /** One parsed issue with its board position. */
 export type BacklogTicket = Readonly<{

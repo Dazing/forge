@@ -43,6 +43,7 @@ export function createAgentRunner(logger: InvocationLogger, factoryRoot: string)
     const logPath = transcript.path;
     let runFinished = false;
     try {
+      const agent = ticketAgent(request.harness);
       const result = await sandcastleRun({
         cwd: request.cwd,
         sandbox: sandboxProvider(request.harness, factoryRoot, request.cwd, {
@@ -51,12 +52,17 @@ export function createAgentRunner(logger: InvocationLogger, factoryRoot: string)
         }),
         branchStrategy: { type: "head" as const },
         name: request.name,
-        agent: ticketAgent(request.harness),
+        agent,
         logging: { type: "file" as const, path: logPath },
         promptFile: request.promptFile,
         promptArgs: request.promptArgs,
         ...(request.maxIterations === undefined ? {} : { maxIterations: request.maxIterations }),
       });
+      const failure = agent.getFailure();
+      if (failure !== undefined) {
+        await appendFile(logPath, `Agent failure: ${failure.message}\n`);
+        throw failure;
+      }
       runFinished = true;
       const events = await channel.readEvents();
       await appendHandoffStatus(logPath, events);
